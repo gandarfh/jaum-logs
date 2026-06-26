@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.103"
 jaum-core.workspace = true
+portable-pty = "0.9.0"
