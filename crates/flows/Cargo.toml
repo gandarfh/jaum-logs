@@ -1,0 +1,11 @@
+[package]
+name = "jaum-flows"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+jaum-core.workspace = true
+jaum-adapters.workspace = true
+anyhow = "1.0.103"
+serde_json = "1.0.150"

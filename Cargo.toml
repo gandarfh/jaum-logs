@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/adapters", "crates/cli"]
+members = ["crates/core", "crates/adapters", "crates/flows", "crates/cli"]
 
 [workspace.package]
 edition = "2024"
@@ -9,3 +9,4 @@ license = "MIT"
 
 [workspace.dependencies]
 jaum-core = { path = "crates/core" }
+jaum-adapters = { path = "crates/adapters" }

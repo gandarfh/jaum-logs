@@ -104,9 +104,9 @@ embutida) · `tokio` (subprocessos) · `gray_matter` + `serde` + `serde_yaml_ng`
 ## Status de implementação
 
 - [x] Fase 1 — `store` + modelo de dados + parse/escrita de frontmatter (testes)
-- [ ] Fase 2 — adapters `git` e `gh`
-- [ ] Fase 3 — `executor` trait + impl Claude Code (oneshot, depois PTY)
-- [ ] Fase 4 — `play` (prompt, guard flags, hook, reinject)
+- [x] Fase 2 — adapters `git` e `gh`
+- [x] Fase 3 — `executor` trait + impl Claude Code (oneshot, depois PTY)
+- [x] Fase 4 — `play` (prompt, guard flags, hook PreToolUse + reinjeção via UserPromptSubmit)
 - [ ] Fase 5 — `review` (contexto cheio, report, check semântico, is_clean)
 - [ ] Fase 6 — `conflict` + `finish`
 - [ ] Fase 7 — TUI ratatui

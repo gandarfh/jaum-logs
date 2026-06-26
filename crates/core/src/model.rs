@@ -47,6 +47,61 @@ pub struct PrLink {
 pub struct Constraint {
     pub text: String,
     pub enforce: Enforce,
+    /// Regex que o PreToolUse hook usa para bloquear (`enforce: hook`). Quando
+    /// ausente, [`Constraint::hook_pattern`] deriva uma heurística do `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+}
+
+impl Constraint {
+    /// Padrão (regex estendida, usada com `grep -iE` no hook) para bloquear esta
+    /// constraint. Usa `pattern` explícito se houver; senão, deriva do `text`:
+    /// prioriza um token que pareça caminho (`src/legacy/`), e na falta usa as
+    /// palavras significativas (descartando stopwords PT) numa alternância.
+    pub fn hook_pattern(&self) -> String {
+        if let Some(p) = &self.pattern {
+            return p.clone();
+        }
+        let lower = self.text.to_lowercase();
+        // 1) token que parece caminho/arquivo (contém `/` ou `.`)
+        if let Some(path) = lower
+            .split_whitespace()
+            .find(|t| t.contains('/') || t.contains('.'))
+        {
+            return escape_regex(path.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'));
+        }
+        // 2) palavras significativas
+        const STOP: &[&str] = &[
+            "nao", "não", "em", "de", "da", "do", "a", "o", "os", "as", "no", "na",
+            "sem", "com", "e", "ou", "manter", "rodar", "tocar", "usar", "fazer",
+            "novo", "nova", "para", "pra", "que", "se",
+        ];
+        let words: Vec<String> = lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2 && !STOP.contains(w))
+            .map(escape_regex)
+            .collect();
+        if words.is_empty() {
+            // fallback: o texto inteiro escapado (nunca casa vazio)
+            return escape_regex(lower.trim());
+        }
+        words.join("|")
+    }
+}
+
+/// Escapa metacaracteres de regex estendida (ERE) para casar literalmente.
+fn escape_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(
+            c,
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Slug "owner/name" de um repositório. Alias por enquanto; vira newtype se a
