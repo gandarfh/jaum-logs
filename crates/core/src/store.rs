@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use gray_matter::Matter;
 use gray_matter::engine::YAML;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::error::JaumError;
 use crate::model::{Constraint, Enforce, Repo, Status, Task, TaskType};
@@ -110,6 +112,36 @@ impl Store {
         fs::write(&path, content)
             .with_context(|| format!("gravando task em {}", path.display()))?;
         Ok(())
+    }
+
+    // --- IO genérico de markdown+frontmatter (review reports, docs) --------
+
+    /// Grava `meta` (frontmatter YAML) + `body` num caminho arbitrário.
+    pub fn write_doc<T: Serialize>(&self, path: &Path, meta: &T, body: &str) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("criando diretório {}", parent.display()))?;
+        }
+        let yaml = serde_yaml_ng::to_string(meta).context("serializando frontmatter")?;
+        let yaml = yaml.trim_start_matches("---\n").trim_end();
+        let content = format!("---\n{yaml}\n---\n\n{}\n", body.trim());
+        fs::write(path, content).with_context(|| format!("gravando {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Lê `(frontmatter, body)` de um markdown com frontmatter YAML.
+    pub fn read_doc<T: DeserializeOwned>(&self, path: &Path) -> Result<(T, String)> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("lendo {}", path.display()))?;
+        let matter = Matter::<YAML>::new();
+        let parsed = matter
+            .parse::<T>(&content)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("parseando frontmatter de {}", path.display()))?;
+        let data = parsed.data.ok_or_else(|| JaumError::MalformedFrontmatter {
+            path: path.display().to_string(),
+        })?;
+        Ok((data, parsed.content.trim().to_string()))
     }
 
     /// Cria um stub de task `impl`/`backlog` a partir de referências de RFC.

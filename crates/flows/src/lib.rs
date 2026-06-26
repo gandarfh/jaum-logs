@@ -3,3 +3,4 @@
 //! Casca fina: orquestra, não escreve código de feature nem faz merge.
 
 pub mod play;
+pub mod review;
