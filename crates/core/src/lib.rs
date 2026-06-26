@@ -7,5 +7,5 @@ pub mod model;
 pub mod store;
 
 pub use error::JaumError;
-pub use model::{Constraint, Enforce, PrLink, Repo, Status, Task, TaskType};
+pub use model::{Constraint, Enforce, MergeState, PrLink, Repo, Status, Task, TaskType};
 pub use store::Store;

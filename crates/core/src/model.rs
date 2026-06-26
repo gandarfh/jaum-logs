@@ -53,6 +53,23 @@ pub struct Constraint {
 /// fase dos adapters (git/gh) precisar de mais semântica.
 pub type Repo = String;
 
+/// Estado de merge de um PR, **lido** do `gh` — nunca espelhado no markdown.
+/// Base do `finish`, que atualiza o status da task a partir daqui sem nunca
+/// executar o merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeState {
+    /// `pr == 0`: ainda não criado.
+    NotCreated,
+    /// PR aberto, ainda não mergeado.
+    Open,
+    /// Mergeado.
+    Merged,
+    /// Fechado sem merge.
+    Closed,
+    /// Estado não reconhecido devolvido pelo `gh`.
+    Unknown,
+}
+
 /// Uma task do `.backlog/`. Os campos sem `skip` são exatamente o frontmatter
 /// YAML; `body` e `path` são preenchidos pelo store após o parse e não são
 /// serializados de volta.

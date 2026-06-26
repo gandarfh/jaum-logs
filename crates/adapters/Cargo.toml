@@ -1,0 +1,9 @@
+[package]
+name = "jaum-adapters"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.103"
+jaum-core.workspace = true
