@@ -2,5 +2,7 @@
 //! o fluxo (play, e nas próximas fases review/ingest/docs/conflict/finish).
 //! Casca fina: orquestra, não escreve código de feature nem faz merge.
 
+pub mod conflict;
+pub mod finish;
 pub mod play;
 pub mod review;
