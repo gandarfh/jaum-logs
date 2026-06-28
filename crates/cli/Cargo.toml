@@ -10,4 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
+crossterm = "0.29.0"
+jaum-adapters.workspace = true
 jaum-core.workspace = true
+jaum-flows = { version = "0.1.0", path = "../flows" }
+ratatui = "0.30.2"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+tui-term = "0.3.4"
+vt100 = "0.16.2"
