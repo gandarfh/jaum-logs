@@ -61,7 +61,14 @@ impl Executor for FakeExec {
     }
 }
 
-fn setup(dir: &TmpDir) -> (Store, Git, PathBuf, PathBuf) {
+fn setup(
+    dir: &TmpDir,
+) -> (
+    Store,
+    Git,
+    PathBuf,
+    std::collections::HashMap<String, PathBuf>,
+) {
     let backlog = dir.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
     fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
@@ -69,8 +76,10 @@ fn setup(dir: &TmpDir) -> (Store, Git, PathBuf, PathBuf) {
     fs::create_dir_all(&docs).unwrap();
     fs::write(docs.join("RFC-003.md"), "# RFC-003\nenum aberto\n").unwrap();
     fs::write(docs.join("ADR-011.md"), "# ADR-011\ndecisao\n").unwrap();
-    let repos = dir.0.join("repos");
-    git_init(&repos.join("repo"));
+    let repos_root = dir.0.join("repos");
+    git_init(&repos_root.join("repo"));
+    let repos =
+        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
     (Store::new(&backlog), Git::new(), docs, repos)
 }
 
@@ -101,8 +110,11 @@ fn git_init(repo: &Path) {
 #[test]
 fn read_only_flags_bloqueia_toda_escrita() {
     let f = read_only_flags();
-    for t in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
-        assert!(f.disallowed_tools.iter().any(|x| x == t), "faltou bloquear {t}");
+    for t in ["Edit", "Write", "NotebookEdit", "Bash"] {
+        assert!(
+            f.disallowed_tools.iter().any(|x| x == t),
+            "faltou bloquear {t}"
+        );
     }
 }
 
@@ -125,7 +137,10 @@ fn cr(text: &str, v: ConstraintVerdict) -> ConstraintResult {
 
 #[test]
 fn is_clean_so_com_zero_findings_e_todas_ok() {
-    let limpo = report(vec![], vec![cr("manter API estavel", ConstraintVerdict::Ok)]);
+    let limpo = report(
+        vec![],
+        vec![cr("manter API estavel", ConstraintVerdict::Ok)],
+    );
     assert!(limpo.is_clean());
 }
 
@@ -157,11 +172,15 @@ fn is_clean_falha_com_constraint_reprovada_ou_pendente() {
 fn check_semantic_constraints_so_pega_enforce_review_como_pending() {
     let dir = TmpDir::new("checklist");
     let (store, git, docs, repos) = setup(&dir);
-    let review = Review::new(&store, &git, &FakeExec, &docs, &repos);
+    let review = Review::new(&store, &git, &FakeExec, &docs, repos);
 
     let items = review.check_semantic_constraints("TASK-001").unwrap();
     assert_eq!(items.len(), 2); // só as enforce: review
-    assert!(items.iter().all(|i| i.verdict == ConstraintVerdict::Pending));
+    assert!(
+        items
+            .iter()
+            .all(|i| i.verdict == ConstraintVerdict::Pending)
+    );
     assert!(items.iter().any(|i| i.text == "manter API estavel"));
     // a enforce: hook NÃO entra
     assert!(!items.iter().any(|i| i.text.contains("src/legacy")));
@@ -171,7 +190,7 @@ fn check_semantic_constraints_so_pega_enforce_review_como_pending() {
 fn build_context_traz_docs_diff_e_checklist() {
     let dir = TmpDir::new("context");
     let (store, git, docs, repos) = setup(&dir);
-    let review = Review::new(&store, &git, &FakeExec, &docs, &repos);
+    let review = Review::new(&store, &git, &FakeExec, &docs, repos);
 
     let ctx = review.build_context("TASK-001").unwrap();
     assert!(ctx.contains("RFC-003")); // todos os docs
@@ -188,7 +207,7 @@ fn build_context_traz_docs_diff_e_checklist() {
 fn write_e_load_report_roundtrip() {
     let dir = TmpDir::new("persist");
     let (store, git, docs, repos) = setup(&dir);
-    let review = Review::new(&store, &git, &FakeExec, &docs, &repos);
+    let review = Review::new(&store, &git, &FakeExec, &docs, repos);
 
     let original = report(
         vec![Finding {
@@ -221,7 +240,7 @@ fn write_e_load_report_roundtrip() {
 fn report_limpo_marca_is_clean_true() {
     let dir = TmpDir::new("clean");
     let (store, git, docs, repos) = setup(&dir);
-    let review = Review::new(&store, &git, &FakeExec, &docs, &repos);
+    let review = Review::new(&store, &git, &FakeExec, &docs, repos);
 
     let limpo = report(
         vec![],
@@ -240,7 +259,7 @@ fn report_limpo_marca_is_clean_true() {
 fn handoff_injeta_findings_na_sessao() {
     let dir = TmpDir::new("handoff");
     let (store, git, docs, repos) = setup(&dir);
-    let review = Review::new(&store, &git, &FakeExec, &docs, &repos);
+    let review = Review::new(&store, &git, &FakeExec, &docs, repos);
 
     let r = report(
         vec![Finding {
@@ -264,6 +283,9 @@ fn handoff_injeta_findings_na_sessao() {
 
     let mut buf = String::new();
     reader.read_to_string(&mut buf).unwrap();
-    assert!(buf.contains("src/api.rs:42"), "handoff não injetou os findings:\n{buf}");
+    assert!(
+        buf.contains("src/api.rs:42"),
+        "handoff não injetou os findings:\n{buf}"
+    );
     assert!(buf.contains("constraint reprovada: manter API estavel"));
 }

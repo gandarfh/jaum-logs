@@ -10,6 +10,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use jaum_adapters::{ExecFlags, Executor, Git, Session};
 use jaum_core::{Enforce, Status, Store, Task};
@@ -58,7 +60,9 @@ pub fn build_prompt(task: &Task) -> String {
 
     p.push_str("## Regras desta sessão\n");
     p.push_str("- Trabalhe só nesta task. Escopo extra: me avise para registrar como deferred (não amplie aqui).\n");
-    p.push_str("- Abra PR ao final. NUNCA faça merge — o merge é comando meu, fora desta ferramenta.\n");
+    p.push_str(
+        "- Abra PR ao final. NUNCA faça merge — o merge é comando meu, fora desta ferramenta.\n",
+    );
     p
 }
 
@@ -154,7 +158,8 @@ pub struct Play<'a, E: Executor> {
     git: &'a Git,
     executor: &'a E,
     work_dir: PathBuf,
-    repos_root: PathBuf,
+    /// Mapeamento explícito slug "owner/name" -> caminho local do repo.
+    repos: HashMap<String, PathBuf>,
 }
 
 /// Sessão de play viva: a sessão do executor + as worktrees criadas.
@@ -171,21 +176,23 @@ impl<'a, E: Executor> Play<'a, E> {
         git: &'a Git,
         executor: &'a E,
         work_dir: impl Into<PathBuf>,
-        repos_root: impl Into<PathBuf>,
+        repos: HashMap<String, PathBuf>,
     ) -> Self {
         Self {
             store,
             git,
             executor,
             work_dir: work_dir.into(),
-            repos_root: repos_root.into(),
+            repos,
         }
     }
 
-    /// Mapeia o slug "owner/name" para o caminho local do repo.
-    fn repo_path(&self, repo: &str) -> PathBuf {
-        let name = repo.rsplit('/').next().unwrap_or(repo);
-        self.repos_root.join(name)
+    /// Resolve o slug "owner/name" para o caminho local mapeado no projeto.
+    fn repo_path(&self, repo: &str) -> Result<PathBuf> {
+        self.repos
+            .get(repo)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("repo `{repo}` não está mapeado no projeto"))
     }
 
     /// Gera e grava os scripts dos hooks + o settings.json em `work_dir/<id>/`.
@@ -225,7 +232,7 @@ impl<'a, E: Executor> Play<'a, E> {
 
         let mut worktrees = Vec::new();
         for link in &task.prs {
-            let repo_path = self.repo_path(&link.repo);
+            let repo_path = self.repo_path(&link.repo)?;
             self.git.branch_create(&repo_path, &link.branch)?;
             let wt = self.git.worktree_add(&repo_path, &link.branch)?;
             worktrees.push((link.repo.clone(), wt));
@@ -261,7 +268,7 @@ impl<'a, E: Executor> Play<'a, E> {
     pub fn stop(&self, ps: &mut PlaySession) -> Result<()> {
         let _ = ps.session.kill();
         for (repo, _wt) in &ps.worktrees {
-            let repo_path = self.repo_path(repo);
+            let repo_path = self.repo_path(repo)?;
             let task = self.store.get(&ps.id)?;
             if let Some(link) = task.prs.iter().find(|p| &p.repo == repo) {
                 self.git.worktree_remove(&repo_path, &link.branch)?;

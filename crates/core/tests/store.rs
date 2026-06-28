@@ -82,7 +82,10 @@ fn parse_le_todos_os_campos_do_frontmatter() {
     assert_eq!(t.prs[1].pr, 0); // ainda não criado
     assert_eq!(t.deferred, vec!["primitivo decimal fica pra TASK-024"]);
     assert_eq!(t.constraints.len(), 4);
-    assert!(t.body.contains("enum aberto preserva variante desconhecida"));
+    assert!(
+        t.body
+            .contains("enum aberto preserva variante desconhecida")
+    );
     assert_eq!(t.path, Some(dir.0.join("TASK-012.md")));
 }
 
@@ -198,7 +201,11 @@ fn set_pr_atualiza_numero_do_repo_certo() {
 
     store.set_pr("TASK-012", "tono-lang/runtime", 200).unwrap();
     let t = store.get("TASK-012").unwrap();
-    let runtime = t.prs.iter().find(|p| p.repo == "tono-lang/runtime").unwrap();
+    let runtime = t
+        .prs
+        .iter()
+        .find(|p| p.repo == "tono-lang/runtime")
+        .unwrap();
     assert_eq!(runtime.pr, 200);
     // o outro repo não muda
     let parser = t.prs.iter().find(|p| p.repo == "tono-lang/parser").unwrap();
@@ -227,7 +234,11 @@ fn add_deferred_registra_e_cria_novo_backlog() {
 
     // registrado na origem
     let origin = store.get("TASK-012").unwrap();
-    assert!(origin.deferred.contains(&"extrair parser de datas".to_string()));
+    assert!(
+        origin
+            .deferred
+            .contains(&"extrair parser de datas".to_string())
+    );
 
     // novo backlog materializado, referenciando a origem
     assert_eq!(spawned.id, "TASK-013");

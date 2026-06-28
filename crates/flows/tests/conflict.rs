@@ -33,7 +33,11 @@ fn store_with(dir: &TmpDir, tasks: &[(&str, &str, &str, &str)]) -> Store {
     let backlog = dir.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
     for (id, status, repo, branch) in tasks {
-        fs::write(backlog.join(format!("{id}.md")), task_md(id, status, repo, branch)).unwrap();
+        fs::write(
+            backlog.join(format!("{id}.md")),
+            task_md(id, status, repo, branch),
+        )
+        .unwrap();
     }
     Store::new(&backlog)
 }

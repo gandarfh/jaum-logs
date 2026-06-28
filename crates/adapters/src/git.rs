@@ -19,7 +19,9 @@ impl Default for Git {
 
 impl Git {
     pub fn new() -> Self {
-        Self { bin: "git".to_string() }
+        Self {
+            bin: "git".to_string(),
+        }
     }
 
     /// Permite apontar para um binário alternativo (usado em testes).
@@ -85,7 +87,10 @@ impl Git {
 
     /// Detecta a branch default: `origin/HEAD`, senão `main`, senão `master`.
     fn default_branch(&self, repo: &Path) -> Result<String> {
-        if let Ok(out) = self.run(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        if let Ok(out) = self.run(
+            repo,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        ) {
             let s = out.trim();
             if let Some(b) = s.strip_prefix("origin/") {
                 return Ok(b.to_string());
@@ -99,17 +104,17 @@ impl Git {
                 return Ok(cand.to_string());
             }
         }
-        bail!("não foi possível detectar a branch default de {}", repo.display())
+        bail!(
+            "não foi possível detectar a branch default de {}",
+            repo.display()
+        )
     }
 
     /// Caminho da worktree: irmão do repo, fora da árvore de trabalho principal.
     /// `feat/task-012` vira `feat-task-012` para ser um nome de diretório válido.
     fn worktree_path(&self, repo: &Path, branch: &str) -> PathBuf {
         let safe = branch.replace('/', "-");
-        let name = repo
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("repo");
+        let name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         repo.with_file_name(format!("{name}.worktrees")).join(safe)
     }
 

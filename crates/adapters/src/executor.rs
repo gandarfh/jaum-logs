@@ -36,7 +36,8 @@ impl ExecFlags {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.disallowed_tools.extend(tools.into_iter().map(Into::into));
+        self.disallowed_tools
+            .extend(tools.into_iter().map(Into::into));
         self
     }
 
@@ -124,7 +125,9 @@ impl Default for ClaudeExecutor {
 
 impl ClaudeExecutor {
     pub fn new() -> Self {
-        Self { bin: "claude".to_string() }
+        Self {
+            bin: "claude".to_string(),
+        }
     }
 
     /// Aponta para um binário alternativo (usado em testes).
@@ -145,10 +148,24 @@ impl Executor for ClaudeExecutor {
             .output()
             .with_context(|| format!("executando {} --print", self.bin))?;
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // com --output-format json o erro vai pro stdout como envelope;
+            // extrai o campo `result` pra uma mensagem limpa.
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if let Some(msg) = serde_json::from_str::<serde_json::Value>(stdout.trim())
+                .ok()
+                .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
+            {
+                msg
+            } else {
+                stdout.trim().to_string()
+            };
             bail!(
-                "{} --print falhou: {}",
+                "{} --print falhou (exit {:?}): {detail}",
                 self.bin,
-                String::from_utf8_lossy(&out.stderr).trim()
+                out.status.code()
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -156,9 +173,7 @@ impl Executor for ClaudeExecutor {
 
     fn spawn_interactive(&self, prompt: &str, flags: &ExecFlags) -> Result<Session> {
         let pty = native_pty_system();
-        let pair = pty
-            .openpty(PtySize::default())
-            .context("abrindo PTY")?;
+        let pair = pty.openpty(PtySize::default()).context("abrindo PTY")?;
 
         let mut cmd = CommandBuilder::new(&self.bin);
         if !prompt.is_empty() {
@@ -175,10 +190,7 @@ impl Executor for ClaudeExecutor {
             .slave
             .spawn_command(cmd)
             .with_context(|| format!("iniciando sessão {}", self.bin))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("obtendo writer do PTY")?;
+        let writer = pair.master.take_writer().context("obtendo writer do PTY")?;
 
         // Solta o slave: sem isso o reader nunca recebe EOF quando o filho sai.
         drop(pair.slave);
@@ -202,7 +214,10 @@ pub struct Session {
 impl Session {
     /// Escreve bytes crus no stdin da sessão.
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
-        let w = self.writer.as_mut().context("input da sessão já foi fechado")?;
+        let w = self
+            .writer
+            .as_mut()
+            .context("input da sessão já foi fechado")?;
         w.write_all(bytes).context("escrevendo no PTY")?;
         w.flush().context("flush no PTY")?;
         Ok(())

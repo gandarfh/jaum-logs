@@ -17,7 +17,9 @@ impl Default for Gh {
 
 impl Gh {
     pub fn new() -> Self {
-        Self { bin: "gh".to_string() }
+        Self {
+            bin: "gh".to_string(),
+        }
     }
 
     /// Permite apontar para um binário alternativo (usado em testes).
@@ -28,9 +30,7 @@ impl Gh {
     /// Abre um PR para `branch` no `repo` (slug "owner/name"). Devolve o número.
     /// NUNCA mergeia — só cria.
     pub fn pr_create(&self, repo: &str, branch: &str) -> Result<u64> {
-        let out = self.run(&[
-            "pr", "create", "--repo", repo, "--head", branch, "--fill",
-        ])?;
+        let out = self.run(&["pr", "create", "--repo", repo, "--head", branch, "--fill"])?;
         parse_pr_number_from_url(&out)
             .with_context(|| format!("extraindo número do PR da saída do gh: {out:?}"))
     }
@@ -38,8 +38,18 @@ impl Gh {
     /// Número do PR aberto/fechado para `branch`, ou `0` se nenhum existe.
     pub fn pr_number(&self, repo: &str, branch: &str) -> Result<u64> {
         let out = self.run(&[
-            "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "number",
-            "--jq", ".[0].number // 0",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number",
+            "--jq",
+            ".[0].number // 0",
         ])?;
         let s = out.trim();
         if s.is_empty() {
@@ -55,7 +65,15 @@ impl Gh {
             return Ok(MergeState::NotCreated);
         }
         let out = self.run(&[
-            "pr", "view", &pr.to_string(), "--repo", repo, "--json", "state", "--jq", ".state",
+            "pr",
+            "view",
+            &pr.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "--jq",
+            ".state",
         ])?;
         Ok(match out.trim() {
             "MERGED" => MergeState::Merged,

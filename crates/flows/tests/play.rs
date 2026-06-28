@@ -117,8 +117,14 @@ fn run_hook(script: &str, stdin_json: &str) -> String {
 #[test]
 fn hook_bloqueia_merge_sempre() {
     let s = pretool_hook_script(&task());
-    let out = run_hook(&s, r#"{"tool_name":"Bash","tool_input":{"command":"git merge main"}}"#);
-    assert!(out.contains("\"permissionDecision\":\"deny\""), "out: {out}");
+    let out = run_hook(
+        &s,
+        r#"{"tool_name":"Bash","tool_input":{"command":"git merge main"}}"#,
+    );
+    assert!(
+        out.contains("\"permissionDecision\":\"deny\""),
+        "out: {out}"
+    );
     assert!(out.contains("merge"));
 }
 
@@ -129,7 +135,10 @@ fn hook_bloqueia_constraint_de_caminho() {
         &s,
         r#"{"tool_name":"Edit","tool_input":{"file_path":"src/legacy/foo.rs"}}"#,
     );
-    assert!(out.contains("deny"), "deveria bloquear src/legacy/; out: {out}");
+    assert!(
+        out.contains("deny"),
+        "deveria bloquear src/legacy/; out: {out}"
+    );
     assert!(out.contains("src/legacy/"));
 }
 
@@ -140,7 +149,10 @@ fn hook_bloqueia_constraint_de_keyword() {
         &s,
         r#"{"tool_name":"Bash","tool_input":{"command":"npm run migration"}}"#,
     );
-    assert!(out.contains("deny"), "deveria bloquear migration; out: {out}");
+    assert!(
+        out.contains("deny"),
+        "deveria bloquear migration; out: {out}"
+    );
 }
 
 #[test]
@@ -150,7 +162,10 @@ fn hook_libera_acao_que_nao_casa_constraint() {
         &s,
         r#"{"tool_name":"Edit","tool_input":{"file_path":"src/main.rs"}}"#,
     );
-    assert!(out.trim().is_empty(), "não deveria bloquear src/main.rs; out: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "não deveria bloquear src/main.rs; out: {out}"
+    );
 }
 
 #[test]
@@ -161,7 +176,10 @@ fn hook_nao_bloqueia_constraint_enforce_review() {
         &s,
         r#"{"tool_name":"Edit","tool_input":{"file_path":"src/api.rs"}}"#,
     );
-    assert!(out.trim().is_empty(), "review constraints não entram no hook; out: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "review constraints não entram no hook; out: {out}"
+    );
 }
 
 // --- start (executor de mentira sobre `cat` + git fixture) ----------------
@@ -171,11 +189,15 @@ struct Rec {
 }
 impl Executor for Rec {
     fn spawn_oneshot(&self, prompt: &str, flags: &ExecFlags) -> anyhow::Result<String> {
-        self.calls.borrow_mut().push((prompt.to_string(), flags.clone()));
+        self.calls
+            .borrow_mut()
+            .push((prompt.to_string(), flags.clone()));
         Ok(String::new())
     }
     fn spawn_interactive(&self, prompt: &str, flags: &ExecFlags) -> anyhow::Result<Session> {
-        self.calls.borrow_mut().push((prompt.to_string(), flags.clone()));
+        self.calls
+            .borrow_mut()
+            .push((prompt.to_string(), flags.clone()));
         // sessão real sobre `cat` só para devolver um Session válido
         ClaudeExecutor::with_bin("cat").spawn_interactive("", &ExecFlags::default())
     }
@@ -216,7 +238,9 @@ fn start_cria_worktree_instala_hooks_e_marca_wip() {
     let rec = Rec {
         calls: RefCell::new(Vec::new()),
     };
-    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), &repos_root);
+    let repos =
+        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
+    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos);
 
     let mut ps = play.start("TASK-001").unwrap();
 
@@ -232,7 +256,12 @@ fn start_cria_worktree_instala_hooks_e_marca_wip() {
     let calls = rec.calls.borrow();
     let (prompt, flags) = &calls[0];
     assert!(prompt.contains("Implementar enum aberto"));
-    assert!(flags.disallowed_tools.iter().any(|t| t.contains("git merge")));
+    assert!(
+        flags
+            .disallowed_tools
+            .iter()
+            .any(|t| t.contains("git merge"))
+    );
     assert!(flags.settings.is_some(), "hook (--settings) não aplicado");
     assert!(flags.cwd.is_some(), "cwd (worktree) não aplicada");
     drop(calls);
@@ -254,7 +283,13 @@ fn start_recusa_spike() {
     let rec = Rec {
         calls: RefCell::new(Vec::new()),
     };
-    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), root.0.join("repos"));
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        std::collections::HashMap::new(),
+    );
 
     let err = match play.start("TASK-001") {
         Ok(_) => panic!("deveria recusar spike"),

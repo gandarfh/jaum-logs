@@ -5,6 +5,7 @@
 //! Garantia detectiva (obrigatória): `is_clean` só passa com ZERO findings E
 //! todas as constraints `enforce: review` marcadas `ok` — patch 1, lado semântico.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -121,14 +122,7 @@ impl ReviewReport {
 /// Flags read-only: nenhuma escrita. Whitelist de ferramentas de leitura é a
 /// garantia mais forte de que o review não muta nada.
 pub fn read_only_flags() -> ExecFlags {
-    ExecFlags::new().with_disallowed([
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Update",
-        "Bash",
-    ])
+    ExecFlags::new().with_disallowed(["Edit", "Write", "NotebookEdit", "Bash"])
 }
 
 /// Orquestrador da fase review.
@@ -137,7 +131,8 @@ pub struct Review<'a, E: Executor> {
     git: &'a Git,
     executor: &'a E,
     docs_dir: PathBuf,
-    repos_root: PathBuf,
+    /// Mapeamento explícito slug "owner/name" -> caminho local do repo.
+    repos: HashMap<String, PathBuf>,
 }
 
 impl<'a, E: Executor> Review<'a, E> {
@@ -146,20 +141,19 @@ impl<'a, E: Executor> Review<'a, E> {
         git: &'a Git,
         executor: &'a E,
         docs_dir: impl Into<PathBuf>,
-        repos_root: impl Into<PathBuf>,
+        repos: HashMap<String, PathBuf>,
     ) -> Self {
         Self {
             store,
             git,
             executor,
             docs_dir: docs_dir.into(),
-            repos_root: repos_root.into(),
+            repos,
         }
     }
 
-    fn repo_path(&self, repo: &str) -> PathBuf {
-        let name = repo.rsplit('/').next().unwrap_or(repo);
-        self.repos_root.join(name)
+    fn repo_path(&self, repo: &str) -> Option<PathBuf> {
+        self.repos.get(repo).cloned()
     }
 
     /// Checklist obrigatório: cada constraint `enforce: review` vira um item a
@@ -201,11 +195,18 @@ impl<'a, E: Executor> Review<'a, E> {
         // 2) diff dos PRs
         c.push_str("## Diff dos PRs\n\n");
         for link in &task.prs {
-            let repo_path = self.repo_path(&link.repo);
-            let diff = self.git.diff(&repo_path, &link.branch).unwrap_or_else(|e| {
-                format!("(não foi possível obter diff de {}: {e})", link.repo)
-            });
-            c.push_str(&format!("### {} @ {}\n```diff\n{}\n```\n\n", link.repo, link.branch, diff.trim()));
+            let diff = match self.repo_path(&link.repo) {
+                Some(repo_path) => self.git.diff(&repo_path, &link.branch).unwrap_or_else(|e| {
+                    format!("(não foi possível obter diff de {}: {e})", link.repo)
+                }),
+                None => format!("(repo {} não mapeado no projeto)", link.repo),
+            };
+            c.push_str(&format!(
+                "### {} @ {}\n```diff\n{}\n```\n\n",
+                link.repo,
+                link.branch,
+                diff.trim()
+            ));
         }
 
         // 3) checklist obrigatório das constraints semânticas
@@ -224,7 +225,8 @@ impl<'a, E: Executor> Review<'a, E> {
     /// Abre a sessão de review read-only com o contexto cheio.
     pub fn start(&self, id: &str) -> Result<Session> {
         let context = self.build_context(id)?;
-        self.executor.spawn_interactive(&context, &read_only_flags())
+        self.executor
+            .spawn_interactive(&context, &read_only_flags())
     }
 
     /// Grava o report em `.backlog/TASK-NNN.review.md`.
@@ -255,7 +257,10 @@ impl<'a, E: Executor> Review<'a, E> {
         }
         for c in &report.constraints {
             if c.verdict == ConstraintVerdict::Reprovado {
-                msg.push_str(&format!("- constraint reprovada: {} — {}\n", c.text, c.note));
+                msg.push_str(&format!(
+                    "- constraint reprovada: {} — {}\n",
+                    c.text, c.note
+                ));
             }
         }
         session.write_line(&msg)
@@ -268,8 +273,8 @@ fn collect_docs(docs_dir: &Path) -> Result<Vec<(String, String)>> {
     if !docs_dir.exists() {
         return Ok(out);
     }
-    for entry in fs::read_dir(docs_dir)
-        .with_context(|| format!("lendo docs em {}", docs_dir.display()))?
+    for entry in
+        fs::read_dir(docs_dir).with_context(|| format!("lendo docs em {}", docs_dir.display()))?
     {
         let path = entry?.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {

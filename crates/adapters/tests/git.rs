@@ -76,7 +76,10 @@ fn worktree_add_cria_e_remove_apaga() {
 
     let wt = g.worktree_add(&repo, "feat/task-012").unwrap();
     assert!(wt.exists(), "worktree não foi criada");
-    assert!(wt.join("README.md").exists(), "checkout não trouxe arquivos");
+    assert!(
+        wt.join("README.md").exists(),
+        "checkout não trouxe arquivos"
+    );
     // o nome do diretório sanitiza a `/`
     assert_eq!(wt.file_name().unwrap().to_str().unwrap(), "feat-task-012");
 
@@ -109,7 +112,10 @@ fn diff_mostra_mudancas_da_branch() {
     git(&wt, &["commit", "-aqm", "muda readme"]);
 
     let diff = g.diff(&repo, "feat/change").unwrap();
-    assert!(diff.contains("linha dois"), "diff não refletiu a mudança:\n{diff}");
+    assert!(
+        diff.contains("linha dois"),
+        "diff não refletiu a mudança:\n{diff}"
+    );
     assert!(diff.contains("README.md"));
 }
 

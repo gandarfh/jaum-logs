@@ -68,13 +68,15 @@ impl Constraint {
             .split_whitespace()
             .find(|t| t.contains('/') || t.contains('.'))
         {
-            return escape_regex(path.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'));
+            return escape_regex(
+                path.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'),
+            );
         }
         // 2) palavras significativas
         const STOP: &[&str] = &[
-            "nao", "não", "em", "de", "da", "do", "a", "o", "os", "as", "no", "na",
-            "sem", "com", "e", "ou", "manter", "rodar", "tocar", "usar", "fazer",
-            "novo", "nova", "para", "pra", "que", "se",
+            "nao", "não", "em", "de", "da", "do", "a", "o", "os", "as", "no", "na", "sem", "com",
+            "e", "ou", "manter", "rodar", "tocar", "usar", "fazer", "novo", "nova", "para", "pra",
+            "que", "se",
         ];
         let words: Vec<String> = lower
             .split(|c: char| !c.is_alphanumeric())
@@ -160,7 +162,10 @@ impl Task {
 
     /// Constraints de uma classe de enforcement (Hook = mecânica, Review = semântica).
     pub fn constraints_by(&self, kind: Enforce) -> Vec<&Constraint> {
-        self.constraints.iter().filter(|c| c.enforce == kind).collect()
+        self.constraints
+            .iter()
+            .filter(|c| c.enforce == kind)
+            .collect()
     }
 
     /// Repos linkados via PRs, deduplicados preservando a ordem.

@@ -85,10 +85,22 @@ fn pr_number_zero_quando_nao_existe() {
 fn pr_merge_state_mapeia_estados() {
     let dir = TmpDir::new("state");
     let gh = Gh::with_bin(fake_gh(&dir));
-    assert_eq!(gh.pr_merge_state("owner/repo", 1).unwrap(), MergeState::Open);
-    assert_eq!(gh.pr_merge_state("owner/repo", 2).unwrap(), MergeState::Merged);
-    assert_eq!(gh.pr_merge_state("owner/repo", 3).unwrap(), MergeState::Closed);
-    assert_eq!(gh.pr_merge_state("owner/repo", 99).unwrap(), MergeState::Unknown);
+    assert_eq!(
+        gh.pr_merge_state("owner/repo", 1).unwrap(),
+        MergeState::Open
+    );
+    assert_eq!(
+        gh.pr_merge_state("owner/repo", 2).unwrap(),
+        MergeState::Merged
+    );
+    assert_eq!(
+        gh.pr_merge_state("owner/repo", 3).unwrap(),
+        MergeState::Closed
+    );
+    assert_eq!(
+        gh.pr_merge_state("owner/repo", 99).unwrap(),
+        MergeState::Unknown
+    );
 }
 
 #[test]

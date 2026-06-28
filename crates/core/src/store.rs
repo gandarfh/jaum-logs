@@ -131,8 +131,8 @@ impl Store {
 
     /// Lê `(frontmatter, body)` de um markdown com frontmatter YAML.
     pub fn read_doc<T: DeserializeOwned>(&self, path: &Path) -> Result<(T, String)> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("lendo {}", path.display()))?;
+        let content =
+            fs::read_to_string(path).with_context(|| format!("lendo {}", path.display()))?;
         let matter = Matter::<YAML>::new();
         let parsed = matter
             .parse::<T>(&content)
@@ -158,6 +158,32 @@ impl Store {
             constraints: Vec::new(),
             locks: Vec::new(),
             body: "## Objetivo\n\n## Criterio de aceite\n".to_string(),
+            path: Some(self.task_path(&id)),
+        };
+        self.write(&task)?;
+        Ok(task)
+    }
+
+    /// Cria um backlog rico (usado pelo ingest): tipo, refs de RFC/ADR e corpo.
+    pub fn create_backlog(
+        &self,
+        task_type: TaskType,
+        rfcs: Vec<String>,
+        adrs: Vec<String>,
+        body: String,
+    ) -> Result<Task> {
+        let id = self.next_id()?;
+        let task = Task {
+            id: id.clone(),
+            task_type,
+            status: Status::Backlog,
+            rfcs,
+            adrs,
+            prs: Vec::new(),
+            deferred: Vec::new(),
+            constraints: Vec::new(),
+            locks: Vec::new(),
+            body,
             path: Some(self.task_path(&id)),
         };
         self.write(&task)?;

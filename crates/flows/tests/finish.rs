@@ -52,7 +52,8 @@ esac
 fn store_with(dir: &TmpDir, id: &str, status: &str, prs: &str) -> Store {
     let backlog = dir.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
-    let md = format!("---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n{prs}---\n\n## Objetivo\nx\n");
+    let md =
+        format!("---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n{prs}---\n\n## Objetivo\nx\n");
     fs::write(backlog.join(format!("{id}.md")), md).unwrap();
     Store::new(&backlog)
 }

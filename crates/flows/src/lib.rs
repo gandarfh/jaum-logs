@@ -4,5 +4,6 @@
 
 pub mod conflict;
 pub mod finish;
+pub mod ingest;
 pub mod play;
 pub mod review;

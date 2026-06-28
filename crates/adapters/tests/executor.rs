@@ -100,7 +100,10 @@ fn interactive_kill_encerra_sessao() {
     };
     let mut session = exec.spawn_interactive("", &flags).unwrap();
 
-    assert!(session.try_wait().unwrap().is_none(), "deveria estar rodando");
+    assert!(
+        session.try_wait().unwrap().is_none(),
+        "deveria estar rodando"
+    );
     session.kill().unwrap();
     // após kill, wait retorna (sem sucesso por ter sido morto)
     let success = session.wait().unwrap();
