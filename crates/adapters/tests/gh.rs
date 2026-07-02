@@ -54,13 +54,21 @@ case "$1 $2" in
   "pr list")
     if [ "$4" = "missing/branch" ]; then echo ""; else echo "7"; fi
     ;;
+  "pr diff")
+    if [ "$3" = "500" ]; then echo "boom" >&2; exit 1; fi
+    echo "diff --git a/f b/f"
+    ;;
   "pr view")
-    case "$3" in
-      1) echo "OPEN" ;;
-      2) echo "MERGED" ;;
-      3) echo "CLOSED" ;;
-      *) echo "WEIRD" ;;
-    esac
+    if [ "$5" = "title,body" ]; then
+      if [ "$3" = "98" ]; then echo "not json"; else echo '{"title":"T","body":"B"}'; fi
+    else
+      case "$3" in
+        1) echo "OPEN" ;;
+        2) echo "MERGED" ;;
+        3) echo "CLOSED" ;;
+        *) echo "WEIRD" ;;
+      esac
+    fi
     ;;
 esac
 "#;
@@ -101,6 +109,68 @@ fn pr_merge_state_maps_states() {
     assert_eq!(gh.pr_merge_state(&dir.0, 2).unwrap(), MergeState::Merged);
     assert_eq!(gh.pr_merge_state(&dir.0, 3).unwrap(), MergeState::Closed);
     assert_eq!(gh.pr_merge_state(&dir.0, 99).unwrap(), MergeState::Unknown);
+}
+
+#[test]
+fn default_uses_the_real_gh_binary_name() {
+    // construction only; nothing is executed.
+    let _ = Gh::default();
+}
+
+#[test]
+fn pr_diff_zero_is_empty_without_calling_gh() {
+    let gh = Gh::with_bin("/does/not/exist/gh");
+    assert_eq!(gh.pr_diff(std::path::Path::new("."), 0).unwrap(), "");
+}
+
+#[test]
+fn pr_diff_returns_gh_output() {
+    let dir = TmpDir::new("diff");
+    let gh = Gh::with_bin(fake_gh());
+    let diff = gh.pr_diff(&dir.0, 7).unwrap();
+    assert!(diff.contains("diff --git"));
+}
+
+#[test]
+fn pr_diff_propagates_gh_failure() {
+    let dir = TmpDir::new("diff-fail");
+    let gh = Gh::with_bin(fake_gh());
+    let err = gh.pr_diff(&dir.0, 500).unwrap_err();
+    assert!(err.to_string().contains("boom"));
+}
+
+#[test]
+fn pr_view_zero_is_empty_without_calling_gh() {
+    let gh = Gh::with_bin("/does/not/exist/gh");
+    let (title, body) = gh.pr_view(std::path::Path::new("."), 0).unwrap();
+    assert_eq!(title, "");
+    assert_eq!(body, "");
+}
+
+#[test]
+fn pr_view_parses_title_and_body() {
+    let dir = TmpDir::new("view");
+    let gh = Gh::with_bin(fake_gh());
+    let (title, body) = gh.pr_view(&dir.0, 7).unwrap();
+    assert_eq!(title, "T");
+    assert_eq!(body, "B");
+}
+
+#[test]
+fn pr_view_tolerates_malformed_json() {
+    let dir = TmpDir::new("view-bad");
+    let gh = Gh::with_bin(fake_gh());
+    let (title, body) = gh.pr_view(&dir.0, 98).unwrap();
+    assert_eq!(title, "");
+    assert_eq!(body, "");
+}
+
+#[test]
+fn missing_binary_errors_with_context() {
+    let dir = TmpDir::new("nobin");
+    let gh = Gh::with_bin("/does/not/exist/gh");
+    let err = gh.pr_number(&dir.0, "feat/x").unwrap_err();
+    assert!(err.to_string().contains("running"));
 }
 
 #[test]

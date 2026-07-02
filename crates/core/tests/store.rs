@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use jaum_core::{Enforce, JaumError, Status, Store, TaskType};
@@ -244,6 +244,139 @@ fn set_pr_on_unlinked_repo_fails() {
         err.downcast_ref::<JaumError>(),
         Some(JaumError::PrLinkNotFound { .. })
     ));
+}
+
+#[test]
+fn open_points_at_relative_backlog_dir() {
+    let store = Store::open();
+    assert_eq!(store.root(), Path::new(".backlog"));
+}
+
+#[test]
+fn review_path_is_sibling_of_task_file() {
+    let dir = TmpDir::new("review-path");
+    let store = Store::new(&dir.0);
+    assert_eq!(
+        store.review_path("TASK-001"),
+        dir.0.join("TASK-001.review.md")
+    );
+}
+
+#[test]
+fn parse_missing_frontmatter_is_malformed() {
+    let dir = TmpDir::new("malformed");
+    let store = Store::new(&dir.0);
+    let path = dir.0.join("TASK-001.md");
+    fs::write(&path, "no frontmatter here\n").unwrap();
+    let err = store.parse(&path).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<JaumError>(),
+        Some(JaumError::MalformedFrontmatter { .. })
+    ));
+}
+
+#[test]
+fn parse_unreadable_path_errors_with_context() {
+    let dir = TmpDir::new("unreadable");
+    let store = Store::new(&dir.0);
+    let missing = dir.0.join("TASK-404.md");
+    let err = store.parse(&missing).unwrap_err();
+    assert!(err.to_string().contains("reading task at"));
+}
+
+#[test]
+fn list_on_missing_root_is_empty() {
+    let dir = TmpDir::new("noroot");
+    let store = Store::new(dir.0.join("does-not-exist"));
+    assert!(store.list(None).unwrap().is_empty());
+}
+
+#[test]
+fn list_propagates_parse_errors() {
+    let dir = TmpDir::new("list-err");
+    let store = seed_fixture(&dir);
+    fs::write(dir.0.join("TASK-013.md"), "broken\n").unwrap();
+    assert!(store.list(None).is_err());
+}
+
+#[test]
+fn write_doc_and_read_doc_roundtrip() {
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Meta {
+        verdict: String,
+        score: u32,
+    }
+    let dir = TmpDir::new("doc");
+    let store = Store::new(&dir.0);
+    let path = dir.0.join("reports").join("TASK-001.review.md");
+    let meta = Meta {
+        verdict: "approved".into(),
+        score: 9,
+    };
+    store
+        .write_doc(&path, &meta, "## Findings\n\nnone\n")
+        .unwrap();
+
+    let (back, body): (Meta, String) = store.read_doc(&path).unwrap();
+    assert_eq!(back, meta);
+    assert_eq!(body, "## Findings\n\nnone");
+}
+
+#[test]
+fn read_doc_missing_frontmatter_is_malformed() {
+    let dir = TmpDir::new("doc-malformed");
+    let store = Store::new(&dir.0);
+    let path = dir.0.join("plain.md");
+    fs::write(&path, "just text\n").unwrap();
+    let err = store.read_doc::<serde_yaml_ng::Value>(&path).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<JaumError>(),
+        Some(JaumError::MalformedFrontmatter { .. })
+    ));
+}
+
+#[test]
+fn read_doc_missing_file_errors_with_context() {
+    let dir = TmpDir::new("doc-missing");
+    let store = Store::new(&dir.0);
+    let err = store
+        .read_doc::<serde_yaml_ng::Value>(&dir.0.join("nope.md"))
+        .unwrap_err();
+    assert!(err.to_string().contains("reading"));
+}
+
+#[test]
+fn create_backlog_persists_type_refs_and_body() {
+    let dir = TmpDir::new("backlog");
+    let store = Store::new(&dir.0);
+    let t = store
+        .create_backlog(
+            TaskType::Spike,
+            vec!["RFC-001".into()],
+            vec!["ADR-002".into()],
+            "## Objective\n\nresearch\n".into(),
+        )
+        .unwrap();
+    assert_eq!(t.id, "TASK-001");
+    assert_eq!(t.task_type, TaskType::Spike);
+    assert_eq!(t.status, Status::Backlog);
+
+    let back = store.get("TASK-001").unwrap();
+    assert_eq!(back.rfcs, vec!["RFC-001"]);
+    assert_eq!(back.adrs, vec!["ADR-002"]);
+    assert!(back.body.contains("research"));
+}
+
+#[test]
+fn next_id_counts_review_files_and_ignores_junk() {
+    let dir = TmpDir::new("nextid");
+    let store = Store::new(&dir.0);
+    // a review report for a high number bumps the sequence even without the task file
+    fs::write(dir.0.join("TASK-041.review.md"), "# findings").unwrap();
+    fs::write(dir.0.join("TASK-xyz.md"), "junk").unwrap();
+    fs::write(dir.0.join("notes.md"), "junk").unwrap();
+    let t = store.create_stub(&[]).unwrap();
+    assert_eq!(t.id, "TASK-042");
 }
 
 #[test]
