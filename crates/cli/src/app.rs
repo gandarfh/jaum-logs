@@ -500,6 +500,15 @@ pub struct App {
     /// agent and writes it to the task.
     last_pr_sync: Instant,
     pr_sync_running: Arc<AtomicBool>,
+
+    /// Binaries used by background jobs (their threads build their own adapters);
+    /// tests point these at stubs so no real `claude`/`gh` is ever spawned.
+    claude_bin: String,
+    gh_bin: String,
+    /// Global-config access used by the init job; injectable so tests never touch
+    /// the user's `~/jaum`.
+    load_config: fn() -> Result<GlobalConfig>,
+    init_project: fn(&std::path::Path, &[PathBuf]) -> Result<crate::config::Project>,
 }
 
 impl App {
@@ -556,6 +565,10 @@ impl App {
             job_overlay: false,
             last_pr_sync: Instant::now(),
             pr_sync_running: Arc::new(AtomicBool::new(false)),
+            claude_bin: "claude".into(),
+            gh_bin: "gh".into(),
+            load_config: GlobalConfig::load,
+            init_project: crate::config::init_project,
         };
         app.refresh()?;
         app.rehydrate_sessions();
@@ -1219,6 +1232,7 @@ impl App {
         let backlog = self.backlog_path();
         let docs_dir = self.docs_dir.clone();
         let add_dirs: Vec<PathBuf> = self.repos.values().cloned().collect();
+        let claude_bin = self.claude_bin.clone();
         let (tx, rx) = channel();
         self.job = Some(Job {
             kind: JobKind::Ingest,
@@ -1232,7 +1246,7 @@ impl App {
         self.job_overlay = true;
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::new();
+            let executor = ClaudeExecutor::with_bin(claude_bin);
             let ingest = Ingest::new(&store, &executor, docs_dir, add_dirs);
             let mut on_line = |s: &str| {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
@@ -1263,6 +1277,8 @@ impl App {
         let docs_dir = self.docs_dir.clone();
         let repos = self.repos.clone();
         let conventions = self.conventions.clone();
+        let claude_bin = self.claude_bin.clone();
+        let gh_bin = self.gh_bin.clone();
         let (tx, rx) = channel();
         self.job = Some(Job {
             kind: JobKind::Review,
@@ -1277,8 +1293,8 @@ impl App {
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
             let git = Git::new();
-            let gh = Gh::new();
-            let executor = ClaudeExecutor::new();
+            let gh = Gh::with_bin(gh_bin);
+            let executor = ClaudeExecutor::with_bin(claude_bin);
             let review = Review::new(&store, &git, &gh, &executor, docs_dir, repos, conventions);
             let mut on_line = |s: &str| {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
@@ -1305,6 +1321,7 @@ impl App {
         let root = self.docs_dir.clone();
         let repos = self.repos.clone();
         let out_file = self.parallel_file();
+        let claude_bin = self.claude_bin.clone();
         let (tx, rx) = channel();
         self.job = Some(Job {
             kind: JobKind::Parallel,
@@ -1318,7 +1335,7 @@ impl App {
         self.job_overlay = true;
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::new();
+            let executor = ClaudeExecutor::with_bin(claude_bin);
             let parallel = Parallel::new(&store, &executor, root, repos);
             let mut on_line = |s: &str| {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
@@ -1352,6 +1369,7 @@ impl App {
         let backlog = self.backlog_path();
         let docs_dir = self.docs_dir.clone();
         let add_dirs: Vec<PathBuf> = self.repos.values().cloned().collect();
+        let claude_bin = self.claude_bin.clone();
         let (tx, rx) = channel();
         self.job = Some(Job {
             kind: JobKind::Capture,
@@ -1365,7 +1383,7 @@ impl App {
         self.job_overlay = true;
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::new();
+            let executor = ClaudeExecutor::with_bin(claude_bin);
             let ingest = Ingest::new(&store, &executor, docs_dir, add_dirs);
             let mut on_line = |s: &str| {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
@@ -1392,6 +1410,7 @@ impl App {
             return;
         }
         let root = expand_tilde(path);
+        let init_project = self.init_project;
         let (tx, rx) = channel();
         self.job = Some(Job {
             kind: JobKind::Init,
@@ -1404,7 +1423,7 @@ impl App {
         });
         self.job_overlay = true;
         std::thread::spawn(move || {
-            let done = match crate::config::init_project(&root, &[]) {
+            let done = match init_project(&root, &[]) {
                 Ok(p) => {
                     let _ = tx.send(JobMsg::Log(format!("project '{}' registered", p.name)));
                     if p.repos.is_empty() {
@@ -1444,7 +1463,7 @@ impl App {
         let auto_parallel = matches!(kind, JobKind::Ingest) && r.is_ok();
         match (kind, r) {
             (JobKind::Init, Ok(name)) => {
-                if let Ok(cfg) = GlobalConfig::load() {
+                if let Ok(cfg) = (self.load_config)() {
                     self.config = cfg;
                     if let Some(idx) = self.config.projects.iter().position(|p| p.name == name) {
                         self.load_project(idx);
@@ -1582,11 +1601,12 @@ impl App {
 
         let backlog = self.backlog_path();
         let repos = self.repos.clone();
+        let gh_bin = self.gh_bin.clone();
         let flag = self.pr_sync_running.clone();
         flag.store(true, Ordering::Relaxed);
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
-            let gh = Gh::new();
+            let gh = Gh::with_bin(gh_bin);
             for (id, repo, branch) in targets {
                 if let Some(dir) = repos.get(&repo)
                     && let Ok(pr) = gh.pr_number(dir, &branch)
@@ -1883,3 +1903,10 @@ impl App {
         }
     }
 }
+
+// Unit tests live in-crate (not under tests/) so llvm-cov attributes the
+// exercised lines to this file; the coverage tooling drops any path containing
+// a `tests/` segment, which discards `#[path]` includes from integration tests.
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod app_tests;

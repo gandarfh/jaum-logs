@@ -1803,6 +1803,13 @@ fn render_toast(f: &mut Frame, msg: &str) {
     f.render_widget(p, rect);
 }
 
+// Behavior tests live in-crate (not under tests/) so llvm-cov attributes the
+// exercised lines to this file; the coverage tooling drops any path containing
+// a `tests/` segment, which discards `#[path]` includes from integration tests.
+#[cfg(test)]
+#[path = "tui_tests.rs"]
+mod tui_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{encode_mouse_sgr, markdown_lines};
