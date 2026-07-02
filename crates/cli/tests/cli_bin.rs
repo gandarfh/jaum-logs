@@ -385,10 +385,15 @@ fn attach_runs_full_client_session_over_pty() {
 
     let mut child = {
         let mut cmd = Command::new("/usr/bin/script");
-        cmd.arg("-q")
-            .arg("/dev/null")
-            .arg(jaum_bin())
-            .env("HOME", home.path())
+        if cfg!(target_os = "linux") {
+            // util-linux: the command goes through -c, the typescript file is
+            // positional; -e forwards the child's exit status like BSD does.
+            cmd.arg("-qe").arg("-c").arg(jaum_bin()).arg("/dev/null");
+        } else {
+            // BSD/macOS: typescript file first, then the command argv.
+            cmd.arg("-q").arg("/dev/null").arg(jaum_bin());
+        }
+        cmd.env("HOME", home.path())
             .env("TERM", "xterm-256color")
             .env("EDITOR", &editor)
             .stdin(Stdio::piped())
