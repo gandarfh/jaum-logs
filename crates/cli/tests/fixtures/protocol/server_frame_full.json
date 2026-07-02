@@ -1,0 +1,26 @@
+{
+  "FrameFull": {
+    "cells": [
+      {
+        "bg": "Reset",
+        "fg": "#B48EFF",
+        "mods": "BOLD",
+        "sym": "j",
+        "underline": "Reset",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "bg": "Black",
+        "fg": "42",
+        "mods": "ITALIC | UNDERLINED",
+        "sym": "◆",
+        "underline": "Cyan",
+        "x": 1,
+        "y": 0
+      }
+    ],
+    "cols": 80,
+    "rows": 24
+  }
+}
