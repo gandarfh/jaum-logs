@@ -332,9 +332,7 @@ impl Session {
 
     /// Clones a reader for the PTY output (the TUI consumes it on a thread).
     pub fn reader(&self) -> Result<Box<dyn Read + Send>> {
-        self.master
-            .try_clone_reader()
-            .context("cloning PTY reader")
+        self.master.try_clone_reader().context("cloning PTY reader")
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {

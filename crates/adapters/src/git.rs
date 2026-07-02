@@ -109,10 +109,7 @@ impl Git {
                 return Ok(cand.to_string());
             }
         }
-        bail!(
-            "could not detect the default branch of {}",
-            repo.display()
-        )
+        bail!("could not detect the default branch of {}", repo.display())
     }
 
     /// Worktree path: sibling of the repo, outside the main working tree.

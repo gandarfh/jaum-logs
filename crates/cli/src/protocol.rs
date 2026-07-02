@@ -8,8 +8,8 @@ use std::io::{self, Read, Write};
 
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::style::{Color, Modifier};
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// A screen cell at position (x, y). Fully serializable thanks to ratatui's
 /// `serde` features (Color/Modifier).
@@ -43,7 +43,11 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMsg {
     /// Full screen (on attach and on every resize).
-    FrameFull { cols: u16, rows: u16, cells: Vec<WireCell> },
+    FrameFull {
+        cols: u16,
+        rows: u16,
+        cells: Vec<WireCell>,
+    },
     /// Only the cells that changed since the last frame.
     FrameDiff(Vec<WireCell>),
     /// The daemon asks the client to detach (e.g. the user pressed `q`).
@@ -85,7 +89,10 @@ mod tests {
     fn framing_roundtrip_client_msg() {
         let msgs = vec![
             ClientMsg::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
-            ClientMsg::Resize { cols: 120, rows: 40 },
+            ClientMsg::Resize {
+                cols: 120,
+                rows: 40,
+            },
             ClientMsg::EditorDone,
             ClientMsg::Shutdown,
         ];

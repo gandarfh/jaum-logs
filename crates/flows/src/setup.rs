@@ -61,7 +61,11 @@ impl<'a, E: Executor> Setup<'a, E> {
         let mut extra = Vec::new();
         if !self.repos.is_empty() {
             extra.push("--add-dir".to_string());
-            extra.extend(self.repos.values().map(|p| p.to_string_lossy().into_owned()));
+            extra.extend(
+                self.repos
+                    .values()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            );
         }
         ExecFlags {
             disallowed_tools: merge_disallowed(),
@@ -132,7 +136,10 @@ kebab-case (e.g. `feat/markdown-deck-parser`).\n\n",
                         .iter()
                         .map(|pr| {
                             if branch_leaks_id(&pr.branch) {
-                                format!("{}@{} (branch leaks the id — rename it)", pr.repo, pr.branch)
+                                format!(
+                                    "{}@{} (branch leaks the id — rename it)",
+                                    pr.repo, pr.branch
+                                )
                             } else {
                                 format!("{}@{}", pr.repo, pr.branch)
                             }
@@ -197,6 +204,10 @@ pub fn is_template(conventions: &str) -> bool {
 /// enforced by jaum: branches describe the work, not internal bookkeeping.
 pub fn branch_leaks_id(branch: &str) -> bool {
     let b = branch.to_lowercase();
-    b.match_indices("task-")
-        .any(|(i, _)| b[i + 5..].chars().next().is_some_and(|c| c.is_ascii_digit()))
+    b.match_indices("task-").any(|(i, _)| {
+        b[i + 5..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    })
 }

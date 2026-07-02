@@ -109,8 +109,7 @@ impl Store {
             .path
             .clone()
             .unwrap_or_else(|| self.task_path(&task.id));
-        fs::write(&path, content)
-            .with_context(|| format!("writing task at {}", path.display()))?;
+        fs::write(&path, content).with_context(|| format!("writing task at {}", path.display()))?;
         Ok(())
     }
 

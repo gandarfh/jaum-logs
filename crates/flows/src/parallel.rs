@@ -75,7 +75,11 @@ impl<'a, E: Executor> Parallel<'a, E> {
         ];
         if !self.repos.is_empty() {
             extra.push("--add-dir".to_string());
-            extra.extend(self.repos.values().map(|p| p.to_string_lossy().into_owned()));
+            extra.extend(
+                self.repos
+                    .values()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            );
         }
         ExecFlags {
             disallowed_tools: ["Edit", "Write", "NotebookEdit"]
@@ -145,9 +149,7 @@ fn parse_envelope(v: &Value) -> Result<ParallelReport> {
     if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         bail!(
             "claude reported an error: {}",
-            v.get("result")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
+            v.get("result").and_then(Value::as_str).unwrap_or("unknown")
         );
     }
     let so = v
@@ -201,7 +203,15 @@ only the colliding pairs.\n\n## Open tasks\n\n",
     );
     for t in tasks {
         let repos = t.linked_repos().join(", ");
-        p.push_str(&format!("### {} (repos: {})\n", t.id, if repos.is_empty() { "none".into() } else { repos }));
+        p.push_str(&format!(
+            "### {} (repos: {})\n",
+            t.id,
+            if repos.is_empty() {
+                "none".into()
+            } else {
+                repos
+            }
+        ));
         let body = t.body.trim();
         if !body.is_empty() {
             p.push_str(body);

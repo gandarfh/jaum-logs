@@ -160,10 +160,7 @@ fn hook_blocks_path_constraint() {
         &s,
         r#"{"tool_name":"Edit","tool_input":{"file_path":"src/legacy/foo.rs"}}"#,
     );
-    assert!(
-        out.contains("deny"),
-        "should block src/legacy/; out: {out}"
-    );
+    assert!(out.contains("deny"), "should block src/legacy/; out: {out}");
     assert!(out.contains("src/legacy/"));
 }
 
@@ -174,10 +171,7 @@ fn hook_blocks_keyword_constraint() {
         &s,
         r#"{"tool_name":"Bash","tool_input":{"command":"npm run migration"}}"#,
     );
-    assert!(
-        out.contains("deny"),
-        "should block migration; out: {out}"
-    );
+    assert!(out.contains("deny"), "should block migration; out: {out}");
 }
 
 #[test]
@@ -265,7 +259,14 @@ fn start_creates_worktree_installs_hooks_and_marks_wip() {
     };
     let repos =
         std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos, String::new());
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        repos,
+        String::new(),
+    );
 
     let mut ps = play.start("TASK-001").unwrap();
 
@@ -311,25 +312,43 @@ fn start_injects_session_id_and_resume_resumes_without_prompt() {
     };
     let repos =
         std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos, String::new());
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        repos,
+        String::new(),
+    );
 
     let ps = play.start("TASK-001").unwrap();
     // start injects --session-id with the returned uuid (not --resume)
     {
         let calls = rec.calls.borrow();
         let (_prompt, flags) = &calls[0];
-        assert_eq!(flags.session_id.as_deref(), Some(ps.claude_session_id.as_str()));
+        assert_eq!(
+            flags.session_id.as_deref(),
+            Some(ps.claude_session_id.as_str())
+        );
         assert!(flags.resume.is_none(), "start must not use --resume");
     }
 
     // resume injects --resume <uuid>, no positional prompt, no session_id
     let cwd = ps.worktrees[0].1.clone();
-    let _ = play.resume("TASK-001", &ps.claude_session_id, &cwd).unwrap();
+    let _ = play
+        .resume("TASK-001", &ps.claude_session_id, &cwd)
+        .unwrap();
     let calls = rec.calls.borrow();
     let (prompt, flags) = calls.last().unwrap();
-    assert!(prompt.is_empty(), "resume does not resend the initial prompt");
+    assert!(
+        prompt.is_empty(),
+        "resume does not resend the initial prompt"
+    );
     assert_eq!(flags.resume.as_deref(), Some(ps.claude_session_id.as_str()));
-    assert!(flags.session_id.is_none(), "resume does not use --session-id");
+    assert!(
+        flags.session_id.is_none(),
+        "resume does not use --session-id"
+    );
     assert!(flags.cwd.is_some(), "resume keeps the worktree cwd");
 }
 
@@ -351,7 +370,8 @@ fn start_rejects_spike() {
         &git,
         &rec,
         root.0.join(".jaum"),
-        std::collections::HashMap::new(), String::new(),
+        std::collections::HashMap::new(),
+        String::new(),
     );
 
     let err = match play.start("TASK-001") {

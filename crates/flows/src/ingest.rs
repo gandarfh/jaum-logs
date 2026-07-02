@@ -55,7 +55,10 @@ fn folder_for(kind: &str) -> &'static str {
 /// falling back to the original file name when the agent didn't propose one.
 fn dest_name(doc: &ProposedDoc, src: &Path) -> String {
     let raw = if doc.name.trim().is_empty() {
-        src.file_name().and_then(|n| n.to_str()).unwrap_or("doc.md").to_string()
+        src.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("doc.md")
+            .to_string()
     } else {
         doc.name.trim().to_string()
     };
@@ -223,11 +226,7 @@ impl<'a, E: Executor> Ingest<'a, E> {
 
     /// Like `run_scan`, but streaming: uses `stream-json` and forwards a readable
     /// summary of each event to `on_line` while claude works.
-    fn run_scan_logged(
-        &self,
-        prompt: &str,
-        on_line: &mut dyn FnMut(&str),
-    ) -> Result<ProposedScan> {
+    fn run_scan_logged(&self, prompt: &str, on_line: &mut dyn FnMut(&str)) -> Result<ProposedScan> {
         let mut extra = vec![
             "--output-format".to_string(),
             "stream-json".to_string(),
@@ -305,7 +304,9 @@ impl<'a, E: Executor> Ingest<'a, E> {
 
     /// Organized destination: `docs_dir/<category>/<canonical-name>.md`.
     fn dest_for(&self, doc: &ProposedDoc, src: &Path) -> PathBuf {
-        self.root.join(folder_for(&doc.kind)).join(dest_name(doc, src))
+        self.root
+            .join(folder_for(&doc.kind))
+            .join(dest_name(doc, src))
     }
 
     /// Scans, mirrors the docs and materializes the stubs (with live logs).
@@ -423,9 +424,7 @@ fn parse_envelope(v: &Value) -> Result<ProposedScan> {
     if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         bail!(
             "claude reported an error: {}",
-            v.get("result")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
+            v.get("result").and_then(Value::as_str).unwrap_or("unknown")
         );
     }
     let so = v
@@ -549,7 +548,9 @@ fn tool_call(name: &str, input: Option<&Value>) -> String {
             .filter(|s| !s.is_empty())
     };
     let arg = match name {
-        "Read" | "Edit" | "Write" | "NotebookEdit" => get("file_path").or_else(|| get("notebook_path")),
+        "Read" | "Edit" | "Write" | "NotebookEdit" => {
+            get("file_path").or_else(|| get("notebook_path"))
+        }
         "Bash" | "BashOutput" => get("command").or_else(|| get("description")),
         "Grep" => {
             let pat = get("pattern").unwrap_or_default();
@@ -564,7 +565,9 @@ fn tool_call(name: &str, input: Option<&Value>) -> String {
         "WebSearch" => get("query"),
         "Task" | "Agent" => {
             let sub = get("subagent_type");
-            let desc = get("description").or_else(|| get("prompt")).unwrap_or_default();
+            let desc = get("description")
+                .or_else(|| get("prompt"))
+                .unwrap_or_default();
             Some(match sub {
                 Some(s) => format!("({s}) {desc}"),
                 None => desc,

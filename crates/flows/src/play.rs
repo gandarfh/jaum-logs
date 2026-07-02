@@ -60,9 +60,7 @@ pub fn build_prompt(task: &Task, conventions: &str) -> String {
 
     p.push_str("## Session rules\n");
     p.push_str("- Work only on this task. Extra scope: tell me so I can log it as deferred (do not expand it here).\n");
-    p.push_str(
-        "- Open a PR at the end. NEVER merge — merging is my command, outside this tool.\n",
-    );
+    p.push_str("- Open a PR at the end. NEVER merge — merging is my command, outside this tool.\n");
     p
 }
 

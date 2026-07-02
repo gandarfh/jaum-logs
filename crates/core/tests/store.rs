@@ -257,11 +257,7 @@ fn add_deferred_records_and_creates_new_backlog() {
 
     // recorded on the origin
     let origin = store.get("TASK-012").unwrap();
-    assert!(
-        origin
-            .deferred
-            .contains(&"extract date parser".to_string())
-    );
+    assert!(origin.deferred.contains(&"extract date parser".to_string()));
 
     // new backlog materialized, referencing the origin
     assert_eq!(spawned.id, "TASK-013");

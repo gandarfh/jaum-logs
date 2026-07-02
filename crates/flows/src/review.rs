@@ -240,9 +240,11 @@ impl<'a, E: Executor> Review<'a, E> {
         flags.cwd = Some(self.review_cwd(id));
         if !self.repos.is_empty() {
             flags.extra.push("--add-dir".to_string());
-            flags
-                .extra
-                .extend(self.repos.values().map(|p| p.to_string_lossy().into_owned()));
+            flags.extra.extend(
+                self.repos
+                    .values()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            );
         }
         flags
     }
@@ -327,11 +329,15 @@ impl<'a, E: Executor> Review<'a, E> {
                     if let Ok((title, body)) = self.gh.pr_view(dir, pr)
                         && !title.is_empty()
                     {
-                        c.push_str(&format!("### {} PR #{pr}: {title}\n\n{body}\n\n", link.repo));
+                        c.push_str(&format!(
+                            "### {} PR #{pr}: {title}\n\n{body}\n\n",
+                            link.repo
+                        ));
                     }
-                    let diff = self.gh.pr_diff(dir, pr).unwrap_or_else(|e| {
-                        format!("(could not get diff for PR #{pr}: {e})")
-                    });
+                    let diff = self
+                        .gh
+                        .pr_diff(dir, pr)
+                        .unwrap_or_else(|e| format!("(could not get diff for PR #{pr}: {e})"));
                     c.push_str(&format!(
                         "#### diff of PR #{pr} ({} @ {})\n```diff\n{}\n```\n\n",
                         link.repo,
@@ -438,11 +444,7 @@ the diff can't tell.\n\n",
     /// `.review.md`. jaum guarantees the structure: the constraint list is canonical
     /// (`enforce: review`); claude only supplies each verdict.
     /// `on_line` receives the live logs (a summary of the stream events).
-    pub fn capture_logged(
-        &self,
-        id: &str,
-        on_line: &mut dyn FnMut(&str),
-    ) -> Result<ReviewReport> {
+    pub fn capture_logged(&self, id: &str, on_line: &mut dyn FnMut(&str)) -> Result<ReviewReport> {
         let prompt = format!("{}\n\n{REVIEW_INSTRUCTION}", self.build_context(id)?);
 
         let mut extra = vec![
@@ -454,7 +456,11 @@ the diff can't tell.\n\n",
         ];
         if !self.repos.is_empty() {
             extra.push("--add-dir".to_string());
-            extra.extend(self.repos.values().map(|p| p.to_string_lossy().into_owned()));
+            extra.extend(
+                self.repos
+                    .values()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            );
         }
         let mut flags = read_only_flags();
         flags.cwd = Some(self.review_cwd(id));

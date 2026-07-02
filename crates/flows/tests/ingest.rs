@@ -118,7 +118,10 @@ fn summarize_event_summarizes_relevant_events() {
 #[test]
 fn summarize_event_includes_tool_arguments() {
     let read = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"crates/flows/src/ingest.rs"}}]}}"#;
-    assert_eq!(summarize_event(read), vec!["→ Read crates/flows/src/ingest.rs"]);
+    assert_eq!(
+        summarize_event(read),
+        vec!["→ Read crates/flows/src/ingest.rs"]
+    );
 
     let bash = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]}}"#;
     assert_eq!(summarize_event(bash), vec!["→ Bash git status"]);
@@ -229,7 +232,9 @@ fn run_logged_organizes_docs_by_category() {
     let mirrored = docs_dir.join("adrs/ADR-0001-protocol-as-annotation.md");
     assert!(mirrored.exists(), "doc was not organized in {mirrored:?}");
     assert!(
-        fs::read_to_string(&mirrored).unwrap().contains("protocol as annotation")
+        fs::read_to_string(&mirrored)
+            .unwrap()
+            .contains("protocol as annotation")
     );
     assert!(logs.iter().any(|l| l.contains("mirrored")));
 }
