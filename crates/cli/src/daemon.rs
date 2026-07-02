@@ -108,9 +108,21 @@ pub fn serve(sock: &Path, app: App, cols: u16, rows: u16) -> Result<()> {
         // 1) drain events (short wait for ~60fps when idle)
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(ev) => {
-                handle_event(ev, &mut daemon, &mut clients, &mut pending_full, &mut running);
+                handle_event(
+                    ev,
+                    &mut daemon,
+                    &mut clients,
+                    &mut pending_full,
+                    &mut running,
+                );
                 while let Ok(ev) = rx.try_recv() {
-                    handle_event(ev, &mut daemon, &mut clients, &mut pending_full, &mut running);
+                    handle_event(
+                        ev,
+                        &mut daemon,
+                        &mut clients,
+                        &mut pending_full,
+                        &mut running,
+                    );
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -156,7 +168,9 @@ fn spawn_acceptor(listener: UnixListener, tx: Sender<Event>) {
             let Ok(stream) = stream else { continue };
             let id = next_id;
             next_id += 1;
-            let Ok(reader) = stream.try_clone() else { continue };
+            let Ok(reader) = stream.try_clone() else {
+                continue;
+            };
             if tx.send(Event::Connect(id, stream)).is_err() {
                 break;
             }
@@ -352,7 +366,13 @@ mod tests {
             work_dir: dir.join(".jaum"),
             repos: Vec::new(),
         };
-        App::new(Config { projects: vec![project] }, 0).unwrap()
+        App::new(
+            Config {
+                projects: vec![project],
+            },
+            0,
+        )
+        .unwrap()
     }
 
     fn key(c: char) -> KeyEvent {

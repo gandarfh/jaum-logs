@@ -190,7 +190,11 @@ fn new_task_quick_creates_backlog_with_objective() {
     let mut app = app_with(&dir, &[]);
     app.new_task_quick("analyze the rest of the project looking for RFC refs");
     assert_eq!(app.tasks.len(), 1);
-    assert!(app.tasks[0].body.contains("analyze the rest of the project"));
+    assert!(
+        app.tasks[0]
+            .body
+            .contains("analyze the rest of the project")
+    );
     assert!(app.status_msg.contains("task created"));
 }
 
@@ -305,7 +309,11 @@ fn play_selected_focuses_existing_live_session_without_duplicating() {
     assert_eq!(a.sessions.len(), 1);
     assert_eq!(a.tab, Tab::Board);
     assert_eq!(a.board_focus, app::BoardFocus::Chat);
-    assert!(a.status_msg.contains("is already open"), "msg: {}", a.status_msg);
+    assert!(
+        a.status_msg.contains("is already open"),
+        "msg: {}",
+        a.status_msg
+    );
 }
 
 #[test]
@@ -331,7 +339,11 @@ fn pr_sync_targets_only_picks_task_with_live_play_and_pr_zero() {
     assert_eq!(targets.len(), 1);
     assert_eq!(
         targets[0],
-        ("TASK-001".to_string(), "org/x".to_string(), "feat/TASK-001".to_string())
+        (
+            "TASK-001".to_string(),
+            "org/x".to_string(),
+            "feat/TASK-001".to_string()
+        )
     );
 
     // a finished session no longer counts
@@ -370,7 +382,9 @@ fn write_review(dir: &TmpDir, id: &str, clean: bool) {
     let body = if clean {
         format!("---\ntask: {id}\nfindings: []\nconstraints: []\n---\nok\n")
     } else {
-        format!("---\ntask: {id}\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints: []\n---\nbug\n")
+        format!(
+            "---\ntask: {id}\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints: []\n---\nbug\n"
+        )
     };
     fs::write(dir.0.join(format!(".backlog/{id}.review.md")), body).unwrap();
 }
@@ -471,10 +485,17 @@ fn parallelism_badge_relative_to_active_task() {
     // 001 is wip (active); 002 and 003 idle
     let mut a = app_with(
         &dir,
-        &[("TASK-001", "wip"), ("TASK-002", "backlog"), ("TASK-003", "backlog")],
+        &[
+            ("TASK-001", "wip"),
+            ("TASK-002", "backlog"),
+            ("TASK-003", "backlog"),
+        ],
     );
     a.refresh().unwrap();
-    assert!(a.parallel.is_some(), "parallel.json should have been loaded");
+    assert!(
+        a.parallel.is_some(),
+        "parallel.json should have been loaded"
+    );
 
     // 002 conflicts with the active 001
     let c = a.parallel_conflict_with_active("TASK-002");

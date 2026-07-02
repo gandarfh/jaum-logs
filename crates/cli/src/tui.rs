@@ -154,7 +154,11 @@ fn sync_pty_size(terminal: &DefaultTerminal, app: &mut App) {
 pub(crate) fn sync_pty_to(app: &mut App, width: u16, height: u16) {
     let (_h, body, _f) = root_layout(Rect::new(0, 0, width, height));
     // the chat is the 3rd Board column (or the whole area in fullscreen).
-    let term = if app.chat_fullscreen { body } else { board_layout(body)[2] };
+    let term = if app.chat_fullscreen {
+        body
+    } else {
+        board_layout(body)[2]
+    };
     // the terminal pane has a border (-2 on each axis)
     let cols = term.width.saturating_sub(2);
     let rows = term.height.saturating_sub(2);
@@ -177,7 +181,11 @@ pub(crate) fn sync_pty_to(app: &mut App, width: u16, height: u16) {
 /// Interior area (borderless) of the chat pane, in absolute coords.
 pub(crate) fn session_term_area(app: &App, width: u16, height: u16) -> Rect {
     let (_h, body, _f) = root_layout(Rect::new(0, 0, width, height));
-    let term = if app.chat_fullscreen { body } else { board_layout(body)[2] };
+    let term = if app.chat_fullscreen {
+        body
+    } else {
+        board_layout(body)[2]
+    };
     Rect {
         x: term.x + 1,
         y: term.y + 1,
@@ -189,7 +197,12 @@ pub(crate) fn session_term_area(app: &App, width: u16, height: u16) -> Rect {
 /// Handles a mouse event over the Session tab: if claude is in mouse mode
 /// (SGR), forwards the event to the PTY; otherwise scrolls the embedded
 /// terminal's scrollback (vt100) with the wheel.
-pub(crate) fn handle_mouse(app: &mut App, ev: crossterm::event::MouseEvent, width: u16, height: u16) {
+pub(crate) fn handle_mouse(
+    app: &mut App,
+    ev: crossterm::event::MouseEvent,
+    width: u16,
+    height: u16,
+) {
     use crossterm::event::MouseEventKind;
     if app.tab != Tab::Board || app.board_focus != BoardFocus::Chat {
         return;
@@ -621,7 +634,9 @@ fn job_log_line(l: &str) -> Line<'static> {
     } else if let Some(rest) = l.strip_prefix("— ") {
         Line::from(Span::styled(
             format!("— {rest}"),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ))
     } else if let Some(rest) = l.strip_prefix('[') {
         // "[model] text…" — dimmed model, bright text.
@@ -630,7 +645,10 @@ fn job_log_line(l: &str) -> Line<'static> {
                 Span::styled(format!("[{model}] "), Style::default().fg(ACCENT)),
                 Span::styled(text.to_string(), Style::default().fg(Color::White)),
             ]),
-            None => Line::from(Span::styled(l.to_string(), Style::default().fg(Color::White))),
+            None => Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::White),
+            )),
         }
     } else {
         Line::from(Span::styled(l.to_string(), Style::default().fg(SUBTLE)))
@@ -653,11 +671,31 @@ fn status_color(s: jaum_core::Status) -> Color {
 fn md_skin() -> termimad::MadSkin {
     use termimad::crossterm::style::Color::Rgb;
     let mut skin = termimad::MadSkin::default();
-    skin.set_fg(Rgb { r: 200, g: 200, b: 210 });
-    skin.set_headers_fg(Rgb { r: 180, g: 142, b: 255 }); // ACCENT
-    skin.bold.set_fg(Rgb { r: 255, g: 255, b: 255 });
-    skin.italic.set_fg(Rgb { r: 150, g: 150, b: 170 });
-    skin.inline_code.set_fg(Rgb { r: 255, g: 121, b: 198 }); // PINK
+    skin.set_fg(Rgb {
+        r: 200,
+        g: 200,
+        b: 210,
+    });
+    skin.set_headers_fg(Rgb {
+        r: 180,
+        g: 142,
+        b: 255,
+    }); // ACCENT
+    skin.bold.set_fg(Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    });
+    skin.italic.set_fg(Rgb {
+        r: 150,
+        g: 150,
+        b: 170,
+    });
+    skin.inline_code.set_fg(Rgb {
+        r: 255,
+        g: 121,
+        b: 198,
+    }); // PINK
     skin
 }
 
@@ -871,11 +909,7 @@ fn render_doc_view(f: &mut Frame, app: &App) {
     let area = centered_rect(85, 85, f.area());
     f.render_widget(Clear, area);
 
-    let title = app
-        .docs
-        .get(app.docs_selected)
-        .cloned()
-        .unwrap_or_default();
+    let title = app.docs.get(app.docs_selected).cloned().unwrap_or_default();
     // read fresh each frame: reflects external edits (setup) without close/reopen.
     let content = app
         .docs
@@ -991,7 +1025,10 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     .split(area);
 
     let mut spans = vec![
-        Span::styled("◆ jaum", Style::default().fg(PINK).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "◆ jaum",
+            Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("    "),
     ];
     for (i, t) in Tab::all().iter().enumerate() {
@@ -1109,11 +1146,18 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
         "· project",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    if app.sessions.iter().any(|e| e.is_live() && e.kind == SessionKind::Setup) {
+    if app
+        .sessions
+        .iter()
+        .any(|e| e.is_live() && e.kind == SessionKind::Setup)
+    {
         proj.push(Span::styled(" ●", Style::default().fg(Color::Green)));
     }
     if app.setup_needed() {
-        proj.push(Span::styled(" setup (S)", Style::default().fg(Color::Yellow)));
+        proj.push(Span::styled(
+            " setup (S)",
+            Style::default().fg(Color::Yellow),
+        ));
     }
     items.push(ListItem::new(Line::from(proj)));
     row_to_task.push(None);
@@ -1144,12 +1188,20 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(t.id.clone(), Style::default().add_modifier(Modifier::BOLD)),
         ];
         // live session open on this task (there's a chat to enter).
-        if app.sessions.iter().any(|e| e.is_live() && e.task.as_deref() == Some(t.id.as_str())) {
+        if app
+            .sessions
+            .iter()
+            .any(|e| e.is_live() && e.task.as_deref() == Some(t.id.as_str()))
+        {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
         // review verdict (if there's a `.review.md`).
         if let Some(n) = app.review_badge(&t.id) {
-            let (g, c) = if n == 0 { ("✓", Color::Green) } else { ("⚑", Color::Red) };
+            let (g, c) = if n == 0 {
+                ("✓", Color::Green)
+            } else {
+                ("⚑", Color::Red)
+            };
             spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
         }
         // parallelism glyph (only when there are active tasks and this isn't one).
@@ -1204,7 +1256,10 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.project_selected {
         detail(
             &mut items,
-            Line::from(Span::styled("project config (setup)", Style::default().fg(SUBTLE))),
+            Line::from(Span::styled(
+                "project config (setup)",
+                Style::default().fg(SUBTLE),
+            )),
         );
         if app.setup_needed() {
             detail(
@@ -1230,25 +1285,40 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("no PR · {}", pr.branch)
             };
-            detail(&mut items, Line::from(Span::styled(pr_txt, Style::default().fg(SUBTLE))));
+            detail(
+                &mut items,
+                Line::from(Span::styled(pr_txt, Style::default().fg(SUBTLE))),
+            );
         }
         if let Some(r) = app.load_review(&t.id) {
             let (txt, c) = if r.is_clean() {
                 ("review CLEAN".to_string(), Color::Green)
             } else {
-                (format!("review DIRTY · {} pending", r.unmet_count()), Color::Red)
+                (
+                    format!("review DIRTY · {} pending", r.unmet_count()),
+                    Color::Red,
+                )
             };
-            detail(&mut items, Line::from(Span::styled(txt, Style::default().fg(c))));
+            detail(
+                &mut items,
+                Line::from(Span::styled(txt, Style::default().fg(c))),
+            );
         }
         if app.parallel_conflict_with_active(&t.id).is_some() {
             detail(
                 &mut items,
-                Line::from(Span::styled("⚠ parallel conflict", Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled(
+                    "⚠ parallel conflict",
+                    Style::default().fg(Color::Yellow),
+                )),
             );
         } else if app.is_parallel_safe(&t.id) {
             detail(
                 &mut items,
-                Line::from(Span::styled("‖ parallel ok", Style::default().fg(Color::Green))),
+                Line::from(Span::styled(
+                    "‖ parallel ok",
+                    Style::default().fg(Color::Green),
+                )),
             );
         }
         if !t.body.trim().is_empty() {
@@ -1269,7 +1339,10 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
     detail(&mut items, Line::from(""));
     detail(
         &mut items,
-        Line::from(Span::styled("Items", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Items",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
     );
     let cards = app.task_cards();
     if cards.is_empty() {
@@ -1297,10 +1370,16 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let selected_row = row_to_card.iter().position(|r| *r == Some(app.card_selected));
+    let selected_row = row_to_card
+        .iter()
+        .position(|r| *r == Some(app.card_selected));
     let mut state = ListState::default();
     state.select(selected_row);
-    let hl = if focused { sel_style() } else { Style::default().add_modifier(Modifier::BOLD) };
+    let hl = if focused {
+        sel_style()
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
     let list = List::new(items)
         .block(panel_focus(&title, focused))
         .highlight_style(hl)
@@ -1327,7 +1406,10 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(color)),
-                Span::styled(e.kind.label().to_string(), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    e.kind.label().to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("  {age}"), Style::default().fg(SUBTLE)),
             ]))
         }
@@ -1344,7 +1426,10 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(color)),
-                Span::styled(txt.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    txt.to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
             ]))
         }
     }
@@ -1409,7 +1494,9 @@ fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
         Some(e) if !e.is_live() => {
             let msg = "Session closed (history). No live terminal.\nContext is saved in claude; open a new play/review to continue.";
             f.render_widget(
-                Paragraph::new(msg).style(Style::default().fg(SUBTLE)).block(block),
+                Paragraph::new(msg)
+                    .style(Style::default().fg(SUBTLE))
+                    .block(block),
                 area,
             );
         }
@@ -1435,9 +1522,17 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![
         Span::raw("is_clean: "),
         if clean {
-            Span::styled("CLEAN", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            Span::styled(
+                "CLEAN",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            Span::styled("DIRTY", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            Span::styled(
+                "DIRTY",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
         },
     ]));
     lines.push(Line::from(Span::styled(
@@ -1455,7 +1550,10 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Findings", Style::default().add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled(
+        "Findings",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
     if r.findings.is_empty() {
         lines.push(Line::from("  (none)"));
     } else {
@@ -1487,7 +1585,6 @@ fn fmt_dur(d: std::time::Duration) -> String {
         format!("{}h{}m", s / 3600, (s % 3600) / 60)
     }
 }
-
 
 /// Pushes a header + the items of a checklist (constraint/criterion) with the
 /// colored verdict, in the Review tab detail.
@@ -1537,7 +1634,9 @@ fn render_docs(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
     let group_of = |rel: &str| -> String {
-        rel.split_once('/').map(|(g, _)| g.to_string()).unwrap_or_default()
+        rel.split_once('/')
+            .map(|(g, _)| g.to_string())
+            .unwrap_or_default()
     };
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_to_doc: Vec<Option<usize>> = Vec::new();
@@ -1555,7 +1654,10 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
             let color = doc_group_color(&group);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled("▌ ", Style::default().fg(color)),
-                Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("  {count}"), Style::default().fg(Color::DarkGray)),
             ])));
             row_to_doc.push(None);
@@ -1566,7 +1668,9 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
         row_to_doc.push(Some(i));
     }
 
-    let selected_row = row_to_doc.iter().position(|r| *r == Some(app.docs_selected));
+    let selected_row = row_to_doc
+        .iter()
+        .position(|r| *r == Some(app.docs_selected));
     let mut state = ListState::default();
     state.select(selected_row);
 
@@ -1629,10 +1733,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(format!(" {buf}")),
             Span::styled("█", Style::default().fg(PINK)),
-            Span::styled(
-                "   Enter confirm · Esc cancel",
-                Style::default().fg(SUBTLE),
-            ),
+            Span::styled("   Enter confirm · Esc cancel", Style::default().fg(SUBTLE)),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -1656,7 +1757,10 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
             format!(" {k}"),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
-        hint.push(Span::styled(format!(" {label} "), Style::default().fg(SUBTLE)));
+        hint.push(Span::styled(
+            format!(" {label} "),
+            Style::default().fg(SUBTLE),
+        ));
     }
 
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(84)]).split(area);
@@ -1744,7 +1848,12 @@ mod tests {
     }
 
     fn ev(kind: MouseEventKind) -> MouseEvent {
-        MouseEvent { kind, column: 1, row: 1, modifiers: KeyModifiers::NONE }
+        MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[test]

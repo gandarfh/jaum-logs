@@ -51,7 +51,9 @@ fn is_template_detects_empty_and_scaffold() {
     assert!(is_template(
         "# Conventions\n\nOne per line (use `-`).\n\n- \n"
     ));
-    assert!(!is_template("# Conventions\n\n- do not reference RFC numbers in comments\n"));
+    assert!(!is_template(
+        "# Conventions\n\n- do not reference RFC numbers in comments\n"
+    ));
 }
 
 #[test]

@@ -45,7 +45,15 @@ impl Gh {
         let out = self.run(
             dir,
             &[
-                "pr", "list", "--head", branch, "--state", "all", "--json", "number", "--jq",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number",
+                "--jq",
                 ".[0].number // 0",
             ],
         )?;
@@ -64,7 +72,15 @@ impl Gh {
         }
         let out = self.run(
             dir,
-            &["pr", "view", &pr.to_string(), "--json", "state", "--jq", ".state"],
+            &[
+                "pr",
+                "view",
+                &pr.to_string(),
+                "--json",
+                "state",
+                "--jq",
+                ".state",
+            ],
         )?;
         Ok(match out.trim() {
             "MERGED" => MergeState::Merged,

@@ -177,7 +177,10 @@ impl Task {
             let t = line.trim();
             if let Some(h) = t.strip_prefix('#') {
                 // any other section closes the acceptance one; a new acceptance section (re)opens it.
-                in_section = h.trim_start_matches('#').to_lowercase().contains("acceptance");
+                in_section = h
+                    .trim_start_matches('#')
+                    .to_lowercase()
+                    .contains("acceptance");
                 continue;
             }
             if !in_section {

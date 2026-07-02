@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -796,7 +796,9 @@ impl App {
     /// Card under the middle-column cursor.
     pub fn selected_card(&self) -> Option<BoardCard> {
         let cards = self.task_cards();
-        cards.get(self.card_selected.min(cards.len().saturating_sub(1))).copied()
+        cards
+            .get(self.card_selected.min(cards.len().saturating_sub(1)))
+            .copied()
     }
 
     /// `true` if the selected card is a live session (enables focusing the Chat).
@@ -1158,9 +1160,7 @@ impl App {
         // find (or open) a live play session for the task
         let find = |s: &[SessionEntry]| {
             s.iter().position(|e| {
-                e.is_live()
-                    && e.kind == SessionKind::Play
-                    && e.task.as_deref() == Some(id.as_str())
+                e.is_live() && e.kind == SessionKind::Play && e.task.as_deref() == Some(id.as_str())
             })
         };
         let mut idx = find(&self.sessions);
@@ -1411,7 +1411,11 @@ impl App {
                         let _ = tx.send(JobMsg::Log("no repos detected".into()));
                     }
                     for r in &p.repos {
-                        let _ = tx.send(JobMsg::Log(format!("repo {} -> {}", r.slug, r.path.display())));
+                        let _ = tx.send(JobMsg::Log(format!(
+                            "repo {} -> {}",
+                            r.slug,
+                            r.path.display()
+                        )));
                     }
                     Ok(p.name)
                 }
@@ -1547,7 +1551,9 @@ impl App {
             if !(e.is_live() && e.kind == SessionKind::Play) {
                 continue;
             }
-            let Some(id) = e.task.as_deref() else { continue };
+            let Some(id) = e.task.as_deref() else {
+                continue;
+            };
             if let Some(t) = self.tasks.iter().find(|t| t.id == id) {
                 for link in t.prs.iter().filter(|l| l.pr == 0) {
                     targets.push((id.to_string(), link.repo.clone(), link.branch.clone()));
@@ -1773,7 +1779,6 @@ impl App {
             .unwrap_or_default()
     }
 
-
     /// Removes a play session's worktrees (cleanup on close). The branch stays in
     /// the repo (the worktree is just the working copy).
     fn cleanup_worktrees(&self, task: &Option<String>, worktrees: &[(String, PathBuf)]) {
@@ -1865,7 +1870,10 @@ impl App {
                 .then(b.seq.cmp(&a.seq))
         });
         if let Some(uuid) = focused
-            && let Some(new_idx) = self.sessions.iter().position(|e| e.claude_session_id == uuid)
+            && let Some(new_idx) = self
+                .sessions
+                .iter()
+                .position(|e| e.claude_session_id == uuid)
             && let Some(pos) = self
                 .task_cards()
                 .iter()

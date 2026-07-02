@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets
+      - run: cargo test --workspace
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_MIN: "95"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Enforce minimum line coverage
+        run: |
+          cargo llvm-cov --workspace --summary-only --json > coverage.json
+          pct=$(jq '.data[0].totals.lines.percent' coverage.json)
+          printf 'Line coverage: %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN"
+          printf 'Line coverage: %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+            printf '::error::Line coverage %.2f%% is below the %s%% minimum\n' "$pct" "$COVERAGE_MIN"
+            exit 1
+          fi
+
+  # Placeholder for the native app. Enable when app/ lands, with the same
+  # blocking coverage gate as the Rust job:
+  #
+  # swift-test:
+  #   name: Swift tests
+  #   runs-on: macos-latest
+  #   env:
+  #     COVERAGE_MIN: "95"
+  #   defaults:
+  #     run:
+  #       working-directory: app
+  #   steps:
+  #     - uses: actions/checkout@v5
+  #     - run: >
+  #         xcodebuild test -scheme Jaum -destination 'platform=macOS'
+  #         -enableCodeCoverage YES -resultBundlePath TestResults.xcresult
+  #     - name: Enforce minimum line coverage
+  #       run: |
+  #         pct=$(xcrun xccov view --report --json TestResults.xcresult | jq '.lineCoverage * 100')
+  #         printf 'Line coverage: %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN"
+  #         if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+  #           printf '::error::Line coverage %.2f%% is below the %s%% minimum\n' "$pct" "$COVERAGE_MIN"
+  #           exit 1
+  #         fi

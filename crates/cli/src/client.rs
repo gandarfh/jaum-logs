@@ -96,7 +96,11 @@ fn client_loop(
 
 /// Suspend the TUI, run `$EDITOR` on the requested path and resume, asking for a
 /// full frame back. This is the only interactive step delegated to the client.
-fn run_editor(terminal: &mut DefaultTerminal, write_half: &mut UnixStream, path: &str) -> Result<()> {
+fn run_editor(
+    terminal: &mut DefaultTerminal,
+    write_half: &mut UnixStream,
+    path: &str,
+) -> Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     ratatui::restore();
     let _ = std::process::Command::new(editor).arg(path).status();

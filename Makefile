@@ -5,7 +5,7 @@ DEMO_DIR := /tmp/jaum-demo
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release run list test clippy fmt fmt-check check demo clean install
+.PHONY: help build release run list test fmt demo clean install
 
 help: ## Lista os alvos disponiveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -26,16 +26,8 @@ list: build ## Lista o backlog sem abrir a TUI
 test: ## Roda todos os testes do workspace
 	cargo test
 
-clippy: ## Lint com clippy (falha em qualquer warning)
-	cargo clippy --all-targets -- -D warnings
-
 fmt: ## Formata o codigo
 	cargo fmt
-
-fmt-check: ## Verifica a formatacao (nao altera arquivos)
-	cargo fmt --check
-
-check: fmt-check clippy test ## Gate completo: formatacao + clippy + testes
 
 demo: build ## Monta um sandbox de exemplo (HOME isolado) e abre a TUI nele
 	rm -rf $(DEMO_DIR)

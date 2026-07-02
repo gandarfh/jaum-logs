@@ -94,7 +94,13 @@ fn setup(
     let repos =
         std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
     // fake gh: `true` ignores args and returns empty (no network in tests).
-    (Store::new(&backlog), Git::new(), Gh::with_bin("true"), docs, repos)
+    (
+        Store::new(&backlog),
+        Git::new(),
+        Gh::with_bin("true"),
+        docs,
+        repos,
+    )
 }
 
 fn git_init(repo: &Path) {
@@ -479,9 +485,17 @@ fn acceptance_checklist_extracts_criteria_from_body() {
     // checkbox stripped, empty placeholder and "## Notas" item ignored
     assert_eq!(
         texts,
-        vec!["mostra saldo na tela", "some com o loading", "valida entrada vazia"]
+        vec![
+            "mostra saldo na tela",
+            "some com o loading",
+            "valida entrada vazia"
+        ]
     );
-    assert!(items.iter().all(|i| i.verdict == ConstraintVerdict::Pending));
+    assert!(
+        items
+            .iter()
+            .all(|i| i.verdict == ConstraintVerdict::Pending)
+    );
 
     // the review context includes the body and the mandatory criteria checklist
     let ctx = review.build_context("TASK-002").unwrap();
