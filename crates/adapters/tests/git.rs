@@ -99,6 +99,21 @@ fn worktree_add_em_branch_existente_funciona() {
 }
 
 #[test]
+fn worktree_add_e_idempotente_quando_ja_existe() {
+    // re-play de uma task wip cuja worktree foi preservada num shutdown: o
+    // segundo add não deve falhar, só devolver o mesmo caminho.
+    let dir = TmpDir::new("worktree-idem");
+    let repo = init_repo(&dir);
+    let g = Git::new();
+
+    let wt1 = g.worktree_add(&repo, "feat/z").unwrap();
+    assert!(wt1.exists());
+    let wt2 = g.worktree_add(&repo, "feat/z").unwrap();
+    assert_eq!(wt1, wt2, "deve reusar a worktree existente");
+    assert!(wt2.exists());
+}
+
+#[test]
 fn diff_mostra_mudancas_da_branch() {
     let dir = TmpDir::new("diff");
     let repo = init_repo(&dir);

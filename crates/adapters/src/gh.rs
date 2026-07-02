@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -5,6 +6,10 @@ use jaum_core::MergeState;
 
 /// Adapter de `gh` via shell-out. O GitHub é downstream: a ferramenta cria PR
 /// e **lê** número e estado de merge, nunca mergeia.
+///
+/// O `gh` roda DENTRO do diretório do repo (`dir`) e auto-detecta o repositório
+/// do GitHub pelo remote — assim não dependemos do slug interno estar no formato
+/// `owner/name` (projetos cujo slug é só o nome da pasta também funcionam).
 pub struct Gh {
     bin: String,
 }
@@ -27,30 +32,23 @@ impl Gh {
         Self { bin: bin.into() }
     }
 
-    /// Abre um PR para `branch` no `repo` (slug "owner/name"). Devolve o número.
-    /// NUNCA mergeia — só cria.
-    pub fn pr_create(&self, repo: &str, branch: &str) -> Result<u64> {
-        let out = self.run(&["pr", "create", "--repo", repo, "--head", branch, "--fill"])?;
+    /// Abre um PR para `branch`, rodando o `gh` no diretório do repo. Devolve o
+    /// número. NUNCA mergeia — só cria.
+    pub fn pr_create(&self, dir: &Path, branch: &str) -> Result<u64> {
+        let out = self.run(dir, &["pr", "create", "--head", branch, "--fill"])?;
         parse_pr_number_from_url(&out)
             .with_context(|| format!("extraindo número do PR da saída do gh: {out:?}"))
     }
 
     /// Número do PR aberto/fechado para `branch`, ou `0` se nenhum existe.
-    pub fn pr_number(&self, repo: &str, branch: &str) -> Result<u64> {
-        let out = self.run(&[
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "number",
-            "--jq",
-            ".[0].number // 0",
-        ])?;
+    pub fn pr_number(&self, dir: &Path, branch: &str) -> Result<u64> {
+        let out = self.run(
+            dir,
+            &[
+                "pr", "list", "--head", branch, "--state", "all", "--json", "number", "--jq",
+                ".[0].number // 0",
+            ],
+        )?;
         let s = out.trim();
         if s.is_empty() {
             return Ok(0);
@@ -60,21 +58,14 @@ impl Gh {
     }
 
     /// Estado de merge do PR. `pr == 0` é tratado como `NotCreated` sem chamar o gh.
-    pub fn pr_merge_state(&self, repo: &str, pr: u64) -> Result<MergeState> {
+    pub fn pr_merge_state(&self, dir: &Path, pr: u64) -> Result<MergeState> {
         if pr == 0 {
             return Ok(MergeState::NotCreated);
         }
-        let out = self.run(&[
-            "pr",
-            "view",
-            &pr.to_string(),
-            "--repo",
-            repo,
-            "--json",
-            "state",
-            "--jq",
-            ".state",
-        ])?;
+        let out = self.run(
+            dir,
+            &["pr", "view", &pr.to_string(), "--json", "state", "--jq", ".state"],
+        )?;
         Ok(match out.trim() {
             "MERGED" => MergeState::Merged,
             "OPEN" => MergeState::Open,
@@ -83,11 +74,34 @@ impl Gh {
         })
     }
 
-    fn run(&self, args: &[&str]) -> Result<String> {
+    /// Diff do PR (por número), puxado do GitHub. Vazio se `pr == 0`.
+    pub fn pr_diff(&self, dir: &Path, pr: u64) -> Result<String> {
+        if pr == 0 {
+            return Ok(String::new());
+        }
+        self.run(dir, &["pr", "diff", &pr.to_string()])
+    }
+
+    /// Título + corpo do PR (por número). `("", "")` se `pr == 0`.
+    pub fn pr_view(&self, dir: &Path, pr: u64) -> Result<(String, String)> {
+        if pr == 0 {
+            return Ok((String::new(), String::new()));
+        }
+        let out = self.run(
+            dir,
+            &["pr", "view", &pr.to_string(), "--json", "title,body"],
+        )?;
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_default();
+        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        Ok((get("title"), get("body")))
+    }
+
+    fn run(&self, dir: &Path, args: &[&str]) -> Result<String> {
         let out = Command::new(&self.bin)
+            .current_dir(dir)
             .args(args)
             .output()
-            .with_context(|| format!("executando {} {args:?}", self.bin))?;
+            .with_context(|| format!("executando {} {args:?} em {}", self.bin, dir.display()))?;
         if !out.status.success() {
             bail!(
                 "{} {args:?} falhou: {}",

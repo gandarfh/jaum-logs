@@ -16,24 +16,21 @@ pub struct RepoMap {
     pub path: PathBuf,
 }
 
-/// Um projeto: nome + caminhos + N repos.
+/// Um projeto. Tudo do jaum é EXTERNO (`~/jaum/<nome>/...`); `root` é a pasta do
+/// projeto (só código), usada para reconhecer o cwd e detectar os repos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
+    /// Pasta do projeto (onde o `jaum init` rodou). O jaum nunca escreve aqui.
+    #[serde(default)]
+    pub root: PathBuf,
     pub backlog: PathBuf,
-    #[serde(default = "default_docs")]
+    #[serde(default)]
     pub docs: PathBuf,
-    #[serde(default = "default_work")]
+    #[serde(default)]
     pub work_dir: PathBuf,
     #[serde(default)]
     pub repos: Vec<RepoMap>,
-}
-
-fn default_docs() -> PathBuf {
-    PathBuf::from("docs")
-}
-fn default_work() -> PathBuf {
-    PathBuf::from(".jaum")
 }
 
 impl Project {
@@ -44,7 +41,23 @@ impl Project {
             .map(|r| (r.slug.clone(), r.path.clone()))
             .collect()
     }
+
+    /// Diretório externo do projeto no jaum (`~/jaum/<nome>`).
+    pub fn home(&self) -> PathBuf {
+        self.backlog
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.backlog.clone())
+    }
+
+    /// Caminho do `conventions.md` (boas práticas do projeto, externo).
+    pub fn conventions_path(&self) -> PathBuf {
+        self.home().join("conventions.md")
+    }
 }
+
+/// Template inicial do `conventions.md`.
+pub const CONVENTIONS_TEMPLATE: &str = "# Convenções do projeto\n\nBoas práticas injetadas em toda sessão de play e checadas no review.\nUma por linha (use `-`). Edite na TUI (`e`) ou capture na hora (`c`).\n\n- \n";
 
 /// Config global: todos os projetos conhecidos.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -53,11 +66,16 @@ pub struct Config {
     pub projects: Vec<Project>,
 }
 
+/// Diretório base do jaum: `~/jaum`.
+pub fn jaum_home() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("variável HOME não definida")?;
+    Ok(PathBuf::from(home).join("jaum"))
+}
+
 impl Config {
     /// Caminho do arquivo de config: `~/jaum/config.toml`.
     pub fn path() -> Result<PathBuf> {
-        let home = std::env::var_os("HOME").context("variável HOME não definida")?;
-        Ok(PathBuf::from(home).join("jaum").join("config.toml"))
+        Ok(jaum_home()?.join("config.toml"))
     }
 
     /// Carrega a config (vazia se o arquivo ainda não existe).
@@ -84,10 +102,14 @@ impl Config {
         self.projects.iter().find(|p| p.name == name)
     }
 
-    /// Projeto cujo `.backlog/` corresponde ao diretório atual (canônico).
+    /// Projeto correspondente ao diretório atual: por `root` (layout externo);
+    /// fallback para o layout antigo (backlog dentro do projeto).
     pub fn project_for_cwd(&self, cwd: &Path) -> Option<&Project> {
         let cwd = fs::canonicalize(cwd).ok()?;
         self.projects.iter().find(|p| {
+            if fs::canonicalize(&p.root).map(|r| r == cwd).unwrap_or(false) {
+                return true;
+            }
             fs::canonicalize(&p.backlog)
                 .map(|b| b.parent().map(|d| d == cwd).unwrap_or(false))
                 .unwrap_or(false)
@@ -95,8 +117,8 @@ impl Config {
     }
 }
 
-/// Scaffolding: cria `.backlog/`, `docs/`, `.jaum/` no `root`, detecta repos e
-/// registra (ou atualiza) o projeto na config global. Devolve o projeto criado.
+/// Scaffolding EXTERNO: cria `~/jaum/<nome>/{docs,backlog,work}`, detecta os
+/// repos dentro de `root` e registra o projeto. NÃO escreve nada no `root`.
 pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> {
     let root = fs::canonicalize(root).with_context(|| format!("resolvendo {}", root.display()))?;
     let name = root
@@ -105,8 +127,16 @@ pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> 
         .unwrap_or("projeto")
         .to_string();
 
-    for sub in [".backlog", "docs", ".jaum"] {
-        fs::create_dir_all(root.join(sub)).with_context(|| format!("criando {sub}/"))?;
+    let home = jaum_home()?.join(&name);
+    for sub in ["docs", "backlog", "work"] {
+        fs::create_dir_all(home.join(sub))
+            .with_context(|| format!("criando {}", home.join(sub).display()))?;
+    }
+    // conventions.md (boas práticas do projeto) — não sobrescreve se já existe
+    let conv = home.join("conventions.md");
+    if !conv.exists() {
+        fs::write(&conv, CONVENTIONS_TEMPLATE)
+            .with_context(|| format!("criando {}", conv.display()))?;
     }
 
     let repo_dirs = if explicit_repos.is_empty() {
@@ -127,9 +157,10 @@ pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> 
 
     let project = Project {
         name: name.clone(),
-        backlog: root.join(".backlog"),
-        docs: root.join("docs"),
-        work_dir: root.join(".jaum"),
+        root,
+        backlog: home.join("backlog"),
+        docs: home.join("docs"),
+        work_dir: home.join("work"),
         repos,
     };
 

@@ -75,6 +75,48 @@ fn oneshot_propaga_erro_de_exit_nao_zero() {
 }
 
 #[test]
+fn streaming_repassa_cada_linha_e_devolve_tudo() {
+    let dir = TmpDir::new("stream");
+    let path = dir.0.join("claude");
+    // imprime 3 linhas de "evento" no stdout
+    fs::write(
+        &path,
+        "#!/usr/bin/env bash\nprintf 'um\\ndois\\ntres\\n'\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+
+    let exec = ClaudeExecutor::with_bin(path.to_string_lossy().into_owned());
+    let mut seen: Vec<String> = Vec::new();
+    let mut on_line = |l: &str| seen.push(l.to_string());
+    let out = exec
+        .spawn_oneshot_streaming("x", &ExecFlags::new(), &mut on_line)
+        .unwrap();
+
+    assert_eq!(seen, vec!["um", "dois", "tres"]);
+    assert_eq!(out, "um\ndois\ntres\n");
+}
+
+#[test]
+fn streaming_propaga_erro_de_exit_nao_zero() {
+    let dir = TmpDir::new("stream-err");
+    let path = dir.0.join("claude");
+    fs::write(&path, "#!/usr/bin/env bash\necho 'kaboom' >&2\nexit 4\n").unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+
+    let exec = ClaudeExecutor::with_bin(path.to_string_lossy().into_owned());
+    let mut on_line = |_: &str| {};
+    let err = exec
+        .spawn_oneshot_streaming("x", &ExecFlags::new(), &mut on_line)
+        .unwrap_err();
+    assert!(err.to_string().contains("kaboom"));
+}
+
+#[test]
 fn interactive_roundtrip_via_pty() {
     // usa `cat` como sessão: ecoa o que recebe.
     let exec = ClaudeExecutor::with_bin("cat");

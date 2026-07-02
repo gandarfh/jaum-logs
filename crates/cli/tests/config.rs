@@ -26,6 +26,7 @@ fn slug_from_url_ssh_e_https() {
 fn repo_map_constroi_slug_para_path() {
     let project = Project {
         name: "x".into(),
+        root: PathBuf::from("/p"),
         backlog: PathBuf::from("/p/.backlog"),
         docs: PathBuf::from("/p/docs"),
         work_dir: PathBuf::from("/p/.jaum"),
@@ -50,6 +51,7 @@ fn config_toml_roundtrip() {
     let cfg = Config {
         projects: vec![Project {
             name: "tono".into(),
+            root: PathBuf::from("/p"),
             backlog: PathBuf::from("/p/.backlog"),
             docs: PathBuf::from("/p/docs"),
             work_dir: PathBuf::from("/p/.jaum"),

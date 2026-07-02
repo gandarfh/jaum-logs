@@ -187,6 +187,29 @@ fn create_stub_gera_id_sequencial_e_backlog() {
 }
 
 #[test]
+fn link_repo_cria_vinculo_e_atualiza_branch() {
+    let dir = TmpDir::new("link");
+    let store = seed_fixture(&dir);
+    let stub = store.create_stub(&["RFC-009".to_string()]).unwrap(); // sem prs
+    assert!(stub.prs.is_empty());
+
+    // cria o vínculo
+    let t = store.link_repo(&stub.id, "org/app", "feat/x").unwrap();
+    assert_eq!(t.prs.len(), 1);
+    assert_eq!(t.prs[0].repo, "org/app");
+    assert_eq!(t.prs[0].branch, "feat/x");
+    assert_eq!(t.prs[0].pr, 0);
+
+    // mesmo repo de novo: atualiza o branch, não duplica
+    let t = store.link_repo(&stub.id, "org/app", "feat/y").unwrap();
+    assert_eq!(t.prs.len(), 1);
+    assert_eq!(t.prs[0].branch, "feat/y");
+
+    // persistiu
+    assert_eq!(store.get(&stub.id).unwrap().prs[0].branch, "feat/y");
+}
+
+#[test]
 fn set_status_persiste() {
     let dir = TmpDir::new("setstatus");
     let store = seed_fixture(&dir);

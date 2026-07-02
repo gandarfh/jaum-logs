@@ -10,12 +10,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", features = ["serde"] }
 jaum-adapters.workspace = true
 jaum-core.workspace = true
 jaum-flows = { version = "0.1.0", path = "../flows" }
-ratatui = "0.30.2"
+libc = "0.2"
+notify = "6"
+ratatui = { version = "0.30.2", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
 toml = "1.1.2"
 tui-term = "0.3.4"
 vt100 = "0.16.2"

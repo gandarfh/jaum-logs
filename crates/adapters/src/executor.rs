@@ -1,6 +1,6 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -22,6 +22,11 @@ pub struct ExecFlags {
     pub model: Option<String>,
     /// Diretório de trabalho (a worktree da task).
     pub cwd: Option<PathBuf>,
+    /// UUID determinístico da sessão a CRIAR (`--session-id`). Permite resumir
+    /// depois sem fazer parse do output.
+    pub session_id: Option<String>,
+    /// UUID da sessão a RETOMAR (`--resume`). Exclui `session_id` (resume vence).
+    pub resume: Option<String>,
     /// Escape hatch para flags adicionais.
     pub extra: Vec<String>,
 }
@@ -71,6 +76,18 @@ impl ExecFlags {
         self
     }
 
+    /// Cria a sessão com um UUID conhecido (`--session-id`).
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
+        self
+    }
+
+    /// Retoma uma sessão existente (`--resume`).
+    pub fn with_resume(mut self, id: impl Into<String>) -> Self {
+        self.resume = Some(id.into());
+        self
+    }
+
     /// Traduz para os argumentos do CLI `claude` (sem `--print` nem o prompt).
     /// Listas variádicas vêm antes das flags com valor; o prompt nunca vai
     /// depois de uma lista variádica (é sempre posicional no início) para não
@@ -97,6 +114,14 @@ impl ExecFlags {
             a.push("--model".to_string());
             a.push(m.clone());
         }
+        // resume e session-id são mutuamente exclusivos: retomar vence criar.
+        if let Some(r) = &self.resume {
+            a.push("--resume".to_string());
+            a.push(r.clone());
+        } else if let Some(s) = &self.session_id {
+            a.push("--session-id".to_string());
+            a.push(s.clone());
+        }
         a.extend(self.extra.iter().cloned());
         a
     }
@@ -110,6 +135,22 @@ pub trait Executor {
 
     /// Abre uma sessão interativa num PTY (play/review iterativo).
     fn spawn_interactive(&self, prompt: &str, flags: &ExecFlags) -> Result<Session>;
+
+    /// Como `spawn_oneshot`, mas chama `on_line` para cada linha de stdout
+    /// enquanto o processo roda (logs ao vivo). Devolve o stdout completo. O
+    /// default (para fakes) só delega ao `spawn_oneshot` sem streaming.
+    fn spawn_oneshot_streaming(
+        &self,
+        prompt: &str,
+        flags: &ExecFlags,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<String> {
+        let out = self.spawn_oneshot(prompt, flags)?;
+        for line in out.lines() {
+            on_line(line);
+        }
+        Ok(out)
+    }
 }
 
 /// Impl do [`Executor`] para o Claude Code (CLI `claude`).
@@ -169,6 +210,61 @@ impl Executor for ClaudeExecutor {
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn spawn_oneshot_streaming(
+        &self,
+        prompt: &str,
+        flags: &ExecFlags,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<String> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg(prompt).arg("--print").args(flags.to_claude_args());
+        if let Some(cwd) = &flags.cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("executando {} --print (stream)", self.bin))?;
+
+        // stderr numa thread para não travar quando o buffer enche.
+        let stderr = child.stderr.take();
+        let err_handle = std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(mut e) = stderr {
+                let _ = e.read_to_string(&mut s);
+            }
+            s
+        });
+
+        let stdout = child.stdout.take().context("sem stdout do claude")?;
+        let reader = BufReader::new(stdout);
+        let mut full = String::new();
+        for line in reader.lines() {
+            let line = line.context("lendo stdout do claude")?;
+            on_line(&line);
+            full.push_str(&line);
+            full.push('\n');
+        }
+
+        let status = child.wait().context("aguardando o claude encerrar")?;
+        let stderr = err_handle.join().unwrap_or_default();
+        if !status.success() {
+            // com stream-json o erro costuma vir no último evento `result`;
+            // se stderr trouxe algo, usa; senão entrega o stdout cru.
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                full.trim().to_string()
+            };
+            bail!(
+                "{} --print (stream) falhou (exit {:?}): {detail}",
+                self.bin,
+                status.code()
+            );
+        }
+        Ok(full)
     }
 
     fn spawn_interactive(&self, prompt: &str, flags: &ExecFlags) -> Result<Session> {

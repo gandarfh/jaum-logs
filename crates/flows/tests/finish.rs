@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -6,6 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use jaum_adapters::Gh;
 use jaum_core::{MergeState, Status, Store};
 use jaum_flows::finish::Finish;
+
+/// Mapa de repos para o Finish: cada slug aponta para um diretório que existe
+/// (o `gh` falso ignora o cwd, mas `current_dir` exige um path válido).
+fn repos(dir: &TmpDir) -> HashMap<String, PathBuf> {
+    ["org/x", "org/y", "slyde"]
+        .iter()
+        .map(|s| (s.to_string(), dir.0.clone()))
+        .collect()
+}
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -32,7 +42,7 @@ fn fake_gh(dir: &TmpDir) -> String {
     let path = dir.0.join("gh");
     let script = r#"#!/usr/bin/env bash
 case "$1 $2" in
-  "pr list") if [ "$6" = "feat/open" ]; then echo "5"; else echo "0"; fi ;;
+  "pr list") if [ "$4" = "feat/open" ]; then echo "5"; else echo "0"; fi ;;
   "pr view")
     case "$3" in
       7) echo "MERGED" ;;
@@ -68,7 +78,7 @@ fn run_marca_merged_quando_todos_pr_mergeados() {
         "  - repo: org/x\n    pr: 7\n    branch: feat/a\n",
     );
     let gh = Gh::with_bin(fake_gh(&dir));
-    let finish = Finish::new(&store, &gh);
+    let finish = Finish::new(&store, &gh, repos(&dir));
 
     let agg = finish.run("TASK-001").unwrap();
     assert_eq!(agg, MergeState::Merged);
@@ -85,7 +95,7 @@ fn run_nao_mergeia_e_persiste_numero_descoberto() {
         "  - repo: org/x\n    pr: 0\n    branch: feat/open\n",
     );
     let gh = Gh::with_bin(fake_gh(&dir));
-    let finish = Finish::new(&store, &gh);
+    let finish = Finish::new(&store, &gh, repos(&dir));
 
     let agg = finish.run("TASK-002").unwrap();
     assert_eq!(agg, MergeState::Open);
@@ -105,11 +115,30 @@ fn run_multi_pr_aberto_agrega_open() {
         "  - repo: org/x\n    pr: 7\n    branch: feat/a\n  - repo: org/y\n    pr: 5\n    branch: feat/b\n",
     );
     let gh = Gh::with_bin(fake_gh(&dir));
-    let finish = Finish::new(&store, &gh);
+    let finish = Finish::new(&store, &gh, repos(&dir));
 
     let agg = finish.run("TASK-003").unwrap();
     assert_eq!(agg, MergeState::Open); // um merged + um aberto
     assert_eq!(store.get("TASK-003").unwrap().status, Status::Review);
+}
+
+#[test]
+fn run_tolera_gh_que_falha_como_not_created() {
+    // projeto local sem remote no GitHub: o `gh` falha (slug não é owner/name,
+    // sem auth, etc). O finish deve tratar como NotCreated, não propagar o erro.
+    let dir = TmpDir::new("nogh");
+    let store = store_with(
+        &dir,
+        "TASK-009",
+        "review",
+        "  - repo: slyde\n    pr: 0\n    branch: feat/markdown-parser\n",
+    );
+    let gh = Gh::with_bin("false"); // sai com erro em qualquer chamada
+    let finish = Finish::new(&store, &gh, repos(&dir));
+
+    let agg = finish.run("TASK-009").unwrap();
+    assert_eq!(agg, MergeState::NotCreated);
+    assert_eq!(store.get("TASK-009").unwrap().status, Status::Review);
 }
 
 #[test]
@@ -122,7 +151,7 @@ fn merge_state_so_le_nao_muda_status() {
         "  - repo: org/x\n    pr: 7\n    branch: feat/a\n",
     );
     let gh = Gh::with_bin(fake_gh(&dir));
-    let finish = Finish::new(&store, &gh);
+    let finish = Finish::new(&store, &gh, repos(&dir));
 
     assert_eq!(finish.merge_state("TASK-004").unwrap(), MergeState::Merged);
     // mesmo Merged, merge_state não altera o status

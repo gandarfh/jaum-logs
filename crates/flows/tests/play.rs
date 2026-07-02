@@ -64,7 +64,7 @@ fn task() -> Task {
 
 #[test]
 fn build_prompt_inclui_objetivo_contexto_e_constraints() {
-    let p = build_prompt(&task());
+    let p = build_prompt(&task(), "");
     assert!(p.contains("Implementar enum aberto"));
     assert!(p.contains("RFC-003"));
     assert!(p.contains("ADR-011"));
@@ -74,21 +74,46 @@ fn build_prompt_inclui_objetivo_contexto_e_constraints() {
 
 #[test]
 fn guard_flags_bloqueia_merge_e_injeta_constraints() {
-    let f = guard_flags(&task());
+    let f = guard_flags(&task(), "");
     assert!(f.disallowed_tools.iter().any(|t| t.contains("git merge")));
     assert!(f.disallowed_tools.iter().any(|t| t.contains("gh pr merge")));
     let sys = f.append_system_prompt.unwrap();
     assert!(sys.contains("nao tocar em src/legacy/"));
     assert!(sys.contains("manter API estavel"));
+    assert_eq!(f.model.as_deref(), Some(jaum_flows::AGENT_MODEL));
+}
+
+#[test]
+fn reinjection_inclui_convencoes_do_projeto() {
+    let t = reinjection_text(&task(), "- não referenciar nº de RFC em comentários");
+    assert!(t.contains("Convenções do projeto"));
+    assert!(t.contains("não referenciar nº de RFC"));
+    // e ainda traz as constraints da task
+    assert!(t.contains("nao rodar migration"));
 }
 
 #[test]
 fn reinjection_separa_mecanicas_de_semanticas() {
-    let t = reinjection_text(&task());
+    let t = reinjection_text(&task(), "");
     assert!(t.contains("Bloqueadas mecanicamente"));
     assert!(t.contains("nao rodar migration"));
     assert!(t.contains("Sua responsabilidade"));
     assert!(t.contains("manter API estavel"));
+}
+
+#[test]
+fn reinjection_define_convencoes_de_saida_do_repo() {
+    let t = reinjection_text(&task(), "");
+    assert!(t.contains("INGLÊS")); // PR/commits em inglês
+    assert!(t.contains("travessões")); // sem travessões, estilo pragmático
+    assert!(t.contains("Generated with Claude Code")); // proíbe a atribuição de IA
+}
+
+#[test]
+fn settings_desliga_co_author_de_ia() {
+    use std::path::Path;
+    let s = jaum_flows::play::settings_json(Path::new("/p/pre.sh"), Path::new("/p/re.txt"));
+    assert_eq!(s["includeCoAuthoredBy"], serde_json::json!(false));
 }
 
 // --- execução real do PreToolUse hook (patch 1) ---------------------------
@@ -240,7 +265,7 @@ fn start_cria_worktree_instala_hooks_e_marca_wip() {
     };
     let repos =
         std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos);
+    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos, String::new());
 
     let mut ps = play.start("TASK-001").unwrap();
 
@@ -271,6 +296,44 @@ fn start_cria_worktree_instala_hooks_e_marca_wip() {
 }
 
 #[test]
+fn start_injeta_session_id_e_resume_retoma_sem_prompt() {
+    let root = TmpDir::new("resume");
+    let backlog = root.0.join(".backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
+    let repos_root = root.0.join("repos");
+    git_init(&repos_root.join("repo"));
+
+    let store = Store::new(&backlog);
+    let git = Git::new();
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let repos =
+        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
+    let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos, String::new());
+
+    let ps = play.start("TASK-001").unwrap();
+    // start injeta --session-id com o uuid devolvido (não --resume)
+    {
+        let calls = rec.calls.borrow();
+        let (_prompt, flags) = &calls[0];
+        assert_eq!(flags.session_id.as_deref(), Some(ps.claude_session_id.as_str()));
+        assert!(flags.resume.is_none(), "start não deve usar --resume");
+    }
+
+    // resume injeta --resume <uuid>, sem prompt posicional, sem session_id
+    let cwd = ps.worktrees[0].1.clone();
+    let _ = play.resume("TASK-001", &ps.claude_session_id, &cwd).unwrap();
+    let calls = rec.calls.borrow();
+    let (prompt, flags) = calls.last().unwrap();
+    assert!(prompt.is_empty(), "resume não reenvia o prompt inicial");
+    assert_eq!(flags.resume.as_deref(), Some(ps.claude_session_id.as_str()));
+    assert!(flags.session_id.is_none(), "resume não usa --session-id");
+    assert!(flags.cwd.is_some(), "resume mantém a cwd da worktree");
+}
+
+#[test]
 fn start_recusa_spike() {
     let root = TmpDir::new("spike");
     let backlog = root.0.join(".backlog");
@@ -288,7 +351,7 @@ fn start_recusa_spike() {
         &git,
         &rec,
         root.0.join(".jaum"),
-        std::collections::HashMap::new(),
+        std::collections::HashMap::new(), String::new(),
     );
 
     let err = match play.start("TASK-001") {

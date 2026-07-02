@@ -34,7 +34,7 @@ fn merge_disallowed() -> Vec<String> {
 /// Prompt apertado da sessão: objetivo + contexto (RFCs/ADRs) + constraints +
 /// regras de escopo. Inclui as `enforce: review` no corpo, para eu e o agente
 /// as vermos.
-pub fn build_prompt(task: &Task) -> String {
+pub fn build_prompt(task: &Task, conventions: &str) -> String {
     let mut p = String::new();
     p.push_str(&format!("# {} ({:?})\n\n", task.id, task.task_type));
 
@@ -54,8 +54,8 @@ pub fn build_prompt(task: &Task) -> String {
         p.push('\n');
     }
 
-    p.push_str("## Constraints (NÃO viole)\n");
-    p.push_str(&reinjection_text(task));
+    p.push_str("## Constraints e convenções (NÃO viole)\n");
+    p.push_str(&reinjection_text(task, conventions));
     p.push_str("\n\n");
 
     p.push_str("## Regras desta sessão\n");
@@ -66,14 +66,20 @@ pub fn build_prompt(task: &Task) -> String {
     p
 }
 
-/// Bloco de constraints reinjetado a cada turno (via UserPromptSubmit hook) e
-/// também embutido no prompt/append-system-prompt. Separa as mecânicas (já
-/// bloqueadas) das semânticas (responsabilidade do agente — foco do patch 2).
-pub fn reinjection_text(task: &Task) -> String {
+/// Bloco reinjetado a cada turno (via UserPromptSubmit hook) e embutido no
+/// system prompt. Junta: convenções do projeto + constraints da task (mecânicas
+/// já bloqueadas vs semânticas, responsabilidade do agente — patch 2).
+pub fn reinjection_text(task: &Task, conventions: &str) -> String {
     let hooks = task.constraints_by(Enforce::Hook);
     let reviews = task.constraints_by(Enforce::Review);
 
     let mut t = String::new();
+    let conv = conventions.trim();
+    if !conv.is_empty() {
+        t.push_str("Convenções do projeto (sempre valem):\n");
+        t.push_str(conv);
+        t.push_str("\n\n");
+    }
     if !hooks.is_empty() {
         t.push_str("Bloqueadas mecanicamente (o hook impede a ação):\n");
         for c in &hooks {
@@ -86,16 +92,27 @@ pub fn reinjection_text(task: &Task) -> String {
             t.push_str(&format!("- {}\n", c.text));
         }
     }
-    t.push_str("Lembrete fixo: NÃO faça merge; abra PR apenas.");
+    t.push_str(
+        "Lembrete fixo: NÃO faça merge; abra PR apenas. NUNCA exponha a ferramenta interna jaum \
+nem o id da task (TASK-xxx) em branch, commit, PR, código ou comentário; descreva o trabalho, \
+não a contabilidade interna.\n",
+    );
+    t.push_str(
+        "Saída para o repositório (commits, título e corpo do PR, código, comentários): escreva em \
+INGLÊS, de forma direta e pragmática. Sem travessões (use vírgula, parênteses ou dois pontos). \
+Sem emojis e sem qualquer atribuição de IA (nada de \"Generated with Claude Code\", \
+\"Co-Authored-By: Claude\" e afins).",
+    );
     t
 }
 
-/// Flags base do play: bloqueio de merge + constraints no system prompt.
+/// Flags base do play: bloqueio de merge + constraints/convenções no system prompt.
 /// `start` ainda adiciona o hook (`--settings`) e a `cwd` (worktree).
-pub fn guard_flags(task: &Task) -> ExecFlags {
+pub fn guard_flags(task: &Task, conventions: &str) -> ExecFlags {
     ExecFlags::new()
         .with_disallowed(merge_disallowed())
-        .with_append_system_prompt(reinjection_text(task))
+        .with_append_system_prompt(reinjection_text(task, conventions))
+        .with_model(crate::AGENT_MODEL)
 }
 
 /// Script bash do PreToolUse hook: bloqueia merge SEMPRE e cada constraint
@@ -131,6 +148,9 @@ fi
 /// `reinject` é impresso a cada UserPromptSubmit (reinjeção — patch 2).
 pub fn settings_json(pretool_path: &Path, reinject_path: &Path) -> Value {
     json!({
+        // desliga o trailer "Co-Authored-By: Claude / Generated with Claude Code"
+        // nos commits — nada de atribuição de IA no repositório.
+        "includeCoAuthoredBy": false,
         "hooks": {
             "PreToolUse": [{
                 "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Update",
@@ -160,6 +180,8 @@ pub struct Play<'a, E: Executor> {
     work_dir: PathBuf,
     /// Mapeamento explícito slug "owner/name" -> caminho local do repo.
     repos: HashMap<String, PathBuf>,
+    /// Boas práticas do projeto (conventions.md), injetadas em toda sessão.
+    conventions: String,
 }
 
 /// Sessão de play viva: a sessão do executor + as worktrees criadas.
@@ -168,6 +190,8 @@ pub struct PlaySession {
     pub session: Session,
     pub worktrees: Vec<(String, PathBuf)>,
     pub artifacts: Artifacts,
+    /// UUID da sessão do claude (`--session-id`), para retomar depois.
+    pub claude_session_id: String,
 }
 
 impl<'a, E: Executor> Play<'a, E> {
@@ -177,6 +201,7 @@ impl<'a, E: Executor> Play<'a, E> {
         executor: &'a E,
         work_dir: impl Into<PathBuf>,
         repos: HashMap<String, PathBuf>,
+        conventions: impl Into<String>,
     ) -> Self {
         Self {
             store,
@@ -184,6 +209,7 @@ impl<'a, E: Executor> Play<'a, E> {
             executor,
             work_dir: work_dir.into(),
             repos,
+            conventions: conventions.into(),
         }
     }
 
@@ -207,7 +233,7 @@ impl<'a, E: Executor> Play<'a, E> {
 
         fs::write(&pretool_path, pretool_hook_script(task))?;
         make_executable(&pretool_path)?;
-        fs::write(&reinject_path, reinjection_text(task))?;
+        fs::write(&reinject_path, reinjection_text(task, &self.conventions))?;
         let settings = settings_json(&pretool_path, &reinject_path);
         fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
@@ -240,11 +266,13 @@ impl<'a, E: Executor> Play<'a, E> {
 
         let artifacts = self.install_hooks(&task)?;
 
-        let flags = guard_flags(&task)
+        let claude_session_id = uuid::Uuid::new_v4().to_string();
+        let flags = guard_flags(&task, &self.conventions)
             .with_hook(artifacts.settings_path.clone())
-            .with_cwd(worktrees[0].1.clone());
+            .with_cwd(worktrees[0].1.clone())
+            .with_session_id(&claude_session_id);
 
-        let prompt = build_prompt(&task);
+        let prompt = build_prompt(&task, &self.conventions);
         let session = self.executor.spawn_interactive(&prompt, &flags)?;
 
         self.store.set_status(id, Status::Wip)?;
@@ -254,14 +282,29 @@ impl<'a, E: Executor> Play<'a, E> {
             session,
             worktrees,
             artifacts,
+            claude_session_id,
         })
+    }
+
+    /// Retoma uma sessão de play já existente: relança o claude com `--resume`
+    /// na MESMA worktree (cwd), sem reenviar o prompt inicial nem recriar a
+    /// worktree, sem tocar no status. Reinstala os hooks (idempotente).
+    pub fn resume(&self, id: &str, uuid: &str, cwd: &Path) -> Result<Session> {
+        let task = self.store.get(id)?;
+        let artifacts = self.install_hooks(&task)?;
+        let flags = guard_flags(&task, &self.conventions)
+            .with_hook(artifacts.settings_path)
+            .with_cwd(cwd.to_path_buf())
+            .with_resume(uuid);
+        self.executor.spawn_interactive("", &flags)
     }
 
     /// Reinjeção manual (reforço): empurra o bloco de constraints no input da
     /// sessão agora. A reinjeção PRIMÁRIA é automática via UserPromptSubmit hook.
     pub fn reinject(&self, ps: &mut PlaySession) -> Result<()> {
         let task = self.store.get(&ps.id)?;
-        ps.session.write_line(&reinjection_text(&task))
+        ps.session
+            .write_line(&reinjection_text(&task, &self.conventions))
     }
 
     /// Encerra a sessão e remove as worktrees criadas.

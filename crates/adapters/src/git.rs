@@ -39,9 +39,14 @@ impl Git {
     }
 
     /// Cria uma worktree para `branch` (criando a branch se ainda não existir).
-    /// Devolve o caminho da worktree.
+    /// Devolve o caminho da worktree. Idempotente: se a worktree já existe no
+    /// caminho determinístico, reusa (ex.: re-play de uma task wip cuja worktree
+    /// foi preservada num shutdown anterior).
     pub fn worktree_add(&self, repo: &Path, branch: &str) -> Result<PathBuf> {
         let path = self.worktree_path(repo, branch);
+        if path.exists() {
+            return Ok(path);
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("criando diretório de worktrees {}", parent.display()))?;

@@ -40,7 +40,7 @@ case "$1 $2" in
     echo "https://github.com/owner/repo/pull/142"
     ;;
   "pr list")
-    if [ "$6" = "missing/branch" ]; then echo ""; else echo "7"; fi
+    if [ "$4" = "missing/branch" ]; then echo ""; else echo "7"; fi
     ;;
   "pr view")
     case "$3" in
@@ -63,7 +63,7 @@ esac
 fn pr_create_extrai_numero_da_url() {
     let dir = TmpDir::new("create");
     let gh = Gh::with_bin(fake_gh(&dir));
-    let n = gh.pr_create("owner/repo", "feat/x").unwrap();
+    let n = gh.pr_create(&dir.0, "feat/x").unwrap();
     assert_eq!(n, 142);
 }
 
@@ -71,44 +71,33 @@ fn pr_create_extrai_numero_da_url() {
 fn pr_number_parseia_resultado() {
     let dir = TmpDir::new("number");
     let gh = Gh::with_bin(fake_gh(&dir));
-    assert_eq!(gh.pr_number("owner/repo", "feat/x").unwrap(), 7);
+    assert_eq!(gh.pr_number(&dir.0, "feat/x").unwrap(), 7);
 }
 
 #[test]
 fn pr_number_zero_quando_nao_existe() {
     let dir = TmpDir::new("number-zero");
     let gh = Gh::with_bin(fake_gh(&dir));
-    assert_eq!(gh.pr_number("owner/repo", "missing/branch").unwrap(), 0);
+    assert_eq!(gh.pr_number(&dir.0, "missing/branch").unwrap(), 0);
 }
 
 #[test]
 fn pr_merge_state_mapeia_estados() {
     let dir = TmpDir::new("state");
     let gh = Gh::with_bin(fake_gh(&dir));
-    assert_eq!(
-        gh.pr_merge_state("owner/repo", 1).unwrap(),
-        MergeState::Open
-    );
-    assert_eq!(
-        gh.pr_merge_state("owner/repo", 2).unwrap(),
-        MergeState::Merged
-    );
-    assert_eq!(
-        gh.pr_merge_state("owner/repo", 3).unwrap(),
-        MergeState::Closed
-    );
-    assert_eq!(
-        gh.pr_merge_state("owner/repo", 99).unwrap(),
-        MergeState::Unknown
-    );
+    assert_eq!(gh.pr_merge_state(&dir.0, 1).unwrap(), MergeState::Open);
+    assert_eq!(gh.pr_merge_state(&dir.0, 2).unwrap(), MergeState::Merged);
+    assert_eq!(gh.pr_merge_state(&dir.0, 3).unwrap(), MergeState::Closed);
+    assert_eq!(gh.pr_merge_state(&dir.0, 99).unwrap(), MergeState::Unknown);
 }
 
 #[test]
 fn pr_merge_state_zero_eh_not_created_sem_chamar_gh() {
     // bin inexistente: se chamasse o gh, falharia. pr==0 curto-circuita.
     let gh = Gh::with_bin("/nao/existe/gh");
+    // pr==0 curto-circuita antes de chamar o gh; o path nem é usado.
     assert_eq!(
-        gh.pr_merge_state("owner/repo", 0).unwrap(),
+        gh.pr_merge_state(std::path::Path::new("."), 0).unwrap(),
         MergeState::NotCreated
     );
 }

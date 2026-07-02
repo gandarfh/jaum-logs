@@ -1,6 +1,9 @@
 //! Finish: lê o estado de merge dos PRs via `gh` e atualiza o status da task.
 //! NUNCA executa merge — o merge é comando do usuário, fora desta ferramenta.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use anyhow::Result;
 use jaum_adapters::Gh;
 use jaum_core::{MergeState, PrLink, Status, Store};
@@ -8,22 +11,34 @@ use jaum_core::{MergeState, PrLink, Status, Store};
 pub struct Finish<'a> {
     store: &'a Store,
     gh: &'a Gh,
+    /// slug "owner/name" -> caminho local do repo (o `gh` roda lá dentro).
+    repos: HashMap<String, PathBuf>,
 }
 
 impl<'a> Finish<'a> {
-    pub fn new(store: &'a Store, gh: &'a Gh) -> Self {
-        Self { store, gh }
+    pub fn new(store: &'a Store, gh: &'a Gh, repos: HashMap<String, PathBuf>) -> Self {
+        Self { store, gh, repos }
     }
 
-    /// Estado de merge efetivo de um PR. Descobre o número via `gh` se ainda for
-    /// 0 (não persiste aqui — só leitura).
+    /// Estado de merge efetivo de um PR. O `gh` roda no diretório do repo (resolvido
+    /// pelo slug). Tolerante: sem repo mapeado, ou se o `gh` falhar (sem remote no
+    /// GitHub, sem autenticação), trata como `NotCreated`/`Unknown` em vez de
+    /// propagar o erro.
     fn pr_state(&self, link: &PrLink) -> Result<(u64, MergeState)> {
+        let Some(dir) = self.repos.get(&link.repo) else {
+            // repo não mapeado: nada a consultar.
+            return Ok((link.pr, MergeState::NotCreated));
+        };
         let pr = if link.pr != 0 {
             link.pr
         } else {
-            self.gh.pr_number(&link.repo, &link.branch)?
+            // descoberta best-effort: falha do gh = ainda não há PR.
+            self.gh.pr_number(dir, &link.branch).unwrap_or(0)
         };
-        let state = self.gh.pr_merge_state(&link.repo, pr)?;
+        if pr == 0 {
+            return Ok((0, MergeState::NotCreated));
+        }
+        let state = self.gh.pr_merge_state(dir, pr)?;
         Ok((pr, state))
     }
 

@@ -197,6 +197,23 @@ impl Store {
         Ok(task)
     }
 
+    /// Vincula um repo+branch à task (cria o `PrLink` com `pr: 0` se não existir,
+    /// ou atualiza o branch se o repo já estava vinculado). Usado no setup do play.
+    pub fn link_repo(&self, id: &str, repo: &str, branch: &str) -> Result<Task> {
+        let mut task = self.get(id)?;
+        if let Some(link) = task.prs.iter_mut().find(|p| p.repo == repo) {
+            link.branch = branch.to_string();
+        } else {
+            task.prs.push(crate::model::PrLink {
+                repo: repo.to_string(),
+                pr: 0,
+                branch: branch.to_string(),
+            });
+        }
+        self.write(&task)?;
+        Ok(task)
+    }
+
     /// Registra o número de um PR já existente (lido do `gh`) no vínculo do repo.
     pub fn set_pr(&self, id: &str, repo: &str, pr_num: u64) -> Result<Task> {
         let mut task = self.get(id)?;
