@@ -111,8 +111,7 @@ on every PR and on push to `main`:
 - **Lint**: `cargo clippy --all-targets -- -D warnings`
 - **Build and tests**: `cargo build --all-targets` + `cargo test --workspace`
 - **Coverage**: `cargo llvm-cov`, minimum of 95% line coverage. The gate is
-  currently in `warn` mode (reports without failing); flip `COVERAGE_GATE` to
-  `block` in the workflow once coverage reaches the target.
+  blocking: the job fails below the minimum.
 
 The Makefile only has development targets (build, run, test, fmt, demo,
 install), no CI rules. To run the equivalent of the gates locally:
