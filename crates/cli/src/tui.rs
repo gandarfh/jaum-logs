@@ -421,6 +421,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             (Tab::Board, BoardFocus::Cards) => app.card_prev(),
             (Tab::Board, _) => app.select_prev(),
         },
+        // Shift+J/K rola o preview do doc sem abrir o overlay.
+        KeyCode::Char('J') if app.tab == Tab::Docs => app.doc_scroll_down(),
+        KeyCode::Char('K') if app.tab == Tab::Docs => app.doc_scroll_up(),
         KeyCode::Char('g') | KeyCode::Home => app.select_first(),
         KeyCode::Char('G') | KeyCode::End => app.select_last(),
         KeyCode::Char('l') | KeyCode::Right => {
@@ -646,68 +649,219 @@ fn status_color(s: jaum_core::Status) -> Color {
     }
 }
 
-/// Render simples de markdown -> linhas estilizadas (headings, listas,
-/// checklists, code fences, blockquotes).
-fn markdown_lines(text: &str) -> Vec<Line<'static>> {
-    let mut out: Vec<Line> = Vec::new();
-    let mut in_code = false;
-    for raw in text.lines() {
-        if let Some(lang) = raw.trim_start().strip_prefix("```") {
-            in_code = !in_code;
-            let bar = if in_code {
-                format!("┌─ {}", lang.trim())
-            } else {
-                "└─".to_string()
-            };
-            out.push(Line::from(Span::styled(bar, Style::default().fg(Color::DarkGray))));
+/// Skin do termimad casado com o tema Charm do app (lavanda/rosa/esmaecido).
+fn md_skin() -> termimad::MadSkin {
+    use termimad::crossterm::style::Color::Rgb;
+    let mut skin = termimad::MadSkin::default();
+    skin.set_fg(Rgb { r: 200, g: 200, b: 210 });
+    skin.set_headers_fg(Rgb { r: 180, g: 142, b: 255 }); // ACCENT
+    skin.bold.set_fg(Rgb { r: 255, g: 255, b: 255 });
+    skin.italic.set_fg(Rgb { r: 150, g: 150, b: 170 });
+    skin.inline_code.set_fg(Rgb { r: 255, g: 121, b: 198 }); // PINK
+    skin
+}
+
+/// Render de markdown -> linhas do ratatui. A prosa vai pro termimad (temas,
+/// wrap, código, listas) via ANSI + `ansi-to-tui`; as tabelas são renderizadas
+/// aqui (`render_table`) com moldura completa e wrap por célula, porque a tabela
+/// do termimad fica sem borda de topo/base e com padding inconsistente.
+/// `width` é a largura interna do painel de destino.
+fn markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut prose = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i];
+        // tabela GFM: linha com `|` seguida de uma linha separadora `|---|`.
+        if is_table_row(raw) && i + 1 < lines.len() && is_table_separator(lines[i + 1]) {
+            flush_prose(&mut prose, &mut out, width);
+            let mut rows = vec![raw];
+            i += 2; // pula cabeçalho + separador
+            while i < lines.len() && is_table_row(lines[i]) && !is_table_separator(lines[i]) {
+                rows.push(lines[i]);
+                i += 1;
+            }
+            render_table(&mut out, &rows, width);
             continue;
         }
-        if in_code {
-            out.push(Line::from(Span::styled(
-                format!("  {raw}"),
-                Style::default().fg(Color::Rgb(170, 170, 200)),
-            )));
-            continue;
-        }
-        let bold = Modifier::BOLD;
-        if let Some(h) = raw.strip_prefix("### ") {
-            out.push(Line::from(Span::styled(
-                h.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(bold),
-            )));
-        } else if let Some(h) = raw.strip_prefix("## ") {
-            out.push(Line::from(Span::styled(
-                h.to_string(),
-                Style::default().fg(Color::Magenta).add_modifier(bold),
-            )));
-        } else if let Some(h) = raw.strip_prefix("# ") {
-            out.push(Line::from(Span::styled(
-                h.to_uppercase(),
-                Style::default().fg(Color::LightMagenta).add_modifier(bold),
-            )));
-        } else if raw.starts_with("- [ ] ") || raw.starts_with("- [x] ") {
-            let done = raw.starts_with("- [x] ");
-            let mark = if done { "☑" } else { "☐" };
-            let txt = raw[6..].to_string();
-            out.push(Line::from(vec![
-                Span::styled(
-                    format!("  {mark} "),
-                    Style::default().fg(if done { Color::Green } else { Color::Yellow }),
-                ),
-                Span::raw(txt),
-            ]));
-        } else if let Some(item) = raw.strip_prefix("- ").or_else(|| raw.strip_prefix("* ")) {
-            out.push(Line::from(format!("  • {item}")));
-        } else if let Some(q) = raw.strip_prefix("> ") {
-            out.push(Line::from(Span::styled(
-                format!("┃ {q}"),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-            )));
-        } else {
-            out.push(Line::from(raw.to_string()));
+        prose.push_str(raw);
+        prose.push('\n');
+        i += 1;
+    }
+    flush_prose(&mut prose, &mut out, width);
+    out
+}
+
+/// Renderiza a prosa acumulada via termimad (ANSI -> Text) e esvazia o buffer.
+fn flush_prose(prose: &mut String, out: &mut Vec<Line<'static>>, width: u16) {
+    use ansi_to_tui::IntoText;
+    if !prose.trim().is_empty() {
+        let w = width.max(8) as usize;
+        let ansi = format!("{}", md_skin().text(prose, Some(w)));
+        match ansi.into_text() {
+            Ok(t) => out.extend(t.lines),
+            Err(_) => out.extend(prose.lines().map(|l| Line::from(l.to_string()))),
         }
     }
+    prose.clear();
+}
+
+/// Texto plano de uma célula (sem marcadores inline) — usado p/ medir e wrapar.
+fn strip_inline(s: &str) -> String {
+    s.replace("**", "").replace('`', "")
+}
+
+fn is_table_row(r: &str) -> bool {
+    let t = r.trim();
+    t.contains('|') && !t.starts_with("```")
+}
+
+fn is_table_separator(r: &str) -> bool {
+    let t = r.trim();
+    if !t.contains('|') {
+        return false;
+    }
+    let cells = split_row(r);
+    !cells.is_empty()
+        && cells
+            .iter()
+            .all(|c| !c.is_empty() && c.contains('-') && c.chars().all(|ch| ch == '-' || ch == ':'))
+}
+
+/// Quebra uma linha de tabela em células (respeita `\|` escapado).
+fn split_row(r: &str) -> Vec<String> {
+    let t = r.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.replace("\\|", "\u{0}")
+        .split('|')
+        .map(|c| c.trim().replace('\u{0}', "|"))
+        .collect()
+}
+
+/// Quebra o texto de uma célula em linhas de até `w` colunas (word-wrap;
+/// palavra maior que `w` é cortada).
+fn wrap_cell(text: &str, w: usize) -> Vec<String> {
+    if w == 0 {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if word.chars().count() > w {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                if chunk.chars().count() == w {
+                    out.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            line = chunk;
+            continue;
+        }
+        let extra = usize::from(!line.is_empty());
+        if line.chars().count() + extra + word.chars().count() > w {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+        } else {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
     out
+}
+
+/// Renderiza uma tabela GFM com moldura arredondada completa, cabeçalho em
+/// destaque e wrap por célula p/ caber em `width`. `rows[0]` é o cabeçalho.
+fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
+    let bs = Style::default().fg(BORDER);
+    let cells: Vec<Vec<String>> = rows.iter().map(|r| split_row(r)).collect();
+    let ncol = cells.iter().map(|c| c.len()).max().unwrap_or(0);
+    if ncol == 0 {
+        return;
+    }
+    // largura natural (máx.) de cada coluna.
+    let mut widths = vec![0usize; ncol];
+    for row in &cells {
+        for (ci, c) in row.iter().enumerate() {
+            let w = strip_inline(c).chars().count();
+            if w > widths[ci] {
+                widths[ci] = w;
+            }
+        }
+    }
+    // encolhe as maiores colunas até a moldura caber (cada coluna gasta w+3:
+    // 1 borda + 2 espaços; +1 pela borda final).
+    const MIN_COL: usize = 3;
+    let budget = (width as usize).saturating_sub(3 * ncol + 1);
+    let floor = MIN_COL * ncol;
+    let mut sum: usize = widths.iter().sum();
+    while sum > budget.max(floor) {
+        let Some(idx) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > MIN_COL)
+            .max_by_key(|(_, w)| **w)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        widths[idx] -= 1;
+        sum -= 1;
+    }
+
+    // desenha uma régua horizontal (topo/meio/base).
+    let rule = |left: char, mid: char, right: char| -> Line<'static> {
+        let mut s = String::new();
+        s.push(left);
+        for (ci, w) in widths.iter().enumerate() {
+            s.push_str(&"─".repeat(w + 2));
+            s.push(if ci + 1 < ncol { mid } else { right });
+        }
+        Line::from(Span::styled(s, bs))
+    };
+
+    out.push(rule('╭', '┬', '╮'));
+    for (ri, row) in cells.iter().enumerate() {
+        let is_header = ri == 0;
+        let base = if is_header {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Rgb(200, 200, 210))
+        };
+        let wrapped: Vec<Vec<String>> = (0..ncol)
+            .map(|ci| {
+                let cell = row.get(ci).map(String::as_str).unwrap_or("");
+                wrap_cell(&strip_inline(cell), widths[ci])
+            })
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for li in 0..height {
+            let mut spans: Vec<Span<'static>> = vec![Span::styled("│", bs)];
+            for (ci, w) in widths.iter().enumerate() {
+                let piece = wrapped[ci].get(li).cloned().unwrap_or_default();
+                let pad = w.saturating_sub(piece.chars().count());
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(piece, base));
+                spans.push(Span::raw(" ".repeat(pad + 1)));
+                spans.push(Span::styled("│", bs));
+            }
+            out.push(Line::from(spans));
+        }
+        if is_header {
+            out.push(rule('├', '┼', '┤'));
+        }
+    }
+    out.push(rule('╰', '┴', '╯'));
 }
 
 /// Overlay de visualização de um doc (markdown renderizado).
@@ -728,7 +882,7 @@ fn render_doc_view(f: &mut Frame, app: &App) {
         .get(app.docs_selected)
         .map(|rel| std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default())
         .unwrap_or_default();
-    let p = Paragraph::new(markdown_lines(&content))
+    let p = Paragraph::new(markdown_lines(&content, area.width.saturating_sub(7)))
         .block(overlay_panel(&format!("{title} · j/k rola · Esc fecha")))
         .wrap(Wrap { trim: false })
         .scroll((app.doc_scroll, 0));
@@ -753,7 +907,7 @@ fn overlay_panel(title: &str) -> Block<'static> {
 
 /// Linhas do conteúdo de uma task (metadados + corpo em markdown). Reusado pelo
 /// preview do Board e pelo overlay de detalhe.
-fn task_detail_lines(t: &jaum_core::Task) -> Vec<Line<'static>> {
+fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
@@ -811,7 +965,7 @@ fn task_detail_lines(t: &jaum_core::Task) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.extend(markdown_lines(&t.body));
+    lines.extend(markdown_lines(&t.body, width));
     lines
 }
 
@@ -821,7 +975,7 @@ fn render_detail(f: &mut Frame, app: &App) {
     let Some(t) = app.selected_task() else { return };
     let area = centered_rect(80, 80, f.area());
     f.render_widget(Clear, area);
-    let p = Paragraph::new(task_detail_lines(t))
+    let p = Paragraph::new(task_detail_lines(t, area.width.saturating_sub(7)))
         .block(overlay_panel(&format!("{} · j/k rola · Esc fecha", t.id)))
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
@@ -1098,7 +1252,9 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         if !t.body.trim().is_empty() {
-            body_lines = markdown_lines(&t.body);
+            // largura interna da List: chrome do painel (6) + highlight_symbol
+            // (2) + 1 col de margem, p/ o termimad não estourar e re-quebrar.
+            body_lines = markdown_lines(&t.body, area.width.saturating_sub(9));
         }
         t.id.clone()
     } else {
@@ -1215,7 +1371,10 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
         None => {
             // sem card: detalhe da task (ou dica).
             let (title, lines) = match app.selected_task() {
-                Some(t) => (format!("{} · Enter expande", t.id), task_detail_lines(t)),
+                Some(t) => (
+                    format!("{} · Enter expande", t.id),
+                    task_detail_lines(t, area.width.saturating_sub(7)),
+                ),
                 None => (
                     "Detalhes".to_string(),
                     vec![Line::from(Span::styled(
@@ -1425,7 +1584,10 @@ fn render_docs_preview(f: &mut Frame, app: &App, area: Rect) {
         Some(rel) => {
             let file = rel.rsplit('/').next().unwrap_or(rel).to_string();
             let content = std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default();
-            (format!("{file} · Enter expande"), markdown_lines(&content))
+            (
+                format!("{file} · J/K rola · Enter expande"),
+                markdown_lines(&content, area.width.saturating_sub(7)),
+            )
         }
         None => ("preview".to_string(), Vec::new()),
     };
@@ -1539,8 +1701,47 @@ fn render_toast(f: &mut Frame, msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_mouse_sgr;
+    use super::{encode_mouse_sgr, markdown_lines};
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::text::Line;
+
+    fn plain(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn markdown_remove_marcadores_de_negrito() {
+        // termimad renderiza o negrito e descarta os `**`.
+        let ls = markdown_lines("um **texto** forte", 80);
+        let s: String = ls.iter().map(plain).collect();
+        assert!(s.contains("texto"));
+        assert!(!s.contains("**"));
+    }
+
+    #[test]
+    fn markdown_tabela_moldura_completa_e_conteudo() {
+        let md = "| a | bb |\n|---|----|\n| 1 | 22 |";
+        let ls = markdown_lines(md, 80);
+        let s: String = ls.iter().map(plain).collect();
+        assert!(s.contains("bb"));
+        assert!(s.contains("22"));
+        // moldura: topo ╭ + cabeçalho + separador ├ + linha + base ╰.
+        assert_eq!(ls.len(), 5);
+        assert!(plain(&ls[0]).starts_with('╭'));
+        assert!(plain(&ls[0]).contains('┬'));
+        assert!(plain(&ls[2]).starts_with('├'));
+        assert!(plain(&ls[4]).starts_with('╰'));
+    }
+
+    #[test]
+    fn markdown_tabela_larga_faz_wrap_por_celula() {
+        let md = "| col |\n|-----|\n| uma frase bem longa que nao cabe |";
+        let ls = markdown_lines(md, 20);
+        // topo + cabeçalho + separador + várias linhas da célula + base.
+        assert!(ls.len() > 5);
+        assert!(plain(ls.first().unwrap()).starts_with('╭'));
+        assert!(plain(ls.last().unwrap()).starts_with('╰'));
+    }
 
     fn ev(kind: MouseEventKind) -> MouseEvent {
         MouseEvent { kind, column: 1, row: 1, modifiers: KeyModifiers::NONE }

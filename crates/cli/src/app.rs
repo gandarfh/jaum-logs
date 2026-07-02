@@ -889,9 +889,11 @@ impl App {
         if !self.docs.is_empty() {
             self.docs_selected = (self.docs_selected + 1).min(self.docs.len() - 1);
         }
+        self.doc_scroll = 0;
     }
     pub fn docs_prev(&mut self) {
         self.docs_selected = self.docs_selected.saturating_sub(1);
+        self.doc_scroll = 0;
     }
     pub fn open_doc(&mut self) {
         if self.docs.get(self.docs_selected).is_none() {
