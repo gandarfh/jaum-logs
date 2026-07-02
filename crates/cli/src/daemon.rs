@@ -35,18 +35,23 @@ pub fn is_running(sock: &Path) -> bool {
 /// Starts the daemon detached from the terminal (`setsid`), with stdio in
 /// `~/jaum/daemon.log`. Survives closing the terminal tab (immune to SIGHUP).
 pub fn spawn_detached(idx: usize) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let log_path = crate::config::jaum_home()?.join("daemon.log");
+    spawn_daemon_process(&exe, idx, &log_path)
+}
+
+/// Spawns `exe --daemon <idx>` in its own session with stdio in `log_path`.
+pub(crate) fn spawn_daemon_process(exe: &Path, idx: usize, log_path: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let exe = std::env::current_exe()?;
-    let log_path = crate::config::jaum_home()?.join("daemon.log");
     if let Some(p) = log_path.parent() {
         std::fs::create_dir_all(p)?;
     }
     let out = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_path)?;
+        .open(log_path)?;
     let err = out.try_clone()?;
 
     let mut cmd = Command::new(exe);
@@ -415,6 +420,206 @@ mod tests {
     }
 
     #[test]
+    fn spawn_daemon_process_creates_log_and_detaches() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "jaum-spawn-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let log = dir.join("nested").join("daemon.log");
+        spawn_daemon_process(Path::new("/usr/bin/true"), 3, &log).unwrap();
+        assert!(log.exists(), "log file should be created");
+        let _ = fs::remove_dir_all(&dir);
+
+        // an empty log path has no parent and cannot be opened
+        assert!(spawn_daemon_process(Path::new("/usr/bin/true"), 3, Path::new("")).is_err());
+    }
+
+    #[test]
+    fn shutdown_without_daemon_reports_false() {
+        let mut sock = std::env::temp_dir();
+        sock.push(format!(
+            "jaum-noserve-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(!is_running(&sock));
+        assert!(!shutdown(&sock).unwrap());
+    }
+
+    #[test]
+    fn editor_request_roundtrip_and_mouse_tick() {
+        let mut d = Daemon::new(app(), 80, 24).unwrap();
+        assert_eq!(d.take_editor_request(), None);
+
+        assert!(!d.feed_key(key('e')), "edit request is not a detach");
+        let path = d.take_editor_request().expect("editor requested");
+        assert!(path.ends_with("conventions.md"));
+        assert_eq!(d.take_editor_request(), None, "request must be cleared");
+
+        d.editor_done();
+        assert_eq!(d.app_mut().status_msg, "conventions.md updated");
+
+        // scroll + tick only need to not disturb the render state
+        d.feed_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        d.tick();
+    }
+
+    #[test]
+    fn serve_refuses_second_daemon_and_stops_on_shutdown() {
+        let mut sock = std::env::temp_dir();
+        sock.push(format!(
+            "jaum-dup-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        // orphan socket file from a dead daemon: serve must clean it up
+        fs::write(&sock, "stale").unwrap();
+
+        let sock_c = sock.clone();
+        let server = std::thread::spawn(move || serve(&sock_c, app(), 80, 24));
+        for _ in 0..200 {
+            if is_running(&sock) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(is_running(&sock));
+
+        let err = serve(&sock, app(), 80, 24).unwrap_err();
+        assert!(err.to_string().contains("already running"));
+
+        assert!(shutdown(&sock).unwrap());
+        server.join().unwrap().unwrap();
+        assert!(!sock.exists());
+    }
+
+    #[test]
+    fn serve_routes_editor_resize_mouse_and_detach() {
+        use crate::protocol::{ClientMsg, ServerMsg, read_msg, write_msg};
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use std::os::unix::net::UnixStream;
+
+        let mut sock = std::env::temp_dir();
+        sock.push(format!(
+            "jaum-route-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let sock_c = sock.clone();
+
+        let client = std::thread::spawn(move || {
+            let connect = || loop {
+                if let Ok(c) = UnixStream::connect(&sock_c) {
+                    break c;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let mut conn = connect();
+            write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
+
+            // ask for the conventions editor; frames may interleave before it
+            write_msg(&mut conn, &ClientMsg::Key(key('e'))).unwrap();
+            let mut editor_path = None;
+            for _ in 0..100 {
+                match read_msg::<_, ServerMsg>(&mut conn).unwrap().unwrap() {
+                    ServerMsg::RunEditor { path } => {
+                        editor_path = Some(path);
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            assert!(
+                editor_path.unwrap().ends_with("conventions.md"),
+                "RunEditor should carry the conventions path"
+            );
+            write_msg(&mut conn, &ClientMsg::EditorDone).unwrap();
+
+            write_msg(
+                &mut conn,
+                &ClientMsg::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 5,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            )
+            .unwrap();
+
+            // resize: every client reattaches with a full frame of the new size
+            write_msg(
+                &mut conn,
+                &ClientMsg::Resize {
+                    cols: 100,
+                    rows: 30,
+                },
+            )
+            .unwrap();
+            let mut got_resized_full = false;
+            for _ in 0..100 {
+                if let Some(ServerMsg::FrameFull { cols, rows, .. }) =
+                    read_msg::<_, ServerMsg>(&mut conn).unwrap()
+                    && (cols, rows) == (100, 30)
+                {
+                    got_resized_full = true;
+                    break;
+                }
+            }
+            assert!(got_resized_full, "no FrameFull after resize");
+
+            // quit key: daemon answers Detach and drops the client
+            write_msg(&mut conn, &ClientMsg::Key(key('q'))).unwrap();
+            assert!(
+                matches!(
+                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
+                    Some(ServerMsg::Detach)
+                ),
+                "no Detach after q"
+            );
+            drop(conn);
+
+            // daemon survives the detach: a new client attaches and shuts it down
+            let mut conn = connect();
+            write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
+            assert!(
+                matches!(
+                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
+                    Some(ServerMsg::FrameFull { .. })
+                ),
+                "second client did not get a FrameFull"
+            );
+            // a state change while attached (and not pending) arrives as a diff
+            write_msg(
+                &mut conn,
+                &ClientMsg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
+                    Some(ServerMsg::FrameDiff(_))
+                ),
+                "tab change should arrive as FrameDiff"
+            );
+            // idle while attached: the daemon must hit its 16ms tick with an
+            // empty diff and keep the connection silent
+            std::thread::sleep(Duration::from_millis(80));
+            write_msg(&mut conn, &ClientMsg::Shutdown).unwrap();
+        });
+
+        serve(&sock, app(), 80, 24).unwrap();
+        client.join().unwrap();
+        assert!(!sock.exists());
+    }
+
+    #[test]
     fn serve_accepts_client_and_sends_full_frame() {
         use crate::protocol::{ClientMsg, ServerMsg, read_msg, write_msg};
         use std::os::unix::net::UnixStream;
@@ -438,17 +643,14 @@ mod tests {
             };
             write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
             // at least one FrameFull should arrive
-            let mut got_full = false;
-            for _ in 0..50 {
-                if let Some(ServerMsg::FrameFull { cols, rows, cells }) =
-                    read_msg::<_, ServerMsg>(&mut conn).unwrap()
-                {
+            let got_full = match read_msg::<_, ServerMsg>(&mut conn).unwrap() {
+                Some(ServerMsg::FrameFull { cols, rows, cells }) => {
                     assert_eq!((cols, rows), (80, 24));
                     assert_eq!(cells.len(), 80 * 24);
-                    got_full = true;
-                    break;
+                    true
                 }
-            }
+                _ => false,
+            };
             write_msg(&mut conn, &ClientMsg::Shutdown).unwrap();
             got_full
         });
