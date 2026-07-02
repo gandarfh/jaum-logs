@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use jaum_adapters::Gh;
@@ -31,8 +32,19 @@ impl Drop for TmpDir {
 ///   pr create            -> prints URL with PR 142 (preceded by a warning)
 ///   pr list (normal head)-> "7"; (head "missing/branch") -> ""
 ///   pr view <n>          -> 1=OPEN 2=MERGED 3=CLOSED 99=WEIRD
-fn fake_gh(dir: &TmpDir) -> String {
-    let path = dir.0.join("gh");
+/// Written once per process: a per-test copy races on Linux, where a fork
+/// from a parallel test can inherit the still-open write fd and make the
+/// exec fail with ETXTBSY.
+fn fake_gh() -> String {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(write_fake_gh).clone()
+}
+
+fn write_fake_gh() -> String {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("jaum-gh-bin-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("gh");
     let script = r#"#!/usr/bin/env bash
 case "$1 $2" in
   "pr create")
@@ -62,7 +74,7 @@ esac
 #[test]
 fn pr_create_extracts_number_from_url() {
     let dir = TmpDir::new("create");
-    let gh = Gh::with_bin(fake_gh(&dir));
+    let gh = Gh::with_bin(fake_gh());
     let n = gh.pr_create(&dir.0, "feat/x").unwrap();
     assert_eq!(n, 142);
 }
@@ -70,21 +82,21 @@ fn pr_create_extracts_number_from_url() {
 #[test]
 fn pr_number_parses_result() {
     let dir = TmpDir::new("number");
-    let gh = Gh::with_bin(fake_gh(&dir));
+    let gh = Gh::with_bin(fake_gh());
     assert_eq!(gh.pr_number(&dir.0, "feat/x").unwrap(), 7);
 }
 
 #[test]
 fn pr_number_zero_when_none_exists() {
     let dir = TmpDir::new("number-zero");
-    let gh = Gh::with_bin(fake_gh(&dir));
+    let gh = Gh::with_bin(fake_gh());
     assert_eq!(gh.pr_number(&dir.0, "missing/branch").unwrap(), 0);
 }
 
 #[test]
 fn pr_merge_state_maps_states() {
     let dir = TmpDir::new("state");
-    let gh = Gh::with_bin(fake_gh(&dir));
+    let gh = Gh::with_bin(fake_gh());
     assert_eq!(gh.pr_merge_state(&dir.0, 1).unwrap(), MergeState::Open);
     assert_eq!(gh.pr_merge_state(&dir.0, 2).unwrap(), MergeState::Merged);
     assert_eq!(gh.pr_merge_state(&dir.0, 3).unwrap(), MergeState::Closed);
