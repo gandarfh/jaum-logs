@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -512,4 +513,313 @@ fn is_clean_fails_with_unmet_criterion() {
     assert!(!r.is_clean(), "pending criterion must not pass");
     r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Ok)];
     assert!(r.is_clean(), "all ok -> clean");
+}
+
+// --- rendering and counters -------------------------------------------------
+
+#[test]
+fn finding_render_covers_all_severity_tags_and_optional_fields() {
+    // no line and no reference
+    let plain = Finding {
+        file: "src/a.rs".into(),
+        line: None,
+        message: "broken".into(),
+        reference: None,
+        severity: Severity::Blocker,
+    };
+    assert_eq!(plain.render(), "[BLOCKER] src/a.rs - broken");
+
+    let minor = finding("style", Severity::Minor);
+    assert!(minor.render().starts_with("[MINOR]"));
+    let nit = finding("typo", Severity::Nit);
+    assert!(nit.render().starts_with("[NIT]"));
+}
+
+#[test]
+fn unmet_count_counts_failed_and_pending_constraints_and_criteria() {
+    let mut r = report(
+        vec![],
+        vec![
+            cr("a", ConstraintVerdict::Ok),
+            cr("b", ConstraintVerdict::Failed),
+        ],
+    );
+    r.criteria = vec![
+        cr("c", ConstraintVerdict::Pending),
+        cr("d", ConstraintVerdict::Ok),
+    ];
+    assert_eq!(r.unmet_count(), 2);
+    assert_eq!(report(vec![], vec![]).unmet_count(), 0);
+}
+
+#[test]
+fn handoff_message_lists_unmet_criteria() {
+    let mut r = report(vec![], vec![]);
+    r.criteria = vec![
+        cr("mostra saldo", ConstraintVerdict::Failed),
+        cr("some com o loading", ConstraintVerdict::Ok), // ok doesn't enter
+    ];
+    let msg = jaum_flows::review::handoff_message(&r);
+    assert!(msg.contains("unmet criterion: mostra saldo"));
+    assert!(!msg.contains("some com o loading"));
+}
+
+// --- cwd and session flags --------------------------------------------------
+
+/// Recording executor: keeps the (prompt, flags) of every call.
+struct Rec {
+    calls: RefCell<Vec<(String, ExecFlags)>>,
+}
+impl Executor for Rec {
+    fn spawn_oneshot(&self, p: &str, f: &ExecFlags) -> anyhow::Result<String> {
+        self.calls.borrow_mut().push((p.to_string(), f.clone()));
+        Ok(String::new())
+    }
+    fn spawn_interactive(&self, p: &str, f: &ExecFlags) -> anyhow::Result<Session> {
+        self.calls.borrow_mut().push((p.to_string(), f.clone()));
+        ClaudeExecutor::with_bin("cat").spawn_interactive("", &ExecFlags::default())
+    }
+}
+
+#[test]
+fn review_cwd_falls_back_to_any_repo_then_docs_dir() {
+    let dir = TmpDir::new("cwd");
+    let (store, git, gh, docs, _repos) = setup(&dir);
+
+    // task repo not mapped: fall back to any mapped repo
+    let other = dir.0.join("repos/other");
+    let repos = std::collections::HashMap::from([("zzz/other".to_string(), other.clone())]);
+    let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
+    assert_eq!(review.review_cwd("TASK-001"), other);
+
+    // no repos mapped at all (and unknown id): fall back to docs_dir
+    let review = Review::new(
+        &store,
+        &git,
+        &gh,
+        &FakeExec,
+        &docs,
+        std::collections::HashMap::new(),
+        String::new(),
+    );
+    assert_eq!(review.review_cwd("TASK-404"), docs);
+}
+
+#[test]
+fn start_injects_session_id_and_repo_access() {
+    let dir = TmpDir::new("startflags");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    let repo_path = repos["myorg/repo"].clone();
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let review = Review::new(&store, &git, &gh, &rec, &docs, repos, String::new());
+
+    let (_session, uuid) = review.start("TASK-001").unwrap();
+    assert!(!uuid.is_empty());
+
+    let calls = rec.calls.borrow();
+    let (prompt, flags) = &calls[0];
+    assert!(prompt.contains("Read-only review of TASK-001"));
+    assert_eq!(flags.session_id.as_deref(), Some(uuid.as_str()));
+    assert!(flags.resume.is_none());
+    assert_eq!(flags.cwd.as_deref(), Some(repo_path.as_path()));
+    assert!(flags.extra.iter().any(|x| x == "--add-dir"));
+}
+
+#[test]
+fn start_without_repos_omits_add_dir_and_uses_docs_cwd() {
+    let dir = TmpDir::new("startnorepo");
+    let (store, git, gh, docs, _repos) = setup(&dir);
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let review = Review::new(
+        &store,
+        &git,
+        &gh,
+        &rec,
+        &docs,
+        std::collections::HashMap::new(),
+        String::new(),
+    );
+
+    review.start("TASK-001").unwrap();
+    let calls = rec.calls.borrow();
+    let (_prompt, flags) = &calls[0];
+    assert!(!flags.extra.iter().any(|x| x == "--add-dir"));
+    assert_eq!(flags.cwd.as_deref(), Some(docs.as_path()));
+}
+
+#[test]
+fn resume_reuses_uuid_and_cwd_without_prompt() {
+    let dir = TmpDir::new("resume");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let review = Review::new(&store, &git, &gh, &rec, &docs, repos, String::new());
+
+    let cwd = dir.0.join("somewhere");
+    let _ = review.resume("TASK-001", "uuid-123", &cwd).unwrap();
+    let calls = rec.calls.borrow();
+    let (prompt, flags) = &calls[0];
+    assert!(prompt.is_empty(), "resume must not resend the context");
+    assert_eq!(flags.resume.as_deref(), Some("uuid-123"));
+    assert!(flags.session_id.is_none());
+    assert_eq!(flags.cwd.as_deref(), Some(cwd.as_path()));
+}
+
+// --- build_context edge branches --------------------------------------------
+
+const FIXTURE_NO_PR: &str = r#"---
+id: TASK-003
+type: impl
+status: review
+prs:
+  - repo: myorg/repo
+    pr: 0
+    branch: feat/task-001
+  - repo: other/nope
+    pr: 0
+    branch: feat/x
+  - repo: myorg/repo
+    pr: 0
+    branch: feat/ghost
+---
+
+## Objective
+x
+"#;
+
+#[test]
+fn build_context_falls_back_to_local_diff_and_flags_unmapped_repo() {
+    let dir = TmpDir::new("localdiff");
+    let (store, git, _gh, docs, repos) = setup(&dir);
+    fs::write(dir.0.join(".backlog/TASK-003.md"), FIXTURE_NO_PR).unwrap();
+    // gh always fails: PR discovery yields 0 and the local diff is used
+    let gh = Gh::with_bin("false");
+    let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
+
+    let ctx = review.build_context("TASK-003").unwrap();
+    assert!(ctx.contains("myorg/repo @ feat/task-001 (no PR yet - local diff)"));
+    assert!(ctx.contains("(repo other/nope not mapped in the project)"));
+    // nonexistent branch: git diff fails and the error is embedded, not propagated
+    assert!(ctx.contains("(could not get diff for myorg/repo"));
+}
+
+#[test]
+fn build_context_reports_missing_docs_repos_and_includes_conventions() {
+    let dir = TmpDir::new("emptyctx");
+    let (store, git, gh, _docs, _repos) = setup(&dir);
+    // nonexistent docs dir + no repos + real conventions
+    let missing_docs = dir.0.join("missing-docs");
+    let review = Review::new(
+        &store,
+        &git,
+        &gh,
+        &FakeExec,
+        &missing_docs,
+        std::collections::HashMap::new(),
+        "- keep it simple",
+    );
+
+    let ctx = review.build_context("TASK-001").unwrap();
+    assert!(ctx.contains("(no docs found in"));
+    assert!(ctx.contains("(no repos mapped in the project)"));
+    assert!(ctx.contains("## Project conventions to respect"));
+    assert!(ctx.contains("- keep it simple"));
+}
+
+// --- capture parse branches --------------------------------------------------
+
+#[test]
+fn capture_logged_propagates_claude_error() {
+    let dir = TmpDir::new("caperr");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    let exec = StreamExec(r#"{"type":"result","is_error":true,"result":"usage limit"}"#.into());
+    let review = Review::new(&store, &git, &gh, &exec, &docs, repos, String::new());
+
+    let err = review.capture_logged("TASK-001", &mut |_| {}).unwrap_err();
+    assert!(err.to_string().contains("usage limit"));
+}
+
+#[test]
+fn capture_logged_without_result_event_fails() {
+    let dir = TmpDir::new("capnores");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    let exec = StreamExec("{\"type\":\"system\",\"subtype\":\"init\"}\n".into());
+    let review = Review::new(&store, &git, &gh, &exec, &docs, repos, String::new());
+
+    let err = review.capture_logged("TASK-001", &mut |_| {}).unwrap_err();
+    assert!(err.to_string().contains("result"));
+}
+
+#[test]
+fn capture_logged_with_empty_structured_output_keeps_checklist_pending() {
+    let dir = TmpDir::new("capempty");
+    let (store, git, gh, docs, _repos) = setup(&dir);
+    // blank lines interleaved in the stream must be skipped; no repos mapped
+    let exec = StreamExec(
+        "\n{\"type\":\"result\",\"is_error\":false,\"structured_output\":{}}\n\n".into(),
+    );
+    let review = Review::new(
+        &store,
+        &git,
+        &gh,
+        &exec,
+        &docs,
+        std::collections::HashMap::new(),
+        String::new(),
+    );
+
+    let report = review.capture_logged("TASK-001", &mut |_| {}).unwrap();
+    assert!(report.findings.is_empty());
+    assert_eq!(report.constraints.len(), 2);
+    assert!(
+        report
+            .constraints
+            .iter()
+            .all(|c| c.verdict == ConstraintVerdict::Pending)
+    );
+    assert!(!report.is_clean(), "pending checklist keeps it dirty");
+}
+
+#[test]
+fn capture_logged_merges_criteria_verdicts() {
+    use serde_json::json;
+    let dir = TmpDir::new("capcrit");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    fs::write(dir.0.join(".backlog/TASK-002.md"), FIXTURE_CRITERIA).unwrap();
+
+    let result = json!({
+        "type":"result","subtype":"success","is_error":false,"result":"ok",
+        "structured_output": {
+            "findings": [],
+            "constraints": [],
+            "criteria": [
+                {"text":"mostra saldo na tela","verdict":"ok","note":"visible in diff"},
+                {"text":"some com o loading","verdict":"failed","note":"spinner remains"}
+            ]
+        }
+    });
+    let exec = StreamExec(result.to_string());
+    let review = Review::new(&store, &git, &gh, &exec, &docs, repos, String::new());
+
+    let report = review.capture_logged("TASK-002", &mut |_| {}).unwrap();
+    let by_text = |t: &str| report.criteria.iter().find(|c| c.text == t).unwrap();
+    assert_eq!(
+        by_text("mostra saldo na tela").verdict,
+        ConstraintVerdict::Ok
+    );
+    assert_eq!(
+        by_text("some com o loading").verdict,
+        ConstraintVerdict::Failed
+    );
+    // the criterion claude did not mention stays pending
+    assert_eq!(
+        by_text("valida entrada vazia").verdict,
+        ConstraintVerdict::Pending
+    );
+    assert!(!report.is_clean());
 }

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -111,4 +112,100 @@ fn start_opens_interactive_session() {
     assert!(!uuid.is_empty(), "start must return a session-id");
     s.write_input(&[0x04]).unwrap();
     assert!(s.wait().unwrap());
+}
+
+/// Recording executor: keeps the (prompt, flags) of every call.
+struct Rec {
+    calls: RefCell<Vec<(String, ExecFlags)>>,
+}
+impl Executor for Rec {
+    fn spawn_oneshot(&self, p: &str, f: &ExecFlags) -> anyhow::Result<String> {
+        self.calls.borrow_mut().push((p.to_string(), f.clone()));
+        Ok(String::new())
+    }
+    fn spawn_interactive(&self, p: &str, f: &ExecFlags) -> anyhow::Result<Session> {
+        self.calls.borrow_mut().push((p.to_string(), f.clone()));
+        ClaudeExecutor::with_bin("cat").spawn_interactive("", &ExecFlags::default())
+    }
+}
+
+#[test]
+fn start_mounts_repos_read_only_and_blocks_merge_push() {
+    let dir = TmpDir::new("flags");
+    let backlog = dir.0.join("backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    let store = Store::new(&backlog);
+    let repo_path = dir.0.join("repo");
+    let repos = HashMap::from([("org/app".to_string(), repo_path.clone())]);
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let setup = Setup::new(&store, &rec, dir.0.clone(), repos, "");
+
+    let (_s, uuid) = setup.start().unwrap();
+    let calls = rec.calls.borrow();
+    let (prompt, flags) = &calls[0];
+    assert!(prompt.contains("Project setup"));
+    assert_eq!(flags.session_id.as_deref(), Some(uuid.as_str()));
+    assert_eq!(flags.cwd.as_deref(), Some(dir.0.as_path()));
+    assert_eq!(flags.model.as_deref(), Some(jaum_flows::AGENT_MODEL));
+    assert!(flags.extra.iter().any(|x| x == "--add-dir"));
+    assert!(
+        flags
+            .extra
+            .iter()
+            .any(|x| x == &repo_path.to_string_lossy())
+    );
+    for t in ["Bash(git merge)", "Bash(git push)", "Bash(gh pr merge)"] {
+        assert!(flags.disallowed_tools.iter().any(|x| x == t));
+    }
+}
+
+#[test]
+fn resume_reuses_uuid_without_prompt() {
+    let dir = TmpDir::new("resume");
+    let backlog = dir.0.join("backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    let store = Store::new(&backlog);
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let setup = Setup::new(&store, &rec, dir.0.clone(), HashMap::new(), "");
+
+    let _ = setup.resume("uuid-42").unwrap();
+    let calls = rec.calls.borrow();
+    let (prompt, flags) = &calls[0];
+    assert!(prompt.is_empty(), "resume must not resend the prompt");
+    assert_eq!(flags.resume.as_deref(), Some("uuid-42"));
+    assert!(flags.session_id.is_none());
+    assert!(
+        !flags.extra.iter().any(|x| x == "--add-dir"),
+        "no repos mapped"
+    );
+}
+
+#[test]
+fn build_prompt_shows_clean_branch_and_filled_conventions() {
+    let dir = TmpDir::new("filled");
+    let backlog = dir.0.join("backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(
+        backlog.join("TASK-001.md"),
+        "---\nid: TASK-001\ntype: impl\nstatus: backlog\nprs:\n  - repo: org/app\n    pr: 0\n    branch: feat/markdown-parser\n---\n\n## Objective\nx\n",
+    )
+    .unwrap();
+    let store = Store::new(&backlog);
+    let repos = HashMap::from([("org/app".to_string(), dir.0.join("repo"))]);
+    let setup = Setup::new(
+        &store,
+        &FakeExec,
+        dir.0.clone(),
+        repos,
+        "# Conventions\n\n- no RFC numbers in comments\n",
+    );
+
+    let p = setup.build_prompt().unwrap();
+    assert!(p.contains("org/app@feat/markdown-parser"));
+    assert!(!p.contains("leaks the id"));
+    assert!(p.contains("already filled"));
 }

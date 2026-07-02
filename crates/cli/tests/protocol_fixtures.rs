@@ -46,8 +46,7 @@ fn check_golden<T: Serialize + DeserializeOwned>(name: &str, msg: &T) {
         .unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()));
     let golden: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(
-        expected,
-        golden,
+        expected, golden,
         "serialization of `{name}` diverged from the committed fixture"
     );
 
