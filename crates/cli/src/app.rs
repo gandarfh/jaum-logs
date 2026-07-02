@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -16,7 +18,7 @@ use jaum_flows::finish::Finish;
 use jaum_flows::ingest::Ingest;
 use jaum_flows::parallel::{Parallel, ParallelReport};
 use jaum_flows::play::{Play, PlaySession};
-use jaum_flows::review::{ConstraintVerdict, Review, ReviewReport};
+use jaum_flows::review::{Review, ReviewReport};
 use jaum_flows::setup::{Setup, branch_leaks_id, is_template};
 
 /// O que falta no setup obrigatório do projeto (validado no init/abertura). É o
@@ -42,24 +44,20 @@ impl SetupNeeds {
     }
 }
 
-/// Abas da TUI.
+/// Abas da TUI. Sessões e review vivem dentro do Board (por task), não como abas.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Board,
-    Session,
-    Review,
     Docs,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 4] {
-        [Tab::Board, Tab::Session, Tab::Review, Tab::Docs]
+    pub fn all() -> [Tab; 2] {
+        [Tab::Board, Tab::Docs]
     }
     pub fn title(self) -> &'static str {
         match self {
             Tab::Board => "Board",
-            Tab::Session => "Session",
-            Tab::Review => "Review",
             Tab::Docs => "Docs",
         }
     }
@@ -67,14 +65,30 @@ impl Tab {
         Tab::all().iter().position(|t| *t == self).unwrap()
     }
     pub fn from_index(i: usize) -> Tab {
-        Tab::all()[i.min(3)]
+        Tab::all()[i.min(1)]
     }
     pub fn next(self) -> Tab {
-        Tab::from_index((self.index() + 1) % 4)
+        Tab::from_index((self.index() + 1) % 2)
     }
     pub fn prev(self) -> Tab {
-        Tab::from_index((self.index() + 3) % 4)
+        Tab::from_index((self.index() + 1) % 2)
     }
+}
+
+/// Painel em foco no Board (layout de 3 colunas: tasks | cards | chat).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoardFocus {
+    Tasks,
+    Cards,
+    Chat,
+}
+
+/// Item da coluna do meio de uma task: uma sessão (índice em `sessions`) ou o
+/// card do veredito do review (`.review.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoardCard {
+    Session(usize),
+    Verdict,
 }
 
 /// Ordem canônica de exibição dos status no board.
@@ -437,17 +451,20 @@ pub struct App {
     watch_rx: Option<Receiver<()>>,
     pub should_quit: bool,
 
-    /// Sessões (PTYs) vivas, rodando em paralelo. `session_selected` é a exibida
-    /// na aba Session e que recebe o input.
+    /// Sessões (PTYs) vivas, rodando em paralelo. A sessão "focada" é a do card
+    /// selecionado no Board (`current_session_idx`).
     pub sessions: Vec<SessionEntry>,
-    pub session_selected: usize,
 
     pub review_report: Option<ReviewReport>,
 
-    /// Aba Review: ids das tasks que têm `.review.md` (recomputado em `refresh`) e
-    /// o cursor da lista, independente da seleção do Board.
-    pub review_ids: Vec<String>,
-    pub review_selected: usize,
+    /// Board (layout 3 colunas): painel em foco, cursor da coluna de cards e se o
+    /// chat está em tela cheia. `project_selected` = a linha sintética "· projeto"
+    /// (topo da lista) está selecionada em vez de uma task; seus cards são as
+    /// sessões de setup.
+    pub board_focus: BoardFocus,
+    pub card_selected: usize,
+    pub chat_fullscreen: bool,
+    pub project_selected: bool,
 
     /// Última análise de paralelismo (carregada de `work_dir/parallel.json`).
     pub parallel: Option<ParallelReport>,
@@ -479,6 +496,12 @@ pub struct App {
     pub job: Option<Job>,
     /// Overlay de logs visível (separado do job: o job segue em background).
     pub job_overlay: bool,
+
+    /// Sincronização de PR em background: última passada e flag de "em andamento"
+    /// (evita threads sobrepostas). Enquanto há sessão de play viva, descobre o
+    /// número do PR aberto pelo agente e grava na task.
+    last_pr_sync: Instant,
+    pr_sync_running: Arc<AtomicBool>,
 }
 
 impl App {
@@ -514,10 +537,11 @@ impl App {
             watch_rx: None,
             should_quit: false,
             sessions: Vec::new(),
-            session_selected: 0,
             review_report: None,
-            review_ids: Vec::new(),
-            review_selected: 0,
+            board_focus: BoardFocus::Tasks,
+            card_selected: 0,
+            chat_fullscreen: false,
+            project_selected: false,
             parallel: None,
             pending_prefix: false,
             input: None,
@@ -532,6 +556,8 @@ impl App {
             edit_request: false,
             job: None,
             job_overlay: false,
+            last_pr_sync: Instant::now(),
+            pr_sync_running: Arc::new(AtomicBool::new(false)),
         };
         app.refresh()?;
         app.rehydrate_sessions();
@@ -547,7 +573,6 @@ impl App {
             let entry = self.rehydrate_one(rec);
             self.sessions.push(entry);
         }
-        self.session_selected = 0;
     }
 
     /// Constrói uma `SessionEntry` a partir de um registro: resume quando
@@ -727,16 +752,6 @@ impl App {
         self.overlaps = Conflict::new(&self.store)
             .detect_overlap()
             .unwrap_or_default();
-        // aba Review: tasks que já têm `.review.md` (independente do Board).
-        self.review_ids = self
-            .tasks
-            .iter()
-            .filter(|t| self.review_badge(&t.id).is_some())
-            .map(|t| t.id.clone())
-            .collect();
-        if self.review_selected >= self.review_ids.len() {
-            self.review_selected = self.review_ids.len().saturating_sub(1);
-        }
         // análise de paralelismo persistida (best-effort; ausente = sem badges).
         self.parallel = std::fs::read_to_string(self.parallel_file())
             .ok()
@@ -748,21 +763,76 @@ impl App {
         Ok(())
     }
 
-    // --- aba Review (lista de reviews) -------------------------------------
+    // --- Board: cards da task + foco de painel -----------------------------
 
-    /// Task sob o cursor da aba Review (a que está à mostra no detalhe).
-    pub fn review_tab_task(&self) -> Option<String> {
-        self.review_ids.get(self.review_selected).cloned()
+    /// Cards da coluna do meio para a task selecionada: uma entrada por sessão
+    /// viva/histórica dela + o veredito (se houver `.review.md`). A ordem das
+    /// sessões segue `sessions` (já ordenado por atividade em `sort_sessions`).
+    pub fn task_cards(&self) -> Vec<BoardCard> {
+        // linha · projeto: cards = sessões de setup (sem task).
+        if self.project_selected {
+            return self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.kind == SessionKind::Setup)
+                .map(|(i, _)| BoardCard::Session(i))
+                .collect();
+        }
+        let Some(id) = self.selected_task().map(|t| t.id.clone()) else {
+            return Vec::new();
+        };
+        let mut cards: Vec<BoardCard> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.task.as_deref() == Some(id.as_str()))
+            .map(|(i, _)| BoardCard::Session(i))
+            .collect();
+        if self.load_review(&id).is_some() {
+            cards.push(BoardCard::Verdict);
+        }
+        cards
     }
 
-    pub fn review_next(&mut self) {
-        if !self.review_ids.is_empty() {
-            self.review_selected = (self.review_selected + 1).min(self.review_ids.len() - 1);
+    /// Card sob o cursor da coluna do meio.
+    pub fn selected_card(&self) -> Option<BoardCard> {
+        let cards = self.task_cards();
+        cards.get(self.card_selected.min(cards.len().saturating_sub(1))).copied()
+    }
+
+    /// `true` se o card selecionado é uma sessão viva (habilita o foco no Chat).
+    pub fn selected_card_is_live(&self) -> bool {
+        matches!(self.selected_card(), Some(BoardCard::Session(i)) if self.sessions.get(i).is_some_and(|e| e.is_live()))
+    }
+
+    pub fn card_next(&mut self) {
+        let n = self.task_cards().len();
+        if n > 0 {
+            self.card_selected = (self.card_selected + 1).min(n - 1);
         }
     }
 
-    pub fn review_prev(&mut self) {
-        self.review_selected = self.review_selected.saturating_sub(1);
+    pub fn card_prev(&mut self) {
+        self.card_selected = self.card_selected.saturating_sub(1);
+    }
+
+    /// Move o foco entre os painéis do Board (Tasks → Cards → Chat). O Chat só é
+    /// alcançável quando o card selecionado é uma sessão viva.
+    pub fn focus_right(&mut self) {
+        self.board_focus = match self.board_focus {
+            BoardFocus::Tasks if !self.task_cards().is_empty() => BoardFocus::Cards,
+            BoardFocus::Cards if self.selected_card_is_live() => BoardFocus::Chat,
+            other => other,
+        };
+    }
+
+    pub fn focus_left(&mut self) {
+        self.board_focus = match self.board_focus {
+            BoardFocus::Chat => BoardFocus::Cards,
+            BoardFocus::Cards => BoardFocus::Tasks,
+            BoardFocus::Tasks => BoardFocus::Tasks,
+        };
     }
 
     // --- paralelismo (badges no Board) -------------------------------------
@@ -842,44 +912,55 @@ impl App {
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
+        if self.project_selected {
+            return None;
+        }
         self.tasks.get(self.selected)
     }
 
-    /// Id da task ALVO das ações (play/review/handoff/finish): a que está à mostra.
-    /// Na aba Review é o cursor da lista de reviews; nas demais, a seleção do Board.
+    /// Id da task ALVO das ações (play/review/handoff/finish): a selecionada no Board.
     pub fn target_task_id(&self) -> Option<String> {
-        if self.tab == Tab::Review
-            && let Some(id) = self.review_tab_task()
-        {
-            return Some(id);
-        }
         self.selected_task().map(|t| t.id.clone())
     }
 
     pub fn select_next(&mut self) {
-        if !self.tasks.is_empty() {
+        if self.project_selected {
+            // do · projeto (topo) para a primeira task
+            self.project_selected = false;
+            self.selected = 0;
+        } else if !self.tasks.is_empty() {
             self.selected = (self.selected + 1).min(self.tasks.len() - 1);
         }
+        self.on_task_change();
     }
 
     pub fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.project_selected {
+            return; // já no topo
+        }
+        if self.selected == 0 {
+            self.project_selected = true; // sobe para o · projeto
+        } else {
+            self.selected -= 1;
+        }
+        self.on_task_change();
     }
 
     pub fn select_first(&mut self) {
+        self.project_selected = true; // topo = · projeto
         self.selected = 0;
+        self.on_task_change();
     }
 
     pub fn select_last(&mut self) {
+        self.project_selected = false;
         self.selected = self.tasks.len().saturating_sub(1);
+        self.on_task_change();
     }
 
-    /// Nº de tasks em `wip` (badge ▶ N play).
-    pub fn wip_count(&self) -> usize {
-        self.tasks
-            .iter()
-            .filter(|t| t.status == Status::Wip)
-            .count()
+    /// Ao trocar de linha no Board, o cursor de cards volta ao início.
+    fn on_task_change(&mut self) {
+        self.card_selected = 0;
     }
 
     /// Report de review da task (se houver `.review.md`). Não precisa de sessão.
@@ -891,29 +972,33 @@ impl App {
             .map(|(r, _)| r)
     }
 
-    /// Badge ⚑ N na review: findings + constraints não-ok.
+    /// Badge ⚑ N na review: findings + constraints e critérios de aceite não-ok.
     pub fn review_badge(&self, id: &str) -> Option<usize> {
         let r = self.load_review(id)?;
-        let bad = r.findings.len()
-            + r.constraints
-                .iter()
-                .filter(|c| c.verdict != ConstraintVerdict::Ok)
-                .count();
-        Some(bad)
+        Some(r.findings.len() + r.unmet_count())
     }
 
-    /// Linha de status: aba, task/branch selecionada, ▶ N play, ⚠ overlap.
+    /// Linha de status: aba/foco, task/branch selecionada e dica de navegação.
     pub fn statusline(&self) -> String {
         let mut s = format!("[{}]", self.tab.title());
-        if let Some(t) = self.selected_task() {
+        if self.project_selected {
+            s.push_str(" · projeto");
+        } else if let Some(t) = self.selected_task() {
             s.push_str(&format!(" {}", t.id));
             if let Some(pr) = t.prs.first() {
                 s.push_str(&format!(" {}", pr.branch));
             }
         }
-        s.push_str(&format!(" · ▶ {} play", self.wip_count()));
         if let Some((a, b, repo)) = self.overlaps.first() {
             s.push_str(&format!(" · ⚠ overlap {repo} ({a}↔{b})"));
+        }
+        // dica de navegação conforme o painel em foco (só no Board).
+        if self.tab == Tab::Board {
+            s.push_str(match self.board_focus {
+                BoardFocus::Tasks => "   h/l foco · l itens · z zoom",
+                BoardFocus::Cards => "   Enter chat · h volta · z zoom",
+                BoardFocus::Chat => "   Ctrl+G cmd · Ctrl+G z zoom",
+            });
         }
         s
     }
@@ -985,8 +1070,7 @@ impl App {
         if let Some(idx) = self.sessions.iter().position(|e| {
             e.is_live() && e.kind == SessionKind::Play && e.task.as_deref() == Some(id.as_str())
         }) {
-            self.session_selected = idx;
-            self.tab = Tab::Session;
+            self.focus_session(idx);
             self.status_msg = format!("play de {id} já está aberto");
             return;
         }
@@ -1093,8 +1177,7 @@ impl App {
             if let Some(s) = &mut e.session {
                 let _ = s.write_line(&msg);
             }
-            self.session_selected = idx;
-            self.tab = Tab::Session;
+            self.focus_session(idx);
             self.status_msg = format!("findings de {id} enviados ao play");
         }
     }
@@ -1456,6 +1539,60 @@ impl App {
         }
     }
 
+    /// `(id, repo, branch)` das branches ainda sem PR (`pr == 0`) de tasks que têm
+    /// sessão de play viva. É o alvo da sincronização de PR em background.
+    pub fn pr_sync_targets(&self) -> Vec<(String, String, String)> {
+        let mut targets = Vec::new();
+        for e in &self.sessions {
+            if !(e.is_live() && e.kind == SessionKind::Play) {
+                continue;
+            }
+            let Some(id) = e.task.as_deref() else { continue };
+            if let Some(t) = self.tasks.iter().find(|t| t.id == id) {
+                for link in t.prs.iter().filter(|l| l.pr == 0) {
+                    targets.push((id.to_string(), link.repo.clone(), link.branch.clone()));
+                }
+            }
+        }
+        targets
+    }
+
+    /// Descobre e grava, em background, o número do PR das branches das tasks com
+    /// sessão de play viva (throttle ~20s). O agente abre o PR na worktree; aqui só
+    /// consultamos o gh e persistimos com `set_pr` — o watcher atualiza a UI.
+    pub fn tick_pr_sync(&mut self) {
+        if self.pr_sync_running.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.last_pr_sync.elapsed() < Duration::from_secs(20) {
+            return;
+        }
+        self.last_pr_sync = Instant::now();
+
+        let targets = self.pr_sync_targets();
+        if targets.is_empty() {
+            return;
+        }
+
+        let backlog = self.backlog_path();
+        let repos = self.repos.clone();
+        let flag = self.pr_sync_running.clone();
+        flag.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let store = Store::new(&backlog);
+            let gh = Gh::new();
+            for (id, repo, branch) in targets {
+                if let Some(dir) = repos.get(&repo)
+                    && let Ok(pr) = gh.pr_number(dir, &branch)
+                    && pr != 0
+                {
+                    let _ = store.set_pr(&id, &repo, pr);
+                }
+            }
+            flag.store(false, Ordering::Relaxed);
+        });
+    }
+
     // --- toast (snackbar temporário) --------------------------------------
 
     /// Detecta mudança em `status_msg` e (re)inicia o timer do toast. Chamado a
@@ -1549,7 +1686,7 @@ impl App {
 
     // --- sessões (multi, em paralelo) -------------------------------------
 
-    /// Abre uma sessão nova (vira a selecionada) e pula pra aba Session.
+    /// Abre uma sessão nova e foca o card dela no Board (chat).
     pub(crate) fn open_session(
         &mut self,
         kind: SessionKind,
@@ -1564,13 +1701,52 @@ impl App {
             task,
             session,
             worktrees,
-            claude_session_id,
+            claude_session_id.clone(),
             cwd,
         ));
-        self.session_selected = self.sessions.len() - 1;
         self.sort_sessions(); // a recém-criada (atividade = agora) vai pro topo
-        self.tab = Tab::Session;
+        let idx = self
+            .sessions
+            .iter()
+            .position(|e| e.claude_session_id == claude_session_id)
+            .unwrap_or(0);
+        self.focus_session(idx);
         self.persist_sessions();
+    }
+
+    /// Foca (no Board) a sessão de índice `idx`: seleciona a task dona e põe o
+    /// cursor no card dela; entra no chat se a sessão estiver viva.
+    pub(crate) fn focus_session(&mut self, idx: usize) {
+        self.tab = Tab::Board;
+        match self.sessions.get(idx).and_then(|e| e.task.clone()) {
+            // sessão de uma task: seleciona a task dona.
+            Some(task_id) => {
+                self.project_selected = false;
+                if let Some(pos) = self.tasks.iter().position(|t| t.id == task_id) {
+                    self.selected = pos;
+                }
+            }
+            // sessão de setup (sem task): a linha · projeto.
+            None => self.project_selected = true,
+        }
+        self.card_selected = self
+            .task_cards()
+            .iter()
+            .position(|c| *c == BoardCard::Session(idx))
+            .unwrap_or(0);
+        self.board_focus = if self.selected_card_is_live() {
+            BoardFocus::Chat
+        } else {
+            BoardFocus::Cards
+        };
+    }
+
+    /// Índice, em `sessions`, da sessão sob o card selecionado (se for uma sessão).
+    pub fn current_session_idx(&self) -> Option<usize> {
+        match self.selected_card() {
+            Some(BoardCard::Session(i)) => Some(i),
+            _ => None,
+        }
     }
 
     /// Caminho do arquivo de sessões persistidas (sobrevive ao shutdown).
@@ -1597,22 +1773,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    pub fn selected_session(&self) -> Option<&SessionEntry> {
-        self.sessions.get(self.session_selected)
-    }
-
-    pub fn session_next(&mut self) {
-        if !self.sessions.is_empty() {
-            self.session_selected = (self.session_selected + 1) % self.sessions.len();
-        }
-    }
-
-    pub fn session_prev(&mut self) {
-        if !self.sessions.is_empty() {
-            let n = self.sessions.len();
-            self.session_selected = (self.session_selected + n - 1) % n;
-        }
-    }
 
     /// Remove as worktrees de uma sessão de play (cleanup no encerramento). O
     /// branch fica no repo (a worktree é só a cópia de trabalho).
@@ -1628,13 +1788,12 @@ impl App {
         }
     }
 
-    /// Finaliza a sessão selecionada: encerra o processo e limpa as worktrees,
-    /// mas a MANTÉM na lista como concluída (✓), histórico das sessões.
+    /// Finaliza a sessão do card selecionado: encerra o processo e limpa as
+    /// worktrees, mas a MANTÉM na lista como concluída (✓), histórico das sessões.
     pub fn finish_selected_session(&mut self) {
-        let idx = self.session_selected;
-        if idx >= self.sessions.len() {
+        let Some(idx) = self.current_session_idx() else {
             return;
-        }
+        };
         if let Some(s) = &mut self.sessions[idx].session {
             let _ = s.kill();
         }
@@ -1647,19 +1806,20 @@ impl App {
         self.persist_sessions();
     }
 
-    /// Remove a sessão selecionada da lista (encerra se ainda rodando).
+    /// Remove a sessão do card selecionado da lista (encerra se ainda rodando).
     pub fn close_selected_session(&mut self) {
-        if self.sessions.is_empty() {
+        let Some(idx) = self.current_session_idx() else {
             return;
-        }
-        let idx = self.session_selected.min(self.sessions.len() - 1);
+        };
         let mut e = self.sessions.remove(idx);
         if let Some(s) = &mut e.session {
             let _ = s.kill();
         }
         self.cleanup_worktrees(&e.task, &e.worktrees);
-        if self.session_selected >= self.sessions.len() {
-            self.session_selected = self.sessions.len().saturating_sub(1);
+        // o cursor de cards recomputa; se estávamos no chat, cai pros cards.
+        self.card_selected = self.card_selected.saturating_sub(1);
+        if self.board_focus == BoardFocus::Chat {
+            self.board_focus = BoardFocus::Cards;
         }
         self.persist_sessions();
     }
@@ -1675,7 +1835,7 @@ impl App {
             }
         }
         self.sessions.clear();
-        self.session_selected = 0;
+        self.card_selected = 0;
     }
 
     /// Aplica os bytes pendentes de cada PTY no seu parser vt100.
@@ -1688,16 +1848,15 @@ impl App {
         self.sort_sessions();
     }
 
-    /// Ordena as sessões por atividade (mais recente no topo), preservando a
-    /// seleção pela identidade (uuid) em vez do índice.
+    /// Ordena as sessões por atividade (mais recente no topo), reposicionando o
+    /// cursor de cards na MESMA sessão (por uuid) para não perder o foco.
     pub fn sort_sessions(&mut self) {
         if self.sessions.len() < 2 {
             return;
         }
-        let sel_key = self
-            .sessions
-            .get(self.session_selected)
-            .map(|e| e.claude_session_id.clone());
+        let focused = self
+            .current_session_idx()
+            .map(|i| self.sessions[i].claude_session_id.clone());
         // mais recente primeiro; empate de atividade desempata pela criação (seq),
         // então a sessão mais nova fica no topo de forma determinística.
         self.sessions.sort_by(|a, b| {
@@ -1705,13 +1864,14 @@ impl App {
                 .cmp(&a.last_activity)
                 .then(b.seq.cmp(&a.seq))
         });
-        if let Some(key) = sel_key
-            && let Some(i) = self
-                .sessions
+        if let Some(uuid) = focused
+            && let Some(new_idx) = self.sessions.iter().position(|e| e.claude_session_id == uuid)
+            && let Some(pos) = self
+                .task_cards()
                 .iter()
-                .position(|e| e.claude_session_id == key)
+                .position(|c| *c == BoardCard::Session(new_idx))
         {
-            self.session_selected = i;
+            self.card_selected = pos;
         }
     }
 }

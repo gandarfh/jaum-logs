@@ -108,18 +108,35 @@ pub struct ReviewReport {
     pub findings: Vec<Finding>,
     #[serde(default)]
     pub constraints: Vec<ConstraintResult>,
+    /// Veredito de cada critério de aceite da task (mesmo shape das constraints).
+    #[serde(default)]
+    pub criteria: Vec<ConstraintResult>,
 }
 
 impl ReviewReport {
-    /// Limpo se NÃO há finding bloqueante (blocker/major) E todas as constraints
-    /// `enforce: review` estão `ok`. Findings `minor`/`nit` aparecem mas não
-    /// reprovam (senão um nitpick segura o review em SUJO pra sempre).
+    /// Limpo se NÃO há finding bloqueante (blocker/major), todas as constraints
+    /// `enforce: review` estão `ok` E todos os critérios de aceite foram atendidos
+    /// (`ok`). Findings `minor`/`nit` aparecem mas não reprovam (senão um nitpick
+    /// segura o review em SUJO pra sempre).
     pub fn is_clean(&self) -> bool {
         !self.findings.iter().any(|f| f.is_blocking())
             && self
                 .constraints
                 .iter()
                 .all(|c| c.verdict == ConstraintVerdict::Ok)
+            && self
+                .criteria
+                .iter()
+                .all(|c| c.verdict == ConstraintVerdict::Ok)
+    }
+
+    /// Nº de itens que ainda reprovam/pendem: constraints + critérios não-`ok`.
+    pub fn unmet_count(&self) -> usize {
+        self.constraints
+            .iter()
+            .chain(self.criteria.iter())
+            .filter(|c| c.verdict != ConstraintVerdict::Ok)
+            .count()
     }
 
     /// Nº de findings bloqueantes (blocker/major).
@@ -145,22 +162,10 @@ impl ReviewReport {
         }
 
         b.push_str("\n## Constraints (enforce: review)\n");
-        if self.constraints.is_empty() {
-            b.push_str("- (nenhuma)\n");
-        } else {
-            for c in &self.constraints {
-                let tag = match c.verdict {
-                    ConstraintVerdict::Ok => "OK",
-                    ConstraintVerdict::Reprovado => "REPROVADO",
-                    ConstraintVerdict::Pending => "PENDENTE",
-                };
-                if c.note.is_empty() {
-                    b.push_str(&format!("- [{tag}] {}\n", c.text));
-                } else {
-                    b.push_str(&format!("- [{tag}] {} - {}\n", c.text, c.note));
-                }
-            }
-        }
+        render_checklist(&mut b, &self.constraints);
+
+        b.push_str("\n## Critérios de aceite\n");
+        render_checklist(&mut b, &self.criteria);
         b
     }
 }
@@ -257,6 +262,21 @@ impl<'a, E: Executor> Review<'a, E> {
             .collect())
     }
 
+    /// Checklist obrigatório dos critérios de aceite da task (do corpo), cada um
+    /// inicialmente `pending`. `is_clean` não passa enquanto algum não for `ok`.
+    pub fn acceptance_checklist(&self, id: &str) -> Result<Vec<ConstraintResult>> {
+        let task = self.store.get(id)?;
+        Ok(task
+            .acceptance_criteria()
+            .into_iter()
+            .map(|text| ConstraintResult {
+                text,
+                verdict: ConstraintVerdict::Pending,
+                note: String::new(),
+            })
+            .collect())
+    }
+
     /// Contexto cheio do review: TODOS os RFCs/ADRs do projeto + diff dos PRs da
     /// task + as constraints `enforce: review` como checklist obrigatório.
     pub fn build_context(&self, id: &str) -> Result<String> {
@@ -264,6 +284,14 @@ impl<'a, E: Executor> Review<'a, E> {
         let mut c = String::new();
         c.push_str(&format!("# Review read-only de {}\n\n", task.id));
         c.push_str("Você é revisor. NÃO altere nada. Aponte findings como `arquivo:linha — o que viola (RFC/ADR)`.\n\n");
+
+        // 0) objetivo da task (o corpo, onde ficam objetivo e critérios de aceite)
+        let body = task.body.trim();
+        if !body.is_empty() {
+            c.push_str("## O que a task pede\n\n");
+            c.push_str(body);
+            c.push_str("\n\n");
+        }
 
         // 1) todos os docs do projeto
         c.push_str("## RFCs/ADRs do projeto\n\n");
@@ -367,6 +395,22 @@ no PR. NÃO há Bash aqui (review é read-only) — não execute testes nem coma
                 c.push_str(&format!("- [ ] {}\n", item.text));
             }
         }
+
+        // 5) checklist obrigatório dos critérios de aceite (do corpo da task)
+        c.push_str(
+            "\n## Critérios de aceite a validar — OBRIGATÓRIO\n\n\
+Confirme, olhando o DIFF, se o que mudou realmente ATENDE cada critério abaixo. \
+Marque `ok` só se o diff cumpre o critério; `reprovado` se não cumpre; `pending` se \
+não dá para saber pelo diff.\n\n",
+        );
+        let criteria = self.acceptance_checklist(id)?;
+        if criteria.is_empty() {
+            c.push_str("(nenhum)\n");
+        } else {
+            for item in &criteria {
+                c.push_str(&format!("- [ ] {}\n", item.text));
+            }
+        }
         Ok(c)
     }
 
@@ -426,26 +470,18 @@ no PR. NÃO há Bash aqui (review é read-only) — não execute testes nem coma
             .executor
             .spawn_oneshot_streaming(&prompt, &flags, &mut summarize)?;
 
-        let (findings, proposed) = parse_review_stream(&out)?;
+        let (findings, prop_constraints, prop_criteria) = parse_review_stream(&out)?;
 
-        // a lista de constraints é canônica (todas as `enforce: review`); o claude
-        // só preenche o veredicto. Constraint não mencionada fica `pending`.
-        let constraints = self
-            .check_semantic_constraints(id)?
-            .into_iter()
-            .map(|mut c| {
-                if let Some(p) = proposed.iter().find(|p| p.text == c.text) {
-                    c.verdict = p.verdict;
-                    c.note = p.note.clone();
-                }
-                c
-            })
-            .collect();
+        // as listas de constraints e critérios são canônicas (da task); o claude só
+        // preenche o veredicto. Item não mencionado fica `pending`.
+        let constraints = merge_verdicts(self.check_semantic_constraints(id)?, &prop_constraints);
+        let criteria = merge_verdicts(self.acceptance_checklist(id)?, &prop_criteria);
 
         let report = ReviewReport {
             task: id.to_string(),
             findings,
             constraints,
+            criteria,
         };
         self.write_report(&report)?;
         on_line(&format!(
@@ -494,7 +530,50 @@ pub fn handoff_message(report: &ReviewReport) -> String {
             msg.push_str(&format!("- constraint reprovada: {} — {}\n", c.text, c.note));
         }
     }
+    for c in &report.criteria {
+        if c.verdict != ConstraintVerdict::Ok {
+            msg.push_str(&format!("- critério não atendido: {} — {}\n", c.text, c.note));
+        }
+    }
     msg
+}
+
+/// Casa a lista canônica (da task) com os veredictos propostos pelo claude,
+/// batendo pelo texto. Item não mencionado permanece como veio (`pending`).
+fn merge_verdicts(
+    canonical: Vec<ConstraintResult>,
+    proposed: &[ConstraintResult],
+) -> Vec<ConstraintResult> {
+    canonical
+        .into_iter()
+        .map(|mut c| {
+            if let Some(p) = proposed.iter().find(|p| p.text == c.text) {
+                c.verdict = p.verdict;
+                c.note = p.note.clone();
+            }
+            c
+        })
+        .collect()
+}
+
+/// Renderiza um checklist de veredictos (constraints ou critérios) no corpo.
+fn render_checklist(b: &mut String, items: &[ConstraintResult]) {
+    if items.is_empty() {
+        b.push_str("- (nenhum)\n");
+        return;
+    }
+    for c in items {
+        let tag = match c.verdict {
+            ConstraintVerdict::Ok => "OK",
+            ConstraintVerdict::Reprovado => "REPROVADO",
+            ConstraintVerdict::Pending => "PENDENTE",
+        };
+        if c.note.is_empty() {
+            b.push_str(&format!("- [{tag}] {}\n", c.text));
+        } else {
+            b.push_str(&format!("- [{tag}] {} - {}\n", c.text, c.note));
+        }
+    }
 }
 
 /// Instrução anexada ao contexto para a captura estruturada do review.
@@ -502,20 +581,23 @@ const REVIEW_INSTRUCTION: &str = "Revise o diff acima contra os RFCs/ADRs, as co
 checklist de constraints. Seja EXAUSTIVO nesta única passada: aponte TODOS os problemas que \
 encontrar de uma vez (não vá aos poucos), de bugs e violações a melhorias. Retorne SÓ pela saída \
 estruturada: `findings` (cada um com `file`, `line` quando souber, `message`, `severity` e \
-`reference` ao RFC/ADR violado quando aplicável) e `constraints` (UMA entrada por item do checklist, \
-com `verdict` `ok`/`reprovado`/`pending` e uma `note` curta). \
+`reference` ao RFC/ADR violado quando aplicável), `constraints` (UMA entrada por item do checklist de \
+constraints) e `criteria` (UMA entrada por item do checklist de critérios de aceite), cada uma \
+com `verdict` `ok`/`reprovado`/`pending` e uma `note` curta. \
 Classifique cada finding com `severity`: `blocker` (quebra/incorreto, tem que corrigir), `major` \
 (importante), `minor` (melhoria) ou `nit` (cosmético). Só `blocker` e `major` reprovam o review; \
-`minor`/`nit` são informativos. Repita o texto de cada constraint EXATAMENTE como está no checklist. \
+`minor`/`nit` são informativos. Repita o texto de cada constraint e de cada critério EXATAMENTE como \
+está no checklist. Para os critérios de aceite, decida olhando o DIFF: `ok` se o que mudou cumpre o \
+critério, `reprovado` se não cumpre, `pending` se o diff não permite decidir. \
 Escreva `message` e `note` de forma CONCISA e direta: uma frase objetiva, sem travessões e sem \
-floreio. Não altere nada; só leia. Seja rigoroso: só marque `ok` se a constraint for realmente cumprida.";
+floreio. Não altere nada; só leia. Seja rigoroso: só marque `ok` se for realmente cumprido.";
 
 /// Schema da saída estruturada do review.
 pub fn review_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["findings", "constraints"],
+        "required": ["findings", "constraints", "criteria"],
         "properties": {
             "findings": {
                 "type": "array",
@@ -544,13 +626,30 @@ pub fn review_schema() -> Value {
                         "note": { "type": "string" }
                     }
                 }
+            },
+            "criteria": {
+                "type": "array",
+                "description": "Um veredito por critério de aceite do checklist. O diff atende o critério?",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["text", "verdict"],
+                    "properties": {
+                        "text": { "type": "string" },
+                        "verdict": { "type": "string", "enum": ["ok", "reprovado", "pending"] },
+                        "note": { "type": "string" }
+                    }
+                }
             }
         }
     })
 }
 
-/// Extrai `findings` + `constraints` do último evento `result` do stream-json.
-fn parse_review_stream(out: &str) -> Result<(Vec<Finding>, Vec<ConstraintResult>)> {
+/// Extrai `findings` + `constraints` + `criteria` do último evento `result`.
+#[allow(clippy::type_complexity)]
+fn parse_review_stream(
+    out: &str,
+) -> Result<(Vec<Finding>, Vec<ConstraintResult>, Vec<ConstraintResult>)> {
     let mut last: Option<Value> = None;
     for line in out.lines() {
         let line = line.trim();
@@ -581,7 +680,11 @@ fn parse_review_stream(out: &str) -> Result<(Vec<Finding>, Vec<ConstraintResult>
         Some(c) => serde_json::from_value(c.clone()).context("desserializando constraints")?,
         None => Vec::new(),
     };
-    Ok((findings, constraints))
+    let criteria = match so.get("criteria") {
+        Some(c) => serde_json::from_value(c.clone()).context("desserializando criteria")?,
+        None => Vec::new(),
+    };
+    Ok((findings, constraints, criteria))
 }
 
 /// Lê os RFCs/ADRs (`RFC-*.md`, `ADR-*.md`) de um diretório, ordenados por nome.

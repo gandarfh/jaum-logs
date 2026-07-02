@@ -140,6 +140,7 @@ fn report(findings: Vec<Finding>, constraints: Vec<ConstraintResult>) -> ReviewR
         task: "TASK-001".into(),
         findings,
         constraints,
+        criteria: Vec::new(),
     }
 }
 fn cr(text: &str, v: ConstraintVerdict) -> ConstraintResult {
@@ -443,4 +444,58 @@ fn capture_logged_grava_report_e_mescla_checklist() {
     // persistiu de fato (roundtrip)
     assert_eq!(review.load_report("TASK-001").unwrap(), report);
     assert!(logs.iter().any(|l| l.contains("review gravado")));
+}
+
+// --- critérios de aceite ---------------------------------------------------
+
+const FIXTURE_CRITERIA: &str = r#"---
+id: TASK-002
+type: impl
+status: review
+---
+
+## Objetivo
+Fazer X
+
+## Criterio de aceite
+- [ ] mostra saldo na tela
+- [x] some com o loading
+- valida entrada vazia
+- [ ] 
+
+## Notas
+- isto nao e criterio
+"#;
+
+#[test]
+fn acceptance_checklist_extrai_criterios_do_corpo() {
+    let dir = TmpDir::new("criteria");
+    let (store, git, gh, docs, repos) = setup(&dir);
+    fs::write(dir.0.join(".backlog/TASK-002.md"), FIXTURE_CRITERIA).unwrap();
+    let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
+
+    let items = review.acceptance_checklist("TASK-002").unwrap();
+    let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+    // checkbox retirado, placeholder vazio e item de "## Notas" ignorados
+    assert_eq!(
+        texts,
+        vec!["mostra saldo na tela", "some com o loading", "valida entrada vazia"]
+    );
+    assert!(items.iter().all(|i| i.verdict == ConstraintVerdict::Pending));
+
+    // o contexto do review inclui o corpo e o checklist obrigatório de critérios
+    let ctx = review.build_context("TASK-002").unwrap();
+    assert!(ctx.contains("Critérios de aceite a validar"));
+    assert!(ctx.contains("mostra saldo na tela"));
+}
+
+#[test]
+fn is_clean_falha_com_criterio_nao_atendido() {
+    let mut r = report(vec![], vec![]);
+    r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Reprovado)];
+    assert!(!r.is_clean(), "critério reprovado reprova o review");
+    r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Pending)];
+    assert!(!r.is_clean(), "critério pendente não pode passar");
+    r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Ok)];
+    assert!(r.is_clean(), "todos ok -> limpo");
 }

@@ -168,6 +168,39 @@ impl Task {
             .collect()
     }
 
+    /// Critérios de aceite extraídos do corpo (seção cujo heading contém "aceite").
+    /// Cada item de lista (`- [ ] texto`, `- [x] texto` ou `- texto`) vira um
+    /// critério; o placeholder vazio é ignorado. Usado pelo review como checklist.
+    pub fn acceptance_criteria(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut in_section = false;
+        for line in self.body.lines() {
+            let t = line.trim();
+            if let Some(h) = t.strip_prefix('#') {
+                // outra seção encerra a de aceite; nova seção de aceite (re)abre.
+                in_section = h.trim_start_matches('#').to_lowercase().contains("aceite");
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            let Some(rest) = t.strip_prefix('-').or_else(|| t.strip_prefix('*')) else {
+                continue;
+            };
+            let mut item = rest.trim();
+            // tira o checkbox `[ ]` / `[x]` se houver.
+            if let Some(after) = item.strip_prefix('[')
+                && let Some((_, tail)) = after.split_once(']')
+            {
+                item = tail.trim();
+            }
+            if !item.is_empty() {
+                out.push(item.to_string());
+            }
+        }
+        out
+    }
+
     /// Repos linkados via PRs, deduplicados preservando a ordem.
     pub fn linked_repos(&self) -> Vec<Repo> {
         let mut seen: Vec<Repo> = Vec::new();

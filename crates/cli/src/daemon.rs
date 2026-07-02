@@ -244,6 +244,7 @@ impl Daemon {
         self.app.drain_pty();
         self.app.poll_job();
         self.app.tick_reload();
+        self.app.tick_pr_sync();
         self.app.tick_toast();
         let (w, h) = {
             let b = self.term.backend().buffer();

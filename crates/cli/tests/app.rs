@@ -62,16 +62,16 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
 
 #[test]
 fn tab_navega_em_ciclo() {
-    assert_eq!(Tab::Board.next(), Tab::Session);
+    assert_eq!(Tab::Board.next(), Tab::Docs);
     assert_eq!(Tab::Docs.next(), Tab::Board);
-    assert_eq!(Tab::from_index(2), Tab::Review);
-    assert_eq!(Tab::Review.index(), 2);
+    assert_eq!(Tab::from_index(1), Tab::Docs);
+    assert_eq!(Tab::Docs.index(), 1);
 }
 
 #[test]
 fn vim_nav_tab_prev_e_select_first_last() {
     assert_eq!(Tab::Board.prev(), Tab::Docs);
-    assert_eq!(Tab::Session.prev(), Tab::Board);
+    assert_eq!(Tab::Docs.prev(), Tab::Board);
 
     let dir = TmpDir::new("vim");
     let mut app = app_with(
@@ -141,7 +141,11 @@ fn navegacao_respeita_limites() {
     let dir = TmpDir::new("nav");
     let mut app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
     assert_eq!(app.selected, 0);
-    app.select_prev(); // não passa de 0
+    assert!(!app.project_selected);
+    app.select_prev(); // do topo sobe para a linha · projeto
+    assert!(app.project_selected);
+    app.select_next(); // volta para a primeira task
+    assert!(!app.project_selected);
     assert_eq!(app.selected, 0);
     app.select_next();
     assert_eq!(app.selected, 1);
@@ -150,13 +154,14 @@ fn navegacao_respeita_limites() {
 }
 
 #[test]
-fn statusline_mostra_wip_count() {
+fn statusline_mostra_tab_e_dica_de_foco() {
     let dir = TmpDir::new("status");
     let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
     let s = app.statusline();
     assert!(s.contains("[Board]"));
-    assert!(s.contains("▶ 1 play"));
-    assert_eq!(app.wip_count(), 1);
+    // no Board, a statusline traz a dica de navegação de foco.
+    assert!(s.contains("foco"));
+    assert!(s.contains("zoom"));
 }
 
 #[test]
@@ -197,12 +202,13 @@ fn cat_session() -> jaum_adapters::Session {
 }
 
 #[test]
-fn multi_sessao_navega_e_encerra() {
-    use app::SessionKind;
+fn multi_sessao_por_task_navega_e_encerra() {
+    use app::{BoardFocus, SessionKind};
     let dir = TmpDir::new("multi");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
     assert!(a.sessions.is_empty());
 
+    // duas sessões da MESMA task (play + review) viram dois cards dela.
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -213,33 +219,36 @@ fn multi_sessao_navega_e_encerra() {
     );
     a.open_session(
         SessionKind::Review,
-        Some("TASK-002".into()),
+        Some("TASK-001".into()),
         cat_session(),
         Vec::new(),
         "uuid-2".into(),
         dir.0.clone(),
     );
     assert_eq!(a.sessions.len(), 2);
-    // a mais nova (TASK-002) vai pro topo e segue selecionada
-    assert_eq!(a.session_selected, 0);
-    assert_eq!(a.selected_session().unwrap().name(), "review · TASK-002");
-    assert_eq!(a.tab, Tab::Session);
+    // abre no Board, chat da recém-criada em foco, task dona selecionada
+    assert_eq!(a.tab, Tab::Board);
+    assert_eq!(a.board_focus, BoardFocus::Chat);
+    assert_eq!(a.selected_task().unwrap().id, "TASK-001");
+    assert_eq!(a.task_cards().len(), 2);
 
-    a.session_next(); // 0 -> 1
-    assert_eq!(a.session_selected, 1);
-    a.session_prev(); // 1 -> 0
-    assert_eq!(a.session_selected, 0);
+    // a sessão focada é a recém-aberta (uuid-2)
+    let cur = a.current_session_idx().unwrap();
+    assert_eq!(a.sessions[cur].claude_session_id, "uuid-2");
 
-    // finish: marca como concluída mas MANTÉM na lista (histórico)
+    // navega os cards (ida e volta)
+    a.card_next();
+    a.card_prev();
+    assert_eq!(a.current_session_idx().unwrap(), cur);
+
+    // finish: marca a sessão do card como concluída, mantém na lista
     a.finish_selected_session();
     assert_eq!(a.sessions.len(), 2);
-    assert!(a.selected_session().unwrap().finished);
     assert!(a.status_msg.contains("finalizada"));
 
-    a.close_selected_session(); // remove a 2ª, clampa a seleção
+    // fecha o card atual: remove da lista
+    a.close_selected_session();
     assert_eq!(a.sessions.len(), 1);
-    assert_eq!(a.session_selected, 0);
-    assert_eq!(a.selected_session().unwrap().name(), "play · TASK-001");
 
     a.stop_all_sessions();
     assert!(a.sessions.is_empty());
@@ -292,10 +301,42 @@ fn play_selected_foca_sessao_viva_existente_sem_duplicar() {
     assert_eq!(a.sessions.len(), 1);
 
     a.play_selected();
-    // não duplicou: focou a sessão existente
+    // não duplicou: focou a sessão existente (chat no Board)
     assert_eq!(a.sessions.len(), 1);
-    assert_eq!(a.tab, Tab::Session);
+    assert_eq!(a.tab, Tab::Board);
+    assert_eq!(a.board_focus, app::BoardFocus::Chat);
     assert!(a.status_msg.contains("já está aberto"), "msg: {}", a.status_msg);
+}
+
+#[test]
+fn pr_sync_targets_so_pega_task_com_play_viva_e_pr_zero() {
+    use app::SessionKind;
+    let dir = TmpDir::new("prsync");
+    // a fixture já cria a task com PrLink { repo: org/x, pr: 0, branch: feat/<id> }
+    let mut a = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
+
+    // sem sessão de play viva -> nenhum alvo
+    assert!(a.pr_sync_targets().is_empty());
+
+    // abre play viva só para TASK-001
+    a.open_session(
+        SessionKind::Play,
+        Some("TASK-001".into()),
+        cat_session(),
+        Vec::new(),
+        "uuid-001".into(),
+        dir.0.clone(),
+    );
+    let targets = a.pr_sync_targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0],
+        ("TASK-001".to_string(), "org/x".to_string(), "feat/TASK-001".to_string())
+    );
+
+    // sessão finalizada não conta mais
+    a.sessions[0].finished = true;
+    assert!(a.pr_sync_targets().is_empty());
 }
 
 #[test]
@@ -335,32 +376,49 @@ fn write_review(dir: &TmpDir, id: &str, clean: bool) {
 }
 
 #[test]
-fn review_tab_lista_so_tasks_com_review_e_navega_independente_do_board() {
-    let dir = TmpDir::new("review-list");
-    let mut a = app_with(&dir, &[("TASK-001", "review"), ("TASK-002", "review"), ("TASK-003", "review")]);
-    // só 001 e 003 têm review gravado
+fn projeto_abriga_sessoes_de_setup() {
+    use app::SessionKind;
+    let dir = TmpDir::new("projeto");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+
+    // sessão de setup (sem task) foca a linha · projeto
+    a.open_session(
+        SessionKind::Setup,
+        None,
+        cat_session(),
+        Vec::new(),
+        "uuid-setup".into(),
+        dir.0.clone(),
+    );
+    assert!(a.project_selected);
+    assert_eq!(a.selected_task().map(|t| t.id.clone()), None);
+    // os cards da linha · projeto são as sessões de setup
+    assert_eq!(a.task_cards().len(), 1);
+    let cur = a.current_session_idx().unwrap();
+    assert_eq!(a.sessions[cur].kind, SessionKind::Setup);
+
+    // sair da linha · projeto para a primeira task limpa os cards de setup
+    a.select_next();
+    assert!(!a.project_selected);
+    assert!(a.task_cards().is_empty());
+}
+
+#[test]
+fn verdict_card_aparece_so_para_task_com_review() {
+    use app::BoardCard;
+    let dir = TmpDir::new("verdict-card");
+    let mut a = app_with(&dir, &[("TASK-001", "review"), ("TASK-002", "review")]);
+    // só 001 tem review gravado
     write_review(&dir, "TASK-001", true);
-    write_review(&dir, "TASK-003", false);
     a.refresh().unwrap();
 
-    assert_eq!(a.review_ids.len(), 2, "só as tasks com .review.md entram");
-    assert!(a.review_ids.contains(&"TASK-001".to_string()));
-    assert!(a.review_ids.contains(&"TASK-003".to_string()));
-    assert!(!a.review_ids.contains(&"TASK-002".to_string()));
+    // TASK-001 (com review) -> tem card de veredito
+    a.selected = a.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
+    assert!(a.task_cards().contains(&BoardCard::Verdict));
 
-    // na aba Review, j/k movem o cursor da lista, NÃO a seleção do Board
-    a.tab = Tab::Review;
-    let board_before = a.selected;
-    assert_eq!(a.review_selected, 0);
-    assert_eq!(a.target_task_id().as_deref(), Some(a.review_ids[0].as_str()));
-
-    a.review_next();
-    assert_eq!(a.review_selected, 1);
-    assert_eq!(a.selected, board_before, "Board não deve mexer");
-    assert_eq!(a.target_task_id().as_deref(), Some(a.review_ids[1].as_str()));
-
-    a.review_prev();
-    assert_eq!(a.review_selected, 0);
+    // TASK-002 (sem review) -> sem card de veredito
+    a.selected = a.tasks.iter().position(|t| t.id == "TASK-002").unwrap();
+    assert!(!a.task_cards().contains(&BoardCard::Verdict));
 }
 
 #[test]
@@ -386,7 +444,8 @@ fn handoff_selected_envia_findings_ao_play() {
     );
 
     a.handoff_selected();
-    assert_eq!(a.tab, Tab::Session);
+    assert_eq!(a.tab, Tab::Board);
+    assert_eq!(a.board_focus, app::BoardFocus::Chat);
     assert!(a.status_msg.contains("enviados"), "msg: {}", a.status_msg);
 }
 
