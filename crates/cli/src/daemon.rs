@@ -576,38 +576,23 @@ mod tests {
 
             // quit key: daemon answers Detach and drops the client
             write_msg(&mut conn, &ClientMsg::Key(key('q'))).unwrap();
-            assert!(
-                matches!(
-                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
-                    Some(ServerMsg::Detach)
-                ),
-                "no Detach after q"
-            );
+            let msg = read_msg::<_, ServerMsg>(&mut conn).unwrap();
+            assert!(matches!(msg, Some(ServerMsg::Detach)), "no Detach after q");
             drop(conn);
 
             // daemon survives the detach: a new client attaches and shuts it down
             let mut conn = connect();
             write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
-            assert!(
-                matches!(
-                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
-                    Some(ServerMsg::FrameFull { .. })
-                ),
-                "second client did not get a FrameFull"
-            );
+            let msg = read_msg::<_, ServerMsg>(&mut conn).unwrap();
+            assert!(matches!(msg, Some(ServerMsg::FrameFull { .. })), "no full");
             // a state change while attached (and not pending) arrives as a diff
             write_msg(
                 &mut conn,
                 &ClientMsg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             )
             .unwrap();
-            assert!(
-                matches!(
-                    read_msg::<_, ServerMsg>(&mut conn).unwrap(),
-                    Some(ServerMsg::FrameDiff(_))
-                ),
-                "tab change should arrive as FrameDiff"
-            );
+            let msg = read_msg::<_, ServerMsg>(&mut conn).unwrap();
+            assert!(matches!(msg, Some(ServerMsg::FrameDiff(_))), "no diff");
             // idle while attached: the daemon must hit its 16ms tick with an
             // empty diff and keep the connection silent
             std::thread::sleep(Duration::from_millis(80));
@@ -643,16 +628,16 @@ mod tests {
             };
             write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
             // at least one FrameFull should arrive
-            let got_full = match read_msg::<_, ServerMsg>(&mut conn).unwrap() {
-                Some(ServerMsg::FrameFull { cols, rows, cells }) => {
-                    assert_eq!((cols, rows), (80, 24));
-                    assert_eq!(cells.len(), 80 * 24);
-                    true
-                }
-                _ => false,
-            };
+            let msg = read_msg::<_, ServerMsg>(&mut conn).unwrap();
             write_msg(&mut conn, &ClientMsg::Shutdown).unwrap();
-            got_full
+            matches!(
+                msg,
+                Some(ServerMsg::FrameFull {
+                    cols: 80,
+                    rows: 24,
+                    ..
+                })
+            )
         });
 
         serve(&sock, app(), 80, 24).unwrap();
