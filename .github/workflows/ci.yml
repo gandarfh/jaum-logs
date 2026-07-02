@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets
+      - run: cargo test --workspace
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_MIN: "95"
+      # warn: report only, the job stays green below COVERAGE_MIN.
+      # block: fail the job below COVERAGE_MIN. Flip once coverage reaches the target.
+      COVERAGE_GATE: warn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Enforce minimum line coverage
+        run: |
+          cargo llvm-cov --workspace --summary-only --json > coverage.json
+          pct=$(jq '.data[0].totals.lines.percent' coverage.json)
+          printf 'Line coverage: %.2f%% (minimum: %s%%, gate: %s)\n' "$pct" "$COVERAGE_MIN" "$COVERAGE_GATE"
+          printf 'Line coverage: %.2f%% (minimum: %s%%, gate: %s)\n' "$pct" "$COVERAGE_MIN" "$COVERAGE_GATE" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+            msg=$(printf 'Line coverage %.2f%% is below the %s%% minimum' "$pct" "$COVERAGE_MIN")
+            if [ "$COVERAGE_GATE" = "block" ]; then
+              echo "::error::$msg"
+              exit 1
+            fi
+            echo "::warning::$msg"
+          fi
+
+  # Placeholder for the native app. Enable when app/ lands:
+  #
+  # swift-test:
+  #   name: Swift tests
+  #   runs-on: macos-latest
+  #   defaults:
+  #     run:
+  #       working-directory: app
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: xcodebuild test -scheme Jaum -destination 'platform=macOS'

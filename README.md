@@ -102,6 +102,28 @@ reports live in `.backlog/TASK-NNN.review.md`.
 session) · `tokio` (subprocesses) · `gray_matter` + `serde` + `serde_yaml_ng`
 (frontmatter) · `anyhow` + `thiserror` (errors) · `git`/`gh` via `std::process`.
 
+## Quality gates
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) owns the quality gates. It runs
+on every PR and on push to `main`:
+
+- **Formatting**: `cargo fmt --check`
+- **Lint**: `cargo clippy --all-targets -- -D warnings`
+- **Build and tests**: `cargo build --all-targets` + `cargo test --workspace`
+- **Coverage**: `cargo llvm-cov`, minimum of 95% line coverage. The gate is
+  currently in `warn` mode (reports without failing); flip `COVERAGE_GATE` to
+  `block` in the workflow once coverage reaches the target.
+
+The Makefile only has development targets (build, run, test, fmt, demo,
+install), no CI rules. To run the equivalent of the gates locally:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+cargo llvm-cov --workspace --summary-only   # requires: cargo install cargo-llvm-cov
+```
+
 ## Implementation status
 
 - [x] Phase 1 — `store` + data model + frontmatter parse/write (tests)
