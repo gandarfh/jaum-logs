@@ -72,14 +72,32 @@ jobs:
             echo "::warning::$msg"
           fi
 
-  # Placeholder for the native app. Enable when app/ lands:
+  # Placeholder for the native app. Enable when app/ lands, with the same
+  # coverage gate pattern as the Rust job (COVERAGE_MIN, warn or block):
   #
   # swift-test:
   #   name: Swift tests
   #   runs-on: macos-latest
+  #   env:
+  #     COVERAGE_MIN: "95"
+  #     COVERAGE_GATE: warn
   #   defaults:
   #     run:
   #       working-directory: app
   #   steps:
   #     - uses: actions/checkout@v5
-  #     - run: xcodebuild test -scheme Jaum -destination 'platform=macOS'
+  #     - run: >
+  #         xcodebuild test -scheme Jaum -destination 'platform=macOS'
+  #         -enableCodeCoverage YES -resultBundlePath TestResults.xcresult
+  #     - name: Enforce minimum line coverage
+  #       run: |
+  #         pct=$(xcrun xccov view --report --json TestResults.xcresult | jq '.lineCoverage * 100')
+  #         printf 'Line coverage: %.2f%% (minimum: %s%%, gate: %s)\n' "$pct" "$COVERAGE_MIN" "$COVERAGE_GATE"
+  #         if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+  #           msg=$(printf 'Line coverage %.2f%% is below the %s%% minimum' "$pct" "$COVERAGE_MIN")
+  #           if [ "$COVERAGE_GATE" = "block" ]; then
+  #             echo "::error::$msg"
+  #             exit 1
+  #           fi
+  #           echo "::warning::$msg"
+  #         fi
