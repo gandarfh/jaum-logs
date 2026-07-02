@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use jaum_core::Status;
 
-// Os módulos app/config são privados do binário; reexercitamos a lógica pura
-// recompilando-os como parte do crate de teste. (app.rs referencia
-// `crate::config`, então config precisa estar declarado aqui também.)
+// The app/config modules are private to the binary; we re-exercise the pure logic
+// by recompiling them as part of the test crate. (app.rs references
+// `crate::config`, so config must be declared here too.)
 #[path = "../src/app.rs"]
 #[allow(dead_code)]
 mod app;
@@ -36,7 +36,7 @@ impl Drop for TmpDir {
 
 fn task_md(id: &str, status: &str) -> String {
     format!(
-        "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: org/x\n    pr: 0\n    branch: feat/{id}\n---\n\n## Objetivo\nx\n"
+        "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: org/x\n    pr: 0\n    branch: feat/{id}\n---\n\n## Objective\nx\n"
     )
 }
 
@@ -61,7 +61,7 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
 }
 
 #[test]
-fn tab_navega_em_ciclo() {
+fn tab_cycles_around() {
     assert_eq!(Tab::Board.next(), Tab::Docs);
     assert_eq!(Tab::Docs.next(), Tab::Board);
     assert_eq!(Tab::from_index(1), Tab::Docs);
@@ -69,7 +69,7 @@ fn tab_navega_em_ciclo() {
 }
 
 #[test]
-fn vim_nav_tab_prev_e_select_first_last() {
+fn vim_nav_tab_prev_and_select_first_last() {
     assert_eq!(Tab::Board.prev(), Tab::Docs);
     assert_eq!(Tab::Docs.prev(), Tab::Board);
 
@@ -89,7 +89,7 @@ fn vim_nav_tab_prev_e_select_first_last() {
 }
 
 #[test]
-fn sort_for_board_agrupa_por_status_canonico() {
+fn sort_for_board_groups_by_canonical_status() {
     let dir = TmpDir::new("sort");
     let app = app_with(
         &dir,
@@ -99,7 +99,7 @@ fn sort_for_board_agrupa_por_status_canonico() {
             ("TASK-003", "review"),
         ],
     );
-    // wip vem antes de review, que vem antes de backlog
+    // wip comes before review, which comes before backlog
     let ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["TASK-002", "TASK-003", "TASK-001"]);
     assert_eq!(STATUS_ORDER[0], Status::Wip);
@@ -107,16 +107,16 @@ fn sort_for_board_agrupa_por_status_canonico() {
 }
 
 #[test]
-fn sort_for_board_eh_estavel_por_id() {
+fn sort_for_board_is_stable_by_id() {
     let dir = TmpDir::new("sortid");
     let app = app_with(&dir, &[("TASK-003", "wip"), ("TASK-001", "wip")]);
     let ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["TASK-001", "TASK-003"]);
-    let _ = sort_for_board(Vec::new()); // não panica vazio
+    let _ = sort_for_board(Vec::new()); // doesn't panic on empty
 }
 
 #[test]
-fn detalhe_abre_so_com_task_selecionada_e_fecha() {
+fn detail_opens_only_with_selected_task_and_closes() {
     let dir = TmpDir::new("detail");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
     assert!(!app.detail_open);
@@ -129,7 +129,7 @@ fn detalhe_abre_so_com_task_selecionada_e_fecha() {
     app.close_detail();
     assert!(!app.detail_open);
 
-    // sem task selecionada não abre
+    // with no task selected it doesn't open
     let dir2 = TmpDir::new("detail-empty");
     let mut empty = app_with(&dir2, &[]);
     empty.open_detail();
@@ -137,61 +137,61 @@ fn detalhe_abre_so_com_task_selecionada_e_fecha() {
 }
 
 #[test]
-fn navegacao_respeita_limites() {
+fn navigation_respects_bounds() {
     let dir = TmpDir::new("nav");
     let mut app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
     assert_eq!(app.selected, 0);
     assert!(!app.project_selected);
-    app.select_prev(); // do topo sobe para a linha · projeto
+    app.select_prev(); // from the top it moves up to the · project row
     assert!(app.project_selected);
-    app.select_next(); // volta para a primeira task
+    app.select_next(); // back to the first task
     assert!(!app.project_selected);
     assert_eq!(app.selected, 0);
     app.select_next();
     assert_eq!(app.selected, 1);
-    app.select_next(); // não passa do fim
+    app.select_next(); // doesn't go past the end
     assert_eq!(app.selected, 1);
 }
 
 #[test]
-fn statusline_mostra_tab_e_dica_de_foco() {
+fn statusline_shows_tab_and_focus_hint() {
     let dir = TmpDir::new("status");
     let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
     let s = app.statusline();
     assert!(s.contains("[Board]"));
-    // no Board, a statusline traz a dica de navegação de foco.
-    assert!(s.contains("foco"));
+    // in the Board, the statusline carries the focus navigation hint.
+    assert!(s.contains("focus"));
     assert!(s.contains("zoom"));
 }
 
 #[test]
-fn defer_cria_backlog_novo_e_refresh() {
+fn defer_creates_new_backlog_and_refreshes() {
     let dir = TmpDir::new("defer");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
-    let antes = app.tasks.len();
-    app.defer("extrair parser de datas");
-    assert_eq!(app.tasks.len(), antes + 1);
+    let before = app.tasks.len();
+    app.defer("extract date parser");
+    assert_eq!(app.tasks.len(), before + 1);
     assert!(app.status_msg.contains("deferred"));
 }
 
 #[test]
-fn add_convention_anexa_no_arquivo_e_recarrega() {
+fn add_convention_appends_to_file_and_reloads() {
     let dir = TmpDir::new("conv");
     let mut app = app_with(&dir, &[]);
-    app.add_convention("não referenciar nº de RFC em comentários");
-    assert!(app.conventions.contains("não referenciar nº de RFC"));
-    let no_disco = fs::read_to_string(&app.conventions_path).unwrap();
-    assert!(no_disco.contains("- não referenciar nº de RFC em comentários"));
+    app.add_convention("don't reference RFC numbers in comments");
+    assert!(app.conventions.contains("don't reference RFC numbers"));
+    let on_disk = fs::read_to_string(&app.conventions_path).unwrap();
+    assert!(on_disk.contains("- don't reference RFC numbers in comments"));
 }
 
 #[test]
-fn new_task_quick_cria_backlog_com_objetivo() {
+fn new_task_quick_creates_backlog_with_objective() {
     let dir = TmpDir::new("newtask");
     let mut app = app_with(&dir, &[]);
-    app.new_task_quick("analisar o resto do projeto procurando refs de RFC");
+    app.new_task_quick("analyze the rest of the project looking for RFC refs");
     assert_eq!(app.tasks.len(), 1);
-    assert!(app.tasks[0].body.contains("analisar o resto do projeto"));
-    assert!(app.status_msg.contains("task criada"));
+    assert!(app.tasks[0].body.contains("analyze the rest of the project"));
+    assert!(app.status_msg.contains("task created"));
 }
 
 fn cat_session() -> jaum_adapters::Session {
@@ -202,13 +202,13 @@ fn cat_session() -> jaum_adapters::Session {
 }
 
 #[test]
-fn multi_sessao_por_task_navega_e_encerra() {
+fn multi_session_per_task_navigates_and_closes() {
     use app::{BoardFocus, SessionKind};
     let dir = TmpDir::new("multi");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
     assert!(a.sessions.is_empty());
 
-    // duas sessões da MESMA task (play + review) viram dois cards dela.
+    // two sessions of the SAME task (play + review) become two of its cards.
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -226,27 +226,27 @@ fn multi_sessao_por_task_navega_e_encerra() {
         dir.0.clone(),
     );
     assert_eq!(a.sessions.len(), 2);
-    // abre no Board, chat da recém-criada em foco, task dona selecionada
+    // opens in the Board, the just-created chat focused, owner task selected
     assert_eq!(a.tab, Tab::Board);
     assert_eq!(a.board_focus, BoardFocus::Chat);
     assert_eq!(a.selected_task().unwrap().id, "TASK-001");
     assert_eq!(a.task_cards().len(), 2);
 
-    // a sessão focada é a recém-aberta (uuid-2)
+    // the focused session is the just-opened one (uuid-2)
     let cur = a.current_session_idx().unwrap();
     assert_eq!(a.sessions[cur].claude_session_id, "uuid-2");
 
-    // navega os cards (ida e volta)
+    // navigate the cards (there and back)
     a.card_next();
     a.card_prev();
     assert_eq!(a.current_session_idx().unwrap(), cur);
 
-    // finish: marca a sessão do card como concluída, mantém na lista
+    // finish: marks the card's session as done, keeps it in the list
     a.finish_selected_session();
     assert_eq!(a.sessions.len(), 2);
-    assert!(a.status_msg.contains("finalizada"));
+    assert!(a.status_msg.contains("finished"));
 
-    // fecha o card atual: remove da lista
+    // close the current card: removes it from the list
     a.close_selected_session();
     assert_eq!(a.sessions.len(), 1);
 
@@ -255,7 +255,7 @@ fn multi_sessao_por_task_navega_e_encerra() {
 }
 
 #[test]
-fn sessions_mais_recente_no_topo() {
+fn sessions_most_recent_on_top() {
     use app::SessionKind;
     let dir = TmpDir::new("sort");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
@@ -269,10 +269,10 @@ fn sessions_mais_recente_no_topo() {
             dir.0.clone(),
         );
     }
-    // a última aberta (s3) fica no topo
+    // the last opened (s3) stays on top
     assert_eq!(a.sessions[0].claude_session_id, "s3");
 
-    // atividade recente numa sessão antiga (s1) a leva pro topo
+    // recent activity on an old session (s1) brings it to the top
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
     a.sessions
         .iter_mut()
@@ -284,11 +284,11 @@ fn sessions_mais_recente_no_topo() {
 }
 
 #[test]
-fn play_selected_foca_sessao_viva_existente_sem_duplicar() {
+fn play_selected_focuses_existing_live_session_without_duplicating() {
     use app::SessionKind;
     let dir = TmpDir::new("play-dup");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
-    // já existe uma sessão de play viva para a task selecionada
+    // there's already a live play session for the selected task
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -301,24 +301,24 @@ fn play_selected_foca_sessao_viva_existente_sem_duplicar() {
     assert_eq!(a.sessions.len(), 1);
 
     a.play_selected();
-    // não duplicou: focou a sessão existente (chat no Board)
+    // no duplicate: focused the existing session (chat in the Board)
     assert_eq!(a.sessions.len(), 1);
     assert_eq!(a.tab, Tab::Board);
     assert_eq!(a.board_focus, app::BoardFocus::Chat);
-    assert!(a.status_msg.contains("já está aberto"), "msg: {}", a.status_msg);
+    assert!(a.status_msg.contains("is already open"), "msg: {}", a.status_msg);
 }
 
 #[test]
-fn pr_sync_targets_so_pega_task_com_play_viva_e_pr_zero() {
+fn pr_sync_targets_only_picks_task_with_live_play_and_pr_zero() {
     use app::SessionKind;
     let dir = TmpDir::new("prsync");
-    // a fixture já cria a task com PrLink { repo: org/x, pr: 0, branch: feat/<id> }
+    // the fixture already creates the task with PrLink { repo: org/x, pr: 0, branch: feat/<id> }
     let mut a = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
 
-    // sem sessão de play viva -> nenhum alvo
+    // no live play session -> no targets
     assert!(a.pr_sync_targets().is_empty());
 
-    // abre play viva só para TASK-001
+    // open a live play only for TASK-001
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -334,16 +334,16 @@ fn pr_sync_targets_so_pega_task_com_play_viva_e_pr_zero() {
         ("TASK-001".to_string(), "org/x".to_string(), "feat/TASK-001".to_string())
     );
 
-    // sessão finalizada não conta mais
+    // a finished session no longer counts
     a.sessions[0].finished = true;
     assert!(a.pr_sync_targets().is_empty());
 }
 
 #[test]
-fn sessao_finalizada_nao_conta_como_viva() {
+fn finished_session_does_not_count_as_live() {
     use app::SessionKind;
     let dir = TmpDir::new("dead-session");
-    // task NÃO-wip: a única razão de ser "ativa" seria a sessão viva.
+    // NON-wip task: the only reason to be "active" would be the live session.
     let mut a = app_with(&dir, &[("TASK-001", "backlog")]);
     a.open_session(
         SessionKind::Play,
@@ -356,13 +356,13 @@ fn sessao_finalizada_nao_conta_como_viva() {
     assert!(a.sessions[0].is_live());
     assert!(a.active_task_ids().contains(&"TASK-001".to_string()));
 
-    // simula o claude tendo saído (Ctrl+C/Ctrl+D): o drain marcaria `finished`.
+    // simulate claude having exited (Ctrl+C/Ctrl+D): drain would mark `finished`.
     a.sessions[0].finished = true;
     assert!(
         !a.sessions[0].is_live(),
-        "sessão finalizada (processo morto) não é viva, mesmo com session=Some"
+        "finished session (dead process) is not live, even with session=Some"
     );
-    // e não conta mais como task ativa
+    // and no longer counts as an active task
     assert!(!a.active_task_ids().contains(&"TASK-001".to_string()));
 }
 
@@ -376,12 +376,12 @@ fn write_review(dir: &TmpDir, id: &str, clean: bool) {
 }
 
 #[test]
-fn projeto_abriga_sessoes_de_setup() {
+fn project_holds_setup_sessions() {
     use app::SessionKind;
-    let dir = TmpDir::new("projeto");
+    let dir = TmpDir::new("project");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
 
-    // sessão de setup (sem task) foca a linha · projeto
+    // a setup session (no task) focuses the · project row
     a.open_session(
         SessionKind::Setup,
         None,
@@ -392,48 +392,48 @@ fn projeto_abriga_sessoes_de_setup() {
     );
     assert!(a.project_selected);
     assert_eq!(a.selected_task().map(|t| t.id.clone()), None);
-    // os cards da linha · projeto são as sessões de setup
+    // the · project row's cards are the setup sessions
     assert_eq!(a.task_cards().len(), 1);
     let cur = a.current_session_idx().unwrap();
     assert_eq!(a.sessions[cur].kind, SessionKind::Setup);
 
-    // sair da linha · projeto para a primeira task limpa os cards de setup
+    // leaving the · project row for the first task clears the setup cards
     a.select_next();
     assert!(!a.project_selected);
     assert!(a.task_cards().is_empty());
 }
 
 #[test]
-fn verdict_card_aparece_so_para_task_com_review() {
+fn verdict_card_appears_only_for_task_with_review() {
     use app::BoardCard;
     let dir = TmpDir::new("verdict-card");
     let mut a = app_with(&dir, &[("TASK-001", "review"), ("TASK-002", "review")]);
-    // só 001 tem review gravado
+    // only 001 has a saved review
     write_review(&dir, "TASK-001", true);
     a.refresh().unwrap();
 
-    // TASK-001 (com review) -> tem card de veredito
+    // TASK-001 (with review) -> has a verdict card
     a.selected = a.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
     assert!(a.task_cards().contains(&BoardCard::Verdict));
 
-    // TASK-002 (sem review) -> sem card de veredito
+    // TASK-002 (without review) -> no verdict card
     a.selected = a.tasks.iter().position(|t| t.id == "TASK-002").unwrap();
     assert!(!a.task_cards().contains(&BoardCard::Verdict));
 }
 
 #[test]
-fn handoff_selected_envia_findings_ao_play() {
+fn handoff_selected_sends_findings_to_play() {
     use app::SessionKind;
     let dir = TmpDir::new("handoff");
     let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    // grava um review SUJO (1 finding + 1 constraint reprovada)
+    // write a DIRTY review (1 finding + 1 failed constraint)
     fs::write(
         dir.0.join(".backlog/TASK-001.review.md"),
-        "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: regra\n    verdict: reprovado\n---\nbody\n",
+        "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n",
     )
     .unwrap();
     a.refresh().unwrap();
-    // já existe uma sessão de play viva para a task
+    // there's already a live play session for the task
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -446,63 +446,63 @@ fn handoff_selected_envia_findings_ao_play() {
     a.handoff_selected();
     assert_eq!(a.tab, Tab::Board);
     assert_eq!(a.board_focus, app::BoardFocus::Chat);
-    assert!(a.status_msg.contains("enviados"), "msg: {}", a.status_msg);
+    assert!(a.status_msg.contains("sent"), "msg: {}", a.status_msg);
 }
 
 #[test]
-fn handoff_selected_sem_review_avisa() {
+fn handoff_selected_without_review_warns() {
     let dir = TmpDir::new("handoff-none");
     let mut a = app_with(&dir, &[("TASK-001", "review")]);
     a.handoff_selected();
-    assert!(a.status_msg.contains("rode o review"));
+    assert!(a.status_msg.contains("run review"));
 }
 
 #[test]
-fn paralelismo_badge_relativo_a_task_ativa() {
+fn parallelism_badge_relative_to_active_task() {
     let dir = TmpDir::new("parallel");
     let work = dir.0.join(".jaum");
     fs::create_dir_all(&work).unwrap();
-    // conflito declarado entre 001 e 002 (no repo org/x)
+    // declared conflict between 001 and 002 (in repo org/x)
     fs::write(
         work.join("parallel.json"),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"ambas editam src/x.rs"}]}"#,
+        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"both edit src/x.rs"}]}"#,
     )
     .unwrap();
-    // 001 está wip (ativa); 002 e 003 paradas
+    // 001 is wip (active); 002 and 003 idle
     let mut a = app_with(
         &dir,
         &[("TASK-001", "wip"), ("TASK-002", "backlog"), ("TASK-003", "backlog")],
     );
     a.refresh().unwrap();
-    assert!(a.parallel.is_some(), "parallel.json deve ter sido carregado");
+    assert!(a.parallel.is_some(), "parallel.json should have been loaded");
 
-    // 002 conflita com a ativa 001
+    // 002 conflicts with the active 001
     let c = a.parallel_conflict_with_active("TASK-002");
     assert!(c.is_some());
     let (other, repo, _reason) = c.unwrap();
     assert_eq!(other, "TASK-001");
     assert_eq!(repo, "org/x");
-    assert!(!a.is_parallel_safe("TASK-002"), "002 conflita, não é safe");
+    assert!(!a.is_parallel_safe("TASK-002"), "002 conflicts, not safe");
 
-    // 003 não conflita com a ativa -> safe para paralelo
+    // 003 doesn't conflict with the active one -> safe for parallel
     assert!(a.parallel_conflict_with_active("TASK-003").is_none());
     assert!(a.is_parallel_safe("TASK-003"));
 
-    // sem análise carregada, nada é marcado
+    // with no analysis loaded, nothing is marked
     a.parallel = None;
     assert!(a.parallel_conflict_with_active("TASK-002").is_none());
     assert!(!a.is_parallel_safe("TASK-003"));
 }
 
 #[test]
-fn paralelismo_sem_task_ativa_nao_marca_safe() {
+fn parallelism_without_active_task_marks_nothing_safe() {
     let dir = TmpDir::new("parallel-idle");
     let work = dir.0.join(".jaum");
     fs::create_dir_all(&work).unwrap();
     fs::write(work.join("parallel.json"), r#"{"conflicts":[]}"#).unwrap();
     let mut a = app_with(&dir, &[("TASK-001", "backlog"), ("TASK-002", "backlog")]);
     a.refresh().unwrap();
-    // nada ativo -> não há com quem paralelizar -> não é "safe"
+    // nothing active -> no one to parallelize with -> not "safe"
     assert!(!a.is_parallel_safe("TASK-001"));
     assert!(a.active_task_ids().is_empty());
 }
@@ -521,7 +521,7 @@ fn session_record_roundtrip_serde() {
         finished: false,
     };
     let json = serde_json::to_string(&rec).unwrap();
-    // kind serializa em lowercase
+    // kind serializes in lowercase
     assert!(json.contains("\"play\""), "json: {json}");
     let back: SessionRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(back.kind, SessionKind::Play);
@@ -532,14 +532,14 @@ fn session_record_roundtrip_serde() {
 }
 
 #[test]
-fn rehydrate_traz_finalizadas_e_cwd_ausente_como_historico() {
+fn rehydrate_brings_finished_and_missing_cwd_as_history() {
     use app::{SessionKind, SessionRecord};
     let dir = TmpDir::new("rehydrate");
     let work = dir.0.join(".jaum");
     fs::create_dir_all(&work).unwrap();
 
-    // 1) finalizada (vira histórico mesmo com cwd existente)
-    // 2) viva mas cwd inexistente (não resumível -> histórico)
+    // 1) finished (becomes history even with an existing cwd)
+    // 2) live but nonexistent cwd (not resumable -> history)
     let recs = vec![
         SessionRecord {
             kind: SessionKind::Setup,
@@ -555,7 +555,7 @@ fn rehydrate_traz_finalizadas_e_cwd_ausente_como_historico() {
             kind: SessionKind::Play,
             task: Some("TASK-001".into()),
             claude_session_id: "s-gone".into(),
-            cwd: dir.0.join("worktree-que-sumiu"),
+            cwd: dir.0.join("worktree-gone"),
             worktrees: Vec::new(),
             created_ms: 1_700_000_002_000,
             last_activity_ms: 1_700_000_003_000,
@@ -568,15 +568,15 @@ fn rehydrate_traz_finalizadas_e_cwd_ausente_como_historico() {
     )
     .unwrap();
 
-    // App::new reidrata no boot
+    // App::new rehydrates at boot
     let a = app_with(&dir, &[("TASK-001", "wip")]);
-    assert_eq!(a.sessions.len(), 2, "ambas devem aparecer na lista");
-    // nenhuma é viva: finalizada e cwd-ausente caem para histórico (sem PTY)
+    assert_eq!(a.sessions.len(), 2, "both should appear in the list");
+    // neither is live: finished and missing-cwd fall back to history (no PTY)
     assert!(a.sessions.iter().all(|e| !e.is_live()));
     assert!(a.sessions.iter().all(|e| e.finished));
     assert_eq!(a.sessions[0].kind, SessionKind::Setup);
     assert_eq!(a.sessions[1].claude_session_id, "s-gone");
 }
 
-// ingest agora é via LLM (claude -p) — a lógica determinística (parse do
-// structured_output + create_stubs) é testada em crates/flows/tests/ingest.rs.
+// ingest now goes through the LLM (claude -p) — the deterministic logic (parsing
+// structured_output + create_stubs) is tested in crates/flows/tests/ingest.rs.

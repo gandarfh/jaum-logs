@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Estado da task no fluxo. É a única fonte de verdade do progresso —
-/// merge de PR é lido do `gh`, nunca espelhado aqui (apenas `merged` final).
+/// Task state in the flow. The single source of truth for progress — PR merge
+/// is read from `gh`, never mirrored here (only the final `merged`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -14,7 +14,7 @@ pub enum Status {
     Merged,
 }
 
-/// Natureza da task. `Spike` gera documento (RFC/ADR), não tem PR nem play.
+/// Kind of task. `Spike` produces a document (RFC/ADR); it has no PR and no play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskType {
@@ -22,9 +22,9 @@ pub enum TaskType {
     Spike,
 }
 
-/// Classifica como uma constraint é garantida (os dois patches do core):
-/// `Hook` = mecânica, bloqueada preventivamente por PreToolUse hook;
-/// `Review` = semântica, checada item a item e obrigatória no review.
+/// How a constraint is enforced (the two core patches):
+/// `Hook` = mechanical, blocked preemptively by a PreToolUse hook;
+/// `Review` = semantic, checked item by item and mandatory at review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Enforce {
@@ -32,8 +32,8 @@ pub enum Enforce {
     Review,
 }
 
-/// Vínculo task↔PR. `pr == 0` significa "ainda não criado": o número real é
-/// lido do `gh` (downstream), nunca inventado à mão.
+/// Task↔PR link. `pr == 0` means "not created yet": the real number is read
+/// from `gh` (downstream), never made up by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrLink {
     pub repo: String,
@@ -42,28 +42,28 @@ pub struct PrLink {
     pub branch: String,
 }
 
-/// Diretriz "não faça X" anexada à task, classificada por como é garantida.
+/// A "don't do X" directive attached to a task, classified by how it's enforced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Constraint {
     pub text: String,
     pub enforce: Enforce,
-    /// Regex que o PreToolUse hook usa para bloquear (`enforce: hook`). Quando
-    /// ausente, [`Constraint::hook_pattern`] deriva uma heurística do `text`.
+    /// Regex the PreToolUse hook uses to block (`enforce: hook`). When absent,
+    /// [`Constraint::hook_pattern`] derives a heuristic from `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 }
 
 impl Constraint {
-    /// Padrão (regex estendida, usada com `grep -iE` no hook) para bloquear esta
-    /// constraint. Usa `pattern` explícito se houver; senão, deriva do `text`:
-    /// prioriza um token que pareça caminho (`src/legacy/`), e na falta usa as
-    /// palavras significativas (descartando stopwords PT) numa alternância.
+    /// Pattern (extended regex, used with `grep -iE` in the hook) to block this
+    /// constraint. Uses an explicit `pattern` if present; otherwise derives from
+    /// `text`: prefers a path-like token (`src/legacy/`), falling back to the
+    /// significant words (dropping stopwords) as an alternation.
     pub fn hook_pattern(&self) -> String {
         if let Some(p) = &self.pattern {
             return p.clone();
         }
         let lower = self.text.to_lowercase();
-        // 1) token que parece caminho/arquivo (contém `/` ou `.`)
+        // 1) token that looks like a path/file (contains `/` or `.`)
         if let Some(path) = lower
             .split_whitespace()
             .find(|t| t.contains('/') || t.contains('.'))
@@ -72,11 +72,10 @@ impl Constraint {
                 path.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'),
             );
         }
-        // 2) palavras significativas
+        // 2) significant words
         const STOP: &[&str] = &[
-            "nao", "não", "em", "de", "da", "do", "a", "o", "os", "as", "no", "na", "sem", "com",
-            "e", "ou", "manter", "rodar", "tocar", "usar", "fazer", "novo", "nova", "para", "pra",
-            "que", "se",
+            "not", "don", "the", "and", "for", "that", "with", "without", "keep", "run", "touch",
+            "use", "make", "new", "any", "all",
         ];
         let words: Vec<String> = lower
             .split(|c: char| !c.is_alphanumeric())
@@ -84,14 +83,14 @@ impl Constraint {
             .map(escape_regex)
             .collect();
         if words.is_empty() {
-            // fallback: o texto inteiro escapado (nunca casa vazio)
+            // fallback: the whole text escaped (never matches empty)
             return escape_regex(lower.trim());
         }
         words.join("|")
     }
 }
 
-/// Escapa metacaracteres de regex estendida (ERE) para casar literalmente.
+/// Escapes extended-regex (ERE) metacharacters so they match literally.
 fn escape_regex(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -106,30 +105,30 @@ fn escape_regex(s: &str) -> String {
     out
 }
 
-/// Slug "owner/name" de um repositório. Alias por enquanto; vira newtype se a
-/// fase dos adapters (git/gh) precisar de mais semântica.
+/// "owner/name" slug of a repository. An alias for now; becomes a newtype if the
+/// adapters (git/gh) need more semantics.
 pub type Repo = String;
 
-/// Estado de merge de um PR, **lido** do `gh` — nunca espelhado no markdown.
-/// Base do `finish`, que atualiza o status da task a partir daqui sem nunca
-/// executar o merge.
+/// Merge state of a PR, **read** from `gh` — never mirrored in the markdown.
+/// Basis for `finish`, which updates the task status from here without ever
+/// running the merge itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeState {
-    /// `pr == 0`: ainda não criado.
+    /// `pr == 0`: not created yet.
     NotCreated,
-    /// PR aberto, ainda não mergeado.
+    /// PR open, not merged yet.
     Open,
-    /// Mergeado.
+    /// Merged.
     Merged,
-    /// Fechado sem merge.
+    /// Closed without merging.
     Closed,
-    /// Estado não reconhecido devolvido pelo `gh`.
+    /// Unrecognized state returned by `gh`.
     Unknown,
 }
 
-/// Uma task do `.backlog/`. Os campos sem `skip` são exatamente o frontmatter
-/// YAML; `body` e `path` são preenchidos pelo store após o parse e não são
-/// serializados de volta.
+/// A task from `.backlog/`. Fields without `skip` are exactly the YAML
+/// frontmatter; `body` and `path` are filled in by the store after parsing and
+/// are not serialized back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -160,7 +159,7 @@ impl Task {
         matches!(self.task_type, TaskType::Spike)
     }
 
-    /// Constraints de uma classe de enforcement (Hook = mecânica, Review = semântica).
+    /// Constraints of a given enforcement class (Hook = mechanical, Review = semantic).
     pub fn constraints_by(&self, kind: Enforce) -> Vec<&Constraint> {
         self.constraints
             .iter()
@@ -168,17 +167,17 @@ impl Task {
             .collect()
     }
 
-    /// Critérios de aceite extraídos do corpo (seção cujo heading contém "aceite").
-    /// Cada item de lista (`- [ ] texto`, `- [x] texto` ou `- texto`) vira um
-    /// critério; o placeholder vazio é ignorado. Usado pelo review como checklist.
+    /// Acceptance criteria extracted from the body (section whose heading contains
+    /// "acceptance"). Each list item (`- [ ] text`, `- [x] text` or `- text`) becomes
+    /// a criterion; the empty placeholder is skipped. Used by review as a checklist.
     pub fn acceptance_criteria(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut in_section = false;
         for line in self.body.lines() {
             let t = line.trim();
             if let Some(h) = t.strip_prefix('#') {
-                // outra seção encerra a de aceite; nova seção de aceite (re)abre.
-                in_section = h.trim_start_matches('#').to_lowercase().contains("aceite");
+                // any other section closes the acceptance one; a new acceptance section (re)opens it.
+                in_section = h.trim_start_matches('#').to_lowercase().contains("acceptance");
                 continue;
             }
             if !in_section {
@@ -188,7 +187,7 @@ impl Task {
                 continue;
             };
             let mut item = rest.trim();
-            // tira o checkbox `[ ]` / `[x]` se houver.
+            // strip the checkbox `[ ]` / `[x]` if present.
             if let Some(after) = item.strip_prefix('[')
                 && let Some((_, tail)) = after.split_once(']')
             {
@@ -201,7 +200,7 @@ impl Task {
         out
     }
 
-    /// Repos linkados via PRs, deduplicados preservando a ordem.
+    /// Repos linked via PRs, deduplicated preserving order.
     pub fn linked_repos(&self) -> Vec<Repo> {
         let mut seen: Vec<Repo> = Vec::new();
         for link in &self.prs {

@@ -33,30 +33,30 @@ fn git(repo: &Path, args: &[&str]) {
         .status()
         .unwrap()
         .success();
-    assert!(ok, "git {args:?} falhou");
+    assert!(ok, "git {args:?} failed");
 }
 
-/// Repo fixture com branch default `main` e um commit inicial.
+/// Repo fixture with default branch `main` and an initial commit.
 fn init_repo(dir: &TmpDir) -> PathBuf {
     let repo = dir.0.join("repo");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-b", "main", "-q"]);
     git(&repo, &["config", "user.email", "t@test.dev"]);
     git(&repo, &["config", "user.name", "Test"]);
-    fs::write(repo.join("README.md"), "linha um\n").unwrap();
+    fs::write(repo.join("README.md"), "line one\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     repo
 }
 
 #[test]
-fn branch_create_eh_idempotente() {
+fn branch_create_is_idempotent() {
     let dir = TmpDir::new("branch");
     let repo = init_repo(&dir);
     let g = Git::new();
 
     g.branch_create(&repo, "feat/x").unwrap();
-    // segunda vez não deve falhar
+    // second time must not fail
     g.branch_create(&repo, "feat/x").unwrap();
 
     let out = Command::new("git")
@@ -69,26 +69,26 @@ fn branch_create_eh_idempotente() {
 }
 
 #[test]
-fn worktree_add_cria_e_remove_apaga() {
+fn worktree_add_creates_and_remove_deletes() {
     let dir = TmpDir::new("worktree");
     let repo = init_repo(&dir);
     let g = Git::new();
 
     let wt = g.worktree_add(&repo, "feat/task-012").unwrap();
-    assert!(wt.exists(), "worktree não foi criada");
+    assert!(wt.exists(), "worktree was not created");
     assert!(
         wt.join("README.md").exists(),
-        "checkout não trouxe arquivos"
+        "checkout did not bring files"
     );
-    // o nome do diretório sanitiza a `/`
+    // the directory name sanitizes the `/`
     assert_eq!(wt.file_name().unwrap().to_str().unwrap(), "feat-task-012");
 
     g.worktree_remove(&repo, "feat/task-012").unwrap();
-    assert!(!wt.exists(), "worktree não foi removida");
+    assert!(!wt.exists(), "worktree was not removed");
 }
 
 #[test]
-fn worktree_add_em_branch_existente_funciona() {
+fn worktree_add_on_existing_branch_works() {
     let dir = TmpDir::new("worktree-existing");
     let repo = init_repo(&dir);
     let g = Git::new();
@@ -99,9 +99,9 @@ fn worktree_add_em_branch_existente_funciona() {
 }
 
 #[test]
-fn worktree_add_e_idempotente_quando_ja_existe() {
-    // re-play de uma task wip cuja worktree foi preservada num shutdown: o
-    // segundo add não deve falhar, só devolver o mesmo caminho.
+fn worktree_add_is_idempotent_when_already_exists() {
+    // re-playing a wip task whose worktree was preserved by a shutdown: the
+    // second add must not fail, just return the same path.
     let dir = TmpDir::new("worktree-idem");
     let repo = init_repo(&dir);
     let g = Git::new();
@@ -109,37 +109,37 @@ fn worktree_add_e_idempotente_quando_ja_existe() {
     let wt1 = g.worktree_add(&repo, "feat/z").unwrap();
     assert!(wt1.exists());
     let wt2 = g.worktree_add(&repo, "feat/z").unwrap();
-    assert_eq!(wt1, wt2, "deve reusar a worktree existente");
+    assert_eq!(wt1, wt2, "must reuse the existing worktree");
     assert!(wt2.exists());
 }
 
 #[test]
-fn diff_mostra_mudancas_da_branch() {
+fn diff_shows_branch_changes() {
     let dir = TmpDir::new("diff");
     let repo = init_repo(&dir);
     let g = Git::new();
 
-    // cria branch + worktree, commita uma mudança lá; objetos são compartilhados
+    // create branch + worktree, commit a change there; objects are shared
     let wt = g.worktree_add(&repo, "feat/change").unwrap();
-    fs::write(wt.join("README.md"), "linha um\nlinha dois\n").unwrap();
+    fs::write(wt.join("README.md"), "line one\nline two\n").unwrap();
     git(&wt, &["config", "user.email", "t@test.dev"]);
     git(&wt, &["config", "user.name", "Test"]);
-    git(&wt, &["commit", "-aqm", "muda readme"]);
+    git(&wt, &["commit", "-aqm", "change readme"]);
 
     let diff = g.diff(&repo, "feat/change").unwrap();
     assert!(
-        diff.contains("linha dois"),
-        "diff não refletiu a mudança:\n{diff}"
+        diff.contains("line two"),
+        "diff did not reflect the change:\n{diff}"
     );
     assert!(diff.contains("README.md"));
 }
 
 #[test]
-fn diff_em_branch_sem_mudanca_eh_vazio() {
+fn diff_on_branch_without_changes_is_empty() {
     let dir = TmpDir::new("diff-empty");
     let repo = init_repo(&dir);
     let g = Git::new();
-    g.branch_create(&repo, "feat/nada").unwrap();
-    let diff = g.diff(&repo, "feat/nada").unwrap();
+    g.branch_create(&repo, "feat/nothing").unwrap();
+    let diff = g.diff(&repo, "feat/nothing").unwrap();
     assert!(diff.trim().is_empty());
 }

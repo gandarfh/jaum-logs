@@ -1,6 +1,6 @@
-//! Daemon: dono único do estado (`App`) e dos PTYs. Renderiza o `App` inteiro num
-//! `Buffer` em memória (TestBackend) e expõe diffs de células para os clientes.
-//! O cliente é render puro — toda a lógica (render/handle_key/PTY) é reusada daqui.
+//! Daemon: sole owner of the state (`App`) and the PTYs. Renders the whole `App`
+//! into an in-memory `Buffer` (TestBackend) and exposes cell diffs to clients. The
+//! client is pure render — all logic (render/handle_key/PTY) is reused from here.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
@@ -22,18 +22,18 @@ use crate::backend::{diff_cells, full_cells};
 use crate::protocol::{ClientMsg, ServerMsg, WireCell, read_msg, write_msg};
 use crate::tui;
 
-/// Caminho do socket do daemon (`~/jaum/daemon.sock`).
+/// Daemon socket path (`~/jaum/daemon.sock`).
 pub fn socket_path() -> Result<PathBuf> {
     Ok(crate::config::jaum_home()?.join("daemon.sock"))
 }
 
-/// Há um daemon vivo escutando neste socket?
+/// Is there a live daemon listening on this socket?
 pub fn is_running(sock: &Path) -> bool {
     UnixStream::connect(sock).is_ok()
 }
 
-/// Sobe o daemon destacado do terminal (`setsid`), com stdio em `~/jaum/daemon.log`.
-/// Sobrevive ao fechar a aba do terminal (imune ao SIGHUP).
+/// Starts the daemon detached from the terminal (`setsid`), with stdio in
+/// `~/jaum/daemon.log`. Survives closing the terminal tab (immune to SIGHUP).
 pub fn spawn_detached(idx: usize) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -55,7 +55,7 @@ pub fn spawn_detached(idx: usize) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
-    // SAFETY: setsid() é async-signal-safe; só destacamos o filho do terminal.
+    // SAFETY: setsid() is async-signal-safe; we only detach the child from the terminal.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -66,7 +66,7 @@ pub fn spawn_detached(idx: usize) -> Result<()> {
     Ok(())
 }
 
-/// Pede ao daemon que encerre. `Ok(false)` se não havia daemon rodando.
+/// Asks the daemon to shut down. `Ok(false)` if no daemon was running.
 pub fn shutdown(sock: &Path) -> Result<bool> {
     if !is_running(sock) {
         return Ok(false);
@@ -76,21 +76,21 @@ pub fn shutdown(sock: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Evento interno do servidor (conexões e mensagens dos clientes).
+/// Internal server event (connections and client messages).
 enum Event {
     Connect(u64, UnixStream),
     Client(u64, ClientMsg),
     Disconnect(u64),
 }
 
-/// Sobe o servidor: aceita clientes no `sock`, renderiza o `App` e transmite
-/// diffs. Bloqueia até receber `Shutdown`. O daemon roda na thread que chama isto
-/// (o `App`/PTY nunca cruza thread); só os sockets vão para threads auxiliares.
+/// Starts the server: accepts clients on `sock`, renders the `App` and broadcasts
+/// diffs. Blocks until it receives `Shutdown`. The daemon runs on the calling thread
+/// (the `App`/PTY never crosses threads); only sockets go to helper threads.
 pub fn serve(sock: &Path, app: App, cols: u16, rows: u16) -> Result<()> {
     if is_running(sock) {
-        bail!("daemon já está rodando em {}", sock.display());
+        bail!("daemon already running at {}", sock.display());
     }
-    let _ = std::fs::remove_file(sock); // socket órfão
+    let _ = std::fs::remove_file(sock); // orphan socket
     if let Some(parent) = sock.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -105,7 +105,7 @@ pub fn serve(sock: &Path, app: App, cols: u16, rows: u16) -> Result<()> {
     let mut running = true;
 
     while running {
-        // 1) drena eventos (espera curta p/ ~60fps quando ocioso)
+        // 1) drain events (short wait for ~60fps when idle)
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(ev) => {
                 handle_event(ev, &mut daemon, &mut clients, &mut pending_full, &mut running);
@@ -142,13 +142,13 @@ pub fn serve(sock: &Path, app: App, cols: u16, rows: u16) -> Result<()> {
         pending_full.clear();
     }
 
-    // shutdown: encerra as sessões (limpa worktrees) e remove o socket.
+    // shutdown: stop the sessions (clean up worktrees) and remove the socket.
     daemon.app_mut().stop_all_sessions();
     let _ = std::fs::remove_file(sock);
     Ok(())
 }
 
-/// Thread que aceita conexões e, por cliente, uma thread leitora de `ClientMsg`.
+/// Thread that accepts connections and, per client, a `ClientMsg` reader thread.
 fn spawn_acceptor(listener: UnixListener, tx: Sender<Event>) {
     thread::spawn(move || {
         let mut next_id = 0u64;
@@ -181,7 +181,7 @@ fn spawn_acceptor(listener: UnixListener, tx: Sender<Event>) {
     });
 }
 
-/// Processa um evento mutando o estado do loop.
+/// Processes an event by mutating the loop state.
 fn handle_event(
     ev: Event,
     daemon: &mut Daemon,
@@ -192,7 +192,7 @@ fn handle_event(
     match ev {
         Event::Connect(id, stream) => {
             clients.insert(id, stream);
-            pending_full.insert(id); // novo cliente recebe um frame completo
+            pending_full.insert(id); // new client gets a full frame
         }
         Event::Disconnect(id) => {
             clients.remove(&id);
@@ -216,7 +216,7 @@ fn handle_event(
         Event::Client(_, ClientMsg::Mouse(ev)) => daemon.feed_mouse(ev),
         Event::Client(_, ClientMsg::Resize { cols, rows }) => {
             daemon.resize(cols, rows);
-            // todos reaplicam: o tamanho mudou (last-writer-wins)
+            // everyone reapplies: the size changed (last-writer-wins)
             pending_full.extend(clients.keys().copied());
         }
         Event::Client(_, ClientMsg::EditorDone) => daemon.editor_done(),
@@ -224,7 +224,7 @@ fn handle_event(
     }
 }
 
-/// Estado de render do daemon: o `App` + um terminal off-screen.
+/// Daemon render state: the `App` + an off-screen terminal.
 pub struct Daemon {
     app: App,
     term: Terminal<TestBackend>,
@@ -239,7 +239,7 @@ impl Daemon {
         Ok(Self { app, term, last })
     }
 
-    /// Drena PTY/jobs/toast e sincroniza o tamanho do PTY com o pane de sessão.
+    /// Drains PTY/jobs/toast and syncs the PTY size with the session pane.
     pub fn tick(&mut self) {
         self.app.drain_pty();
         self.app.poll_job();
@@ -253,7 +253,7 @@ impl Daemon {
         tui::sync_pty_to(&mut self.app, w, h);
     }
 
-    /// Re-renderiza e devolve só as células que mudaram desde o último render.
+    /// Re-renders and returns only the cells that changed since the last render.
     pub fn render_diff(&mut self) -> Vec<WireCell> {
         let app = &self.app;
         let _ = self.term.draw(|f| tui::render(f, app));
@@ -263,14 +263,14 @@ impl Daemon {
         diff
     }
 
-    /// Frame completo do estado atual (para o attach de um cliente novo).
+    /// Full frame of the current state (for a new client's attach).
     pub fn full_frame(&self) -> (u16, u16, Vec<WireCell>) {
         let b = self.term.backend().buffer();
         (b.area.width, b.area.height, full_cells(b))
     }
 
-    /// Aplica uma tecla. Devolve `true` quando o usuário pediu para sair: no
-    /// daemon isso é **detach** do cliente — o daemon e as sessões continuam.
+    /// Applies a key. Returns `true` when the user asked to quit: in the daemon
+    /// this means **detaching** the client — the daemon and sessions keep running.
     pub fn feed_key(&mut self, key: KeyEvent) -> bool {
         tui::handle_key(&mut self.app, key);
         if self.app.should_quit {
@@ -280,7 +280,7 @@ impl Daemon {
         false
     }
 
-    /// Encaminha um evento de mouse (scroll/click) sobre a aba Session.
+    /// Forwards a mouse event (scroll/click) over the Session tab.
     pub fn feed_mouse(&mut self, ev: crossterm::event::MouseEvent) {
         let (w, h) = {
             let b = self.term.backend().buffer();
@@ -289,8 +289,8 @@ impl Daemon {
         tui::handle_mouse(&mut self.app, ev, w, h);
     }
 
-    /// Redimensiona o backend off-screen (e o PTY no próximo tick). Força um
-    /// frame completo no próximo render (área nova).
+    /// Resizes the off-screen backend (and the PTY on the next tick). Forces a full
+    /// frame on the next render (new area).
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         self.term.backend_mut().resize(cols, rows);
@@ -298,8 +298,8 @@ impl Daemon {
         self.last = Buffer::empty(Rect::new(0, 0, cols, rows));
     }
 
-    /// Se o usuário pediu para editar o `conventions.md` (`e`), devolve o caminho
-    /// para o cliente rodar o `$EDITOR` e limpa o pedido.
+    /// If the user asked to edit `conventions.md` (`e`), returns the path for the
+    /// client to run `$EDITOR` and clears the request.
     pub fn take_editor_request(&mut self) -> Option<String> {
         if self.app.edit_request {
             self.app.edit_request = false;
@@ -309,10 +309,10 @@ impl Daemon {
         }
     }
 
-    /// Recarrega as convenções após o cliente terminar de editar.
+    /// Reloads the conventions after the client finishes editing.
     pub fn editor_done(&mut self) {
         self.app.reload_conventions();
-        self.app.status_msg = "conventions.md atualizado".into();
+        self.app.status_msg = "conventions.md updated".into();
     }
 
     pub fn app_mut(&mut self) -> &mut App {
@@ -341,7 +341,7 @@ mod tests {
         fs::create_dir_all(&backlog).unwrap();
         fs::write(
             backlog.join("TASK-001.md"),
-            "---\nid: TASK-001\ntype: impl\nstatus: wip\n---\n\n## Objetivo\nx\n",
+            "---\nid: TASK-001\ntype: impl\nstatus: wip\n---\n\n## Objective\nx\n",
         )
         .unwrap();
         let project = Project {
@@ -360,42 +360,42 @@ mod tests {
     }
 
     #[test]
-    fn render_full_e_diff_incremental() {
+    fn render_full_and_incremental_diff() {
         let mut d = Daemon::new(app(), 80, 24).unwrap();
         let (w, h, cells) = d.full_frame();
         assert_eq!((w, h), (80, 24));
         assert_eq!(cells.len(), 80 * 24);
 
-        // 1º render: difere do buffer em branco
+        // first render: differs from the blank buffer
         assert!(!d.render_diff().is_empty());
-        // sem mudança de estado: diff vazio
+        // no state change: empty diff
         assert!(d.render_diff().is_empty());
-        // trocar de tab muda o header -> diff não-vazio
+        // switching tabs changes the header -> non-empty diff
         assert!(!d.feed_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert!(!d.render_diff().is_empty());
     }
 
     #[test]
-    fn quit_vira_detach_sem_encerrar() {
+    fn quit_becomes_detach_without_shutting_down() {
         let mut d = Daemon::new(app(), 80, 24).unwrap();
-        assert!(d.feed_key(key('q')), "q deve sinalizar detach");
-        assert!(!d.app_mut().should_quit, "should_quit deve ser resetado");
+        assert!(d.feed_key(key('q')), "q should signal detach");
+        assert!(!d.app_mut().should_quit, "should_quit should be reset");
     }
 
     #[test]
-    fn resize_forca_full_no_proximo_render() {
+    fn resize_forces_full_on_next_render() {
         let mut d = Daemon::new(app(), 80, 24).unwrap();
         let _ = d.render_diff();
         assert!(d.render_diff().is_empty());
         d.resize(100, 30);
         let (w, h, _) = d.full_frame();
         assert_eq!((w, h), (100, 30));
-        // área nova -> próximo render volta tudo
+        // new area -> next render returns everything
         assert!(!d.render_diff().is_empty());
     }
 
     #[test]
-    fn serve_aceita_cliente_e_manda_frame_full() {
+    fn serve_accepts_client_and_sends_full_frame() {
         use crate::protocol::{ClientMsg, ServerMsg, read_msg, write_msg};
         use std::os::unix::net::UnixStream;
 
@@ -407,9 +407,9 @@ mod tests {
         ));
         let sock_c = sock.clone();
 
-        // o cliente roda numa thread; o `serve` (dono do App) fica na thread atual.
+        // the client runs on a thread; `serve` (App owner) stays on the current thread.
         let client = std::thread::spawn(move || {
-            // espera o socket subir
+            // wait for the socket to come up
             let mut conn = loop {
                 if let Ok(c) = UnixStream::connect(&sock_c) {
                     break c;
@@ -417,7 +417,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             };
             write_msg(&mut conn, &ClientMsg::Resize { cols: 80, rows: 24 }).unwrap();
-            // deve chegar ao menos um FrameFull
+            // at least one FrameFull should arrive
             let mut got_full = false;
             for _ in 0..50 {
                 if let Some(ServerMsg::FrameFull { cols, rows, cells }) =
@@ -434,7 +434,7 @@ mod tests {
         });
 
         serve(&sock, app(), 80, 24).unwrap();
-        assert!(client.join().unwrap(), "cliente não recebeu FrameFull");
-        assert!(!sock.exists(), "socket deveria ser removido no shutdown");
+        assert!(client.join().unwrap(), "client did not receive FrameFull");
+        assert!(!sock.exists(), "socket should be removed on shutdown");
     }
 }

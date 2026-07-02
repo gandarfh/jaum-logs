@@ -6,8 +6,8 @@ use jaum_core::{Enforce, JaumError, Status, Store, TaskType};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Diretório temporário com limpeza automática no drop — evita dependência
-/// externa (tempfile) só para testes.
+/// Temp directory with automatic cleanup on drop — avoids an external
+/// dependency (tempfile) just for tests.
 struct TmpDir(PathBuf);
 
 impl TmpDir {
@@ -42,20 +42,20 @@ prs:
 deferred:
   - "primitivo decimal fica pra TASK-024"
 constraints:
-  - text: "nao tocar em src/legacy/"
+  - text: "do not touch src/legacy/"
     enforce: hook
-  - text: "nao rodar migration"
+  - text: "do not run migration"
     enforce: hook
-  - text: "manter API estavel"
+  - text: "keep the API stable"
     enforce: review
   - text: "sem abstracao nova"
     enforce: review
 ---
 
-## Objetivo
+## Objective
 Implementar enum aberto.
 
-## Criterio de aceite
+## Acceptance criteria
 - [ ] enum aberto preserva variante desconhecida (RFC-003)
 "#;
 
@@ -66,7 +66,7 @@ fn seed_fixture(dir: &TmpDir) -> Store {
 }
 
 #[test]
-fn parse_le_todos_os_campos_do_frontmatter() {
+fn parse_reads_all_frontmatter_fields() {
     let dir = TmpDir::new("parse");
     let store = seed_fixture(&dir);
     let t = store.get("TASK-012").unwrap();
@@ -79,7 +79,7 @@ fn parse_le_todos_os_campos_do_frontmatter() {
     assert_eq!(t.prs.len(), 2);
     assert_eq!(t.prs[0].repo, "tono-lang/parser");
     assert_eq!(t.prs[0].pr, 142);
-    assert_eq!(t.prs[1].pr, 0); // ainda não criado
+    assert_eq!(t.prs[1].pr, 0); // not created yet
     assert_eq!(t.deferred, vec!["primitivo decimal fica pra TASK-024"]);
     assert_eq!(t.constraints.len(), 4);
     assert!(
@@ -90,22 +90,22 @@ fn parse_le_todos_os_campos_do_frontmatter() {
 }
 
 #[test]
-fn constraints_filtradas_por_enforce() {
+fn constraints_filtered_by_enforce() {
     let dir = TmpDir::new("constraints");
     let store = seed_fixture(&dir);
 
     let hooks = store.constraints("TASK-012", Enforce::Hook).unwrap();
     assert_eq!(hooks.len(), 2);
     assert!(hooks.iter().all(|c| c.enforce == Enforce::Hook));
-    assert!(hooks.iter().any(|c| c.text == "nao tocar em src/legacy/"));
+    assert!(hooks.iter().any(|c| c.text == "do not touch src/legacy/"));
 
     let reviews = store.constraints("TASK-012", Enforce::Review).unwrap();
     assert_eq!(reviews.len(), 2);
-    assert!(reviews.iter().any(|c| c.text == "manter API estavel"));
+    assert!(reviews.iter().any(|c| c.text == "keep the API stable"));
 }
 
 #[test]
-fn linked_repos_deduplica_preservando_ordem() {
+fn linked_repos_dedups_preserving_order() {
     let dir = TmpDir::new("repos");
     let store = seed_fixture(&dir);
     let repos = store.linked_repos("TASK-012").unwrap();
@@ -113,12 +113,12 @@ fn linked_repos_deduplica_preservando_ordem() {
 }
 
 #[test]
-fn write_e_parse_sao_roundtrip() {
+fn write_and_parse_roundtrip() {
     let dir = TmpDir::new("roundtrip");
     let store = seed_fixture(&dir);
     let original = store.get("TASK-012").unwrap();
 
-    // regrava e relê: campos de domínio preservados
+    // rewrite and reread: domain fields preserved
     store.write(&original).unwrap();
     let again = store.get("TASK-012").unwrap();
 
@@ -133,7 +133,7 @@ fn write_e_parse_sao_roundtrip() {
 }
 
 #[test]
-fn list_filtra_por_status() {
+fn list_filters_by_status() {
     let dir = TmpDir::new("list");
     let store = seed_fixture(&dir);
     store.create_stub(&["RFC-001".to_string()]).unwrap(); // backlog
@@ -150,7 +150,7 @@ fn list_filtra_por_status() {
 }
 
 #[test]
-fn list_ignora_arquivos_de_review() {
+fn list_ignores_review_files() {
     let dir = TmpDir::new("review-ignore");
     let store = seed_fixture(&dir);
     fs::write(dir.0.join("TASK-012.review.md"), "# findings").unwrap();
@@ -161,7 +161,7 @@ fn list_ignora_arquivos_de_review() {
 }
 
 #[test]
-fn get_inexistente_devolve_task_not_found() {
+fn get_missing_returns_task_not_found() {
     let dir = TmpDir::new("notfound");
     let store = Store::new(&dir.0);
     let err = store.get("TASK-999").unwrap_err();
@@ -172,9 +172,9 @@ fn get_inexistente_devolve_task_not_found() {
 }
 
 #[test]
-fn create_stub_gera_id_sequencial_e_backlog() {
+fn create_stub_generates_sequential_id_and_backlog() {
     let dir = TmpDir::new("stub");
-    let store = seed_fixture(&dir); // já tem TASK-012
+    let store = seed_fixture(&dir); // already has TASK-012
 
     let stub = store.create_stub(&["RFC-009".to_string()]).unwrap();
     assert_eq!(stub.id, "TASK-013");
@@ -182,35 +182,35 @@ fn create_stub_gera_id_sequencial_e_backlog() {
     assert_eq!(stub.task_type, TaskType::Impl);
     assert_eq!(stub.rfcs, vec!["RFC-009"]);
 
-    // persistiu de fato
+    // actually persisted
     assert_eq!(store.get("TASK-013").unwrap().rfcs, vec!["RFC-009"]);
 }
 
 #[test]
-fn link_repo_cria_vinculo_e_atualiza_branch() {
+fn link_repo_creates_link_and_updates_branch() {
     let dir = TmpDir::new("link");
     let store = seed_fixture(&dir);
-    let stub = store.create_stub(&["RFC-009".to_string()]).unwrap(); // sem prs
+    let stub = store.create_stub(&["RFC-009".to_string()]).unwrap(); // no prs
     assert!(stub.prs.is_empty());
 
-    // cria o vínculo
+    // creates the link
     let t = store.link_repo(&stub.id, "org/app", "feat/x").unwrap();
     assert_eq!(t.prs.len(), 1);
     assert_eq!(t.prs[0].repo, "org/app");
     assert_eq!(t.prs[0].branch, "feat/x");
     assert_eq!(t.prs[0].pr, 0);
 
-    // mesmo repo de novo: atualiza o branch, não duplica
+    // same repo again: updates the branch, no duplicate
     let t = store.link_repo(&stub.id, "org/app", "feat/y").unwrap();
     assert_eq!(t.prs.len(), 1);
     assert_eq!(t.prs[0].branch, "feat/y");
 
-    // persistiu
+    // persisted
     assert_eq!(store.get(&stub.id).unwrap().prs[0].branch, "feat/y");
 }
 
 #[test]
-fn set_status_persiste() {
+fn set_status_persists() {
     let dir = TmpDir::new("setstatus");
     let store = seed_fixture(&dir);
     store.set_status("TASK-012", Status::Review).unwrap();
@@ -218,7 +218,7 @@ fn set_status_persiste() {
 }
 
 #[test]
-fn set_pr_atualiza_numero_do_repo_certo() {
+fn set_pr_updates_number_of_correct_repo() {
     let dir = TmpDir::new("setpr");
     let store = seed_fixture(&dir);
 
@@ -230,13 +230,13 @@ fn set_pr_atualiza_numero_do_repo_certo() {
         .find(|p| p.repo == "tono-lang/runtime")
         .unwrap();
     assert_eq!(runtime.pr, 200);
-    // o outro repo não muda
+    // the other repo is unchanged
     let parser = t.prs.iter().find(|p| p.repo == "tono-lang/parser").unwrap();
     assert_eq!(parser.pr, 142);
 }
 
 #[test]
-fn set_pr_em_repo_nao_linkado_falha() {
+fn set_pr_on_unlinked_repo_fails() {
     let dir = TmpDir::new("setpr-fail");
     let store = seed_fixture(&dir);
     let err = store.set_pr("TASK-012", "outro/repo", 1).unwrap_err();
@@ -247,25 +247,25 @@ fn set_pr_em_repo_nao_linkado_falha() {
 }
 
 #[test]
-fn add_deferred_registra_e_cria_novo_backlog() {
+fn add_deferred_records_and_creates_new_backlog() {
     let dir = TmpDir::new("defer");
     let store = seed_fixture(&dir);
 
     let spawned = store
-        .add_deferred("TASK-012", "extrair parser de datas")
+        .add_deferred("TASK-012", "extract date parser")
         .unwrap();
 
-    // registrado na origem
+    // recorded on the origin
     let origin = store.get("TASK-012").unwrap();
     assert!(
         origin
             .deferred
-            .contains(&"extrair parser de datas".to_string())
+            .contains(&"extract date parser".to_string())
     );
 
-    // novo backlog materializado, referenciando a origem
+    // new backlog materialized, referencing the origin
     assert_eq!(spawned.id, "TASK-013");
     assert_eq!(spawned.status, Status::Backlog);
-    assert!(spawned.body.contains("extrair parser de datas"));
-    assert!(spawned.body.contains("Derivado de TASK-012"));
+    assert!(spawned.body.contains("extract date parser"));
+    assert!(spawned.body.contains("Derived from TASK-012"));
 }

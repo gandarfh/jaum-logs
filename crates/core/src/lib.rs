@@ -1,6 +1,6 @@
-//! Core reaproveitável do jaum-logs: modelo de dados e store do `.backlog/`.
-//! Casca fina e tool-agnóstica — não escreve código de feature, RFC/ADR, nem
-//! faz merge. Adapters (git, gh, executor, ui) vivem em crates separados.
+//! Reusable core of jaum-logs: the data model and the `.backlog/` store.
+//! A thin, tool-agnostic shell — it writes no feature code, no RFC/ADR, and
+//! performs no merges. Adapters (git, gh, executor, ui) live in separate crates.
 
 pub mod error;
 pub mod model;

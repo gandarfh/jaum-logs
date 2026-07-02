@@ -8,8 +8,8 @@ use jaum_adapters::Gh;
 use jaum_core::{MergeState, Status, Store};
 use jaum_flows::finish::Finish;
 
-/// Mapa de repos para o Finish: cada slug aponta para um diretório que existe
-/// (o `gh` falso ignora o cwd, mas `current_dir` exige um path válido).
+/// Repo map for Finish: each slug points to an existing directory (the fake
+/// `gh` ignores the cwd, but `current_dir` requires a valid path).
 fn repos(dir: &TmpDir) -> HashMap<String, PathBuf> {
     ["org/x", "org/y", "slyde"]
         .iter()
@@ -36,7 +36,7 @@ impl Drop for TmpDir {
 }
 
 /// Fake `gh`:
-///   pr list  (head feat/open -> "5", senão "0")
+///   pr list  (head feat/open -> "5", otherwise "0")
 ///   pr view  (7 -> MERGED, 5 -> OPEN, 9 -> CLOSED)
 fn fake_gh(dir: &TmpDir) -> String {
     let path = dir.0.join("gh");
@@ -63,13 +63,13 @@ fn store_with(dir: &TmpDir, id: &str, status: &str, prs: &str) -> Store {
     let backlog = dir.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
     let md =
-        format!("---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n{prs}---\n\n## Objetivo\nx\n");
+        format!("---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n{prs}---\n\n## Objective\nx\n");
     fs::write(backlog.join(format!("{id}.md")), md).unwrap();
     Store::new(&backlog)
 }
 
 #[test]
-fn run_marca_merged_quando_todos_pr_mergeados() {
+fn run_marks_merged_when_all_prs_merged() {
     let dir = TmpDir::new("merged");
     let store = store_with(
         &dir,
@@ -86,7 +86,7 @@ fn run_marca_merged_quando_todos_pr_mergeados() {
 }
 
 #[test]
-fn run_nao_mergeia_e_persiste_numero_descoberto() {
+fn run_does_not_merge_and_persists_discovered_number() {
     let dir = TmpDir::new("open");
     let store = store_with(
         &dir,
@@ -99,14 +99,14 @@ fn run_nao_mergeia_e_persiste_numero_descoberto() {
 
     let agg = finish.run("TASK-002").unwrap();
     assert_eq!(agg, MergeState::Open);
-    // status NÃO virou merged
+    // status did NOT become merged
     assert_eq!(store.get("TASK-002").unwrap().status, Status::Review);
-    // número de PR descoberto foi persistido
+    // discovered PR number was persisted
     assert_eq!(store.get("TASK-002").unwrap().prs[0].pr, 5);
 }
 
 #[test]
-fn run_multi_pr_aberto_agrega_open() {
+fn run_multi_pr_open_aggregates_open() {
     let dir = TmpDir::new("multi");
     let store = store_with(
         &dir,
@@ -118,14 +118,14 @@ fn run_multi_pr_aberto_agrega_open() {
     let finish = Finish::new(&store, &gh, repos(&dir));
 
     let agg = finish.run("TASK-003").unwrap();
-    assert_eq!(agg, MergeState::Open); // um merged + um aberto
+    assert_eq!(agg, MergeState::Open); // one merged + one open
     assert_eq!(store.get("TASK-003").unwrap().status, Status::Review);
 }
 
 #[test]
-fn run_tolera_gh_que_falha_como_not_created() {
-    // projeto local sem remote no GitHub: o `gh` falha (slug não é owner/name,
-    // sem auth, etc). O finish deve tratar como NotCreated, não propagar o erro.
+fn run_tolerates_failing_gh_as_not_created() {
+    // local project with no GitHub remote: `gh` fails (slug isn't owner/name,
+    // no auth, etc). Finish should treat it as NotCreated, not propagate the error.
     let dir = TmpDir::new("nogh");
     let store = store_with(
         &dir,
@@ -133,7 +133,7 @@ fn run_tolera_gh_que_falha_como_not_created() {
         "review",
         "  - repo: slyde\n    pr: 0\n    branch: feat/markdown-parser\n",
     );
-    let gh = Gh::with_bin("false"); // sai com erro em qualquer chamada
+    let gh = Gh::with_bin("false"); // exits with error on any call
     let finish = Finish::new(&store, &gh, repos(&dir));
 
     let agg = finish.run("TASK-009").unwrap();
@@ -142,7 +142,7 @@ fn run_tolera_gh_que_falha_como_not_created() {
 }
 
 #[test]
-fn merge_state_so_le_nao_muda_status() {
+fn merge_state_only_reads_does_not_change_status() {
     let dir = TmpDir::new("readonly");
     let store = store_with(
         &dir,
@@ -154,6 +154,6 @@ fn merge_state_so_le_nao_muda_status() {
     let finish = Finish::new(&store, &gh, repos(&dir));
 
     assert_eq!(finish.merge_state("TASK-004").unwrap(), MergeState::Merged);
-    // mesmo Merged, merge_state não altera o status
+    // even when Merged, merge_state does not change the status
     assert_eq!(store.get("TASK-004").unwrap().status, Status::Review);
 }

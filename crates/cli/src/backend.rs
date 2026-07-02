@@ -1,5 +1,5 @@
-//! Ponte entre o `Buffer` da ratatui (que o daemon renderiza) e as `WireCell`
-//! do protocolo. O daemon manda diffs; o cliente aplica num `Buffer` local.
+//! Bridge between ratatui's `Buffer` (rendered by the daemon) and the protocol's
+//! `WireCell`. The daemon sends diffs; the client applies them to a local `Buffer`.
 
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
@@ -7,7 +7,7 @@ use ratatui::layout::Position;
 
 use crate::protocol::WireCell;
 
-/// Converte uma célula numa `WireCell` posicionada.
+/// Convert a cell into a positioned `WireCell`.
 fn to_wire(x: u16, y: u16, c: &Cell) -> WireCell {
     WireCell {
         x,
@@ -20,7 +20,7 @@ fn to_wire(x: u16, y: u16, c: &Cell) -> WireCell {
     }
 }
 
-/// Aplica uma `WireCell` numa célula da ratatui.
+/// Apply a `WireCell` to a ratatui cell.
 fn from_wire(w: &WireCell) -> Cell {
     let mut c = Cell::default();
     c.set_symbol(&w.sym);
@@ -31,7 +31,7 @@ fn from_wire(w: &WireCell) -> Cell {
     c
 }
 
-/// Todas as células do buffer (frame completo — usado no attach e no resize).
+/// All buffer cells (full frame — used on attach and resize).
 pub fn full_cells(buf: &Buffer) -> Vec<WireCell> {
     let area = buf.area;
     let mut out = Vec::with_capacity((area.width as usize) * (area.height as usize));
@@ -45,7 +45,7 @@ pub fn full_cells(buf: &Buffer) -> Vec<WireCell> {
     out
 }
 
-/// Só as células que mudaram de `prev` para `next` (assume mesma área).
+/// Only the cells that changed from `prev` to `next` (assumes same area).
 pub fn diff_cells(prev: &Buffer, next: &Buffer) -> Vec<WireCell> {
     if prev.area != next.area {
         return full_cells(next);
@@ -66,7 +66,7 @@ pub fn diff_cells(prev: &Buffer, next: &Buffer) -> Vec<WireCell> {
     out
 }
 
-/// Aplica células recebidas num buffer local (cliente). Ignora as fora da área.
+/// Apply received cells to a local buffer (client). Skips cells outside the area.
 pub fn apply_cells(buf: &mut Buffer, cells: &[WireCell]) {
     for w in cells {
         let pos = Position::new(w.x, w.y);
@@ -89,13 +89,13 @@ mod tests {
     }
 
     #[test]
-    fn full_cells_cobre_toda_a_area() {
+    fn full_cells_covers_whole_area() {
         let b = buf(Rect::new(0, 0, 4, 3));
         assert_eq!(full_cells(&b).len(), 12);
     }
 
     #[test]
-    fn diff_so_pega_celulas_alteradas() {
+    fn diff_only_picks_changed_cells() {
         let area = Rect::new(0, 0, 5, 2);
         let prev = buf(area);
         let mut next = buf(area);
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_reconstroi_o_buffer() {
+    fn apply_reconstructs_the_buffer() {
         let area = Rect::new(0, 0, 5, 2);
         let mut next = buf(area);
         next.cell_mut(Position::new(2, 1)).unwrap().set_symbol("x");
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_de_area_diferente_volta_full() {
+    fn diff_of_different_area_returns_full() {
         let prev = buf(Rect::new(0, 0, 2, 2));
         let next = buf(Rect::new(0, 0, 4, 4));
         assert_eq!(diff_cells(&prev, &next).len(), 16);

@@ -26,7 +26,7 @@ impl Drop for TmpDir {
     }
 }
 
-/// Envelope como o `claude --output-format json --json-schema` devolve.
+/// Envelope as returned by `claude --output-format json --json-schema`.
 const ENVELOPE: &str = r#"{
   "type":"result","subtype":"success","is_error":false,
   "result":"ok",
@@ -39,7 +39,7 @@ const ENVELOPE: &str = r#"{
 }"#;
 
 #[test]
-fn parse_structured_extrai_tasks_do_envelope() {
+fn parse_structured_extracts_tasks_from_envelope() {
     let scan = parse_structured(ENVELOPE).unwrap();
     assert_eq!(scan.tasks.len(), 2);
     assert_eq!(scan.tasks[0].title, "IR de tipos");
@@ -48,7 +48,7 @@ fn parse_structured_extrai_tasks_do_envelope() {
 }
 
 #[test]
-fn parse_structured_extrai_docs_classificados() {
+fn parse_structured_extracts_classified_docs() {
     let env = r#"{"is_error":false,"result":"ok","structured_output":{
         "tasks":[],
         "docs":[
@@ -64,19 +64,19 @@ fn parse_structured_extrai_docs_classificados() {
 }
 
 #[test]
-fn parse_structured_propaga_is_error() {
+fn parse_structured_propagates_is_error() {
     let env = r#"{"is_error":true,"result":"limite de uso"}"#;
     let err = parse_structured(env).unwrap_err();
     assert!(err.to_string().contains("limite de uso"));
 }
 
 #[test]
-fn parse_structured_sem_structured_output_falha() {
+fn parse_structured_without_structured_output_fails() {
     let env = r#"{"is_error":false,"result":"texto solto"}"#;
     assert!(parse_structured(env).is_err());
 }
 
-/// Saída `stream-json --verbose`: um evento JSON por linha, `result` no fim.
+/// `stream-json --verbose` output: one JSON event per line, `result` at the end.
 const STREAM: &str = r#"{"type":"system","subtype":"init","session_id":"x"}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Encontrei o RFC-0002 sobre o IR de tipos"}]}}
@@ -84,7 +84,7 @@ const STREAM: &str = r#"{"type":"system","subtype":"init","session_id":"x"}
 {"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"tasks":[{"title":"IR de tipos","type":"impl","rfcs":["rfc-0002"],"objetivo":"Implementar o IR"}]}}"#;
 
 #[test]
-fn parse_stream_pega_o_result_final() {
+fn parse_stream_takes_final_result() {
     let scan = parse_stream(STREAM).unwrap();
     assert_eq!(scan.tasks.len(), 1);
     assert_eq!(scan.tasks[0].title, "IR de tipos");
@@ -92,31 +92,31 @@ fn parse_stream_pega_o_result_final() {
 }
 
 #[test]
-fn parse_stream_sem_result_falha() {
+fn parse_stream_without_result_fails() {
     let only_events = r#"{"type":"system","subtype":"init"}
 {"type":"assistant","message":{"content":[]}}"#;
     assert!(parse_stream(only_events).is_err());
 }
 
 #[test]
-fn summarize_event_resume_eventos_relevantes() {
-    // init traz o modelo
+fn summarize_event_summarizes_relevant_events() {
+    // init carries the model
     assert_eq!(
         summarize_event(r#"{"type":"system","subtype":"init","model":"opus-4"}"#),
-        vec!["sessão iniciada · modelo opus-4"]
+        vec!["session started · model opus-4"]
     );
-    // result básico
+    // basic result
     assert_eq!(
         summarize_event(r#"{"type":"result","subtype":"success"}"#),
-        vec!["concluído"]
+        vec!["done"]
     );
-    // eventos sem interesse não viram linha
+    // uninteresting events don't become a line
     assert!(summarize_event(r#"{"type":"rate_limit_event"}"#).is_empty());
-    assert!(summarize_event("nao json").is_empty());
+    assert!(summarize_event("not json").is_empty());
 }
 
 #[test]
-fn summarize_event_inclui_argumentos_das_tools() {
+fn summarize_event_includes_tool_arguments() {
     let read = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"crates/flows/src/ingest.rs"}}]}}"#;
     assert_eq!(summarize_event(read), vec!["→ Read crates/flows/src/ingest.rs"]);
 
@@ -126,16 +126,16 @@ fn summarize_event_inclui_argumentos_das_tools() {
     let task = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","input":{"subagent_type":"Explore","description":"mapear docs"}}]}}"#;
     assert_eq!(summarize_event(task), vec!["→ Task (Explore) mapear docs"]);
 
-    // texto vem com o modelo e múltiplos blocos viram múltiplas linhas
+    // text comes with the model and multiple blocks become multiple lines
     let multi = r#"{"type":"assistant","message":{"model":"sonnet","content":[{"type":"text","text":"Achei dois RFCs"},{"type":"tool_use","name":"Grep","input":{"pattern":"RFC-","path":"docs"}}]}}"#;
     assert_eq!(
         summarize_event(multi),
-        vec!["[sonnet] Achei dois RFCs", "→ Grep RFC-  em docs"]
+        vec!["[sonnet] Achei dois RFCs", "→ Grep RFC-  in docs"]
     );
 }
 
 #[test]
-fn schema_exige_tasks() {
+fn schema_requires_tasks() {
     let s = schema();
     assert_eq!(s["required"][0], "tasks");
     assert_eq!(s["properties"]["tasks"]["type"], "array");
@@ -153,7 +153,7 @@ fn proposed(title: &str, ty: &str, rfcs: &[&str]) -> ProposedTask {
 }
 
 #[test]
-fn create_stubs_materializa_backlog_normalizando_refs() {
+fn create_stubs_materializes_backlog_normalizing_refs() {
     let dir = TmpDir::new("create");
     let store = Store::new(dir.0.join(".backlog"));
 
@@ -168,19 +168,19 @@ fn create_stubs_materializa_backlog_normalizando_refs() {
 
     assert_eq!(created.len(), 2);
     assert_eq!(created[0].id, "TASK-001");
-    // refs normalizadas para maiúsculas
+    // refs normalized to uppercase
     assert_eq!(created[0].rfcs, vec!["RFC-0002"]);
     assert_eq!(created[0].task_type, TaskType::Impl);
     assert_eq!(created[1].task_type, TaskType::Spike);
-    // corpo contém objetivo e critério
+    // body contains objective and criterion
     assert!(created[0].body.contains("fazer X"));
     assert!(created[0].body.contains("- [ ] criterio 1"));
 
-    // persistido
+    // persisted
     assert_eq!(store.list(None).unwrap().len(), 2);
 }
 
-/// Executor fake que devolve uma saída `stream-json` fixa (com o `result` final).
+/// Fake executor that returns a fixed `stream-json` output (with the final `result`).
 struct StreamExec(String);
 impl Executor for StreamExec {
     fn spawn_oneshot(&self, _p: &str, _f: &ExecFlags) -> anyhow::Result<String> {
@@ -192,27 +192,27 @@ impl Executor for StreamExec {
 }
 
 #[test]
-fn run_logged_organiza_docs_por_categoria() {
+fn run_logged_organizes_docs_by_category() {
     let dir = TmpDir::new("mirror");
-    // repo com um arquivo cujo NOME parece numérico mas é um ADR pelo conteúdo
+    // repo with a file whose NAME looks numeric but is an ADR by content
     let repo = dir.0.join("personal-docs");
     fs::create_dir_all(&repo).unwrap();
-    let doc = repo.join("0001-protocolo-como-anotacao.md");
-    fs::write(&doc, "# ADR-0001\nprotocolo como anotação\n").unwrap();
+    let doc = repo.join("0001-protocol-as-annotation.md");
+    fs::write(&doc, "# ADR-0001\nprotocol as annotation\n").unwrap();
     let doc_abs = fs::canonicalize(&doc).unwrap();
 
     let docs_dir = dir.0.join("ext-docs");
     fs::create_dir_all(&docs_dir).unwrap();
     let store = Store::new(dir.0.join(".backlog"));
 
-    // o agente classifica como adr e propõe nome canônico
+    // the agent classifies it as adr and proposes a canonical name
     let stream = format!(
         "{}\n{}",
         r#"{"type":"system","subtype":"init","model":"opus"}"#,
         serde_json::json!({
             "type":"result","subtype":"success","is_error":false,"result":"ok",
             "structured_output":{"tasks":[],"docs":[
-                {"path": doc_abs.to_string_lossy(), "kind":"adr", "name":"ADR-0001-protocolo-como-anotacao.md"}
+                {"path": doc_abs.to_string_lossy(), "kind":"adr", "name":"ADR-0001-protocol-as-annotation.md"}
             ]}
         })
     );
@@ -225,23 +225,23 @@ fn run_logged_organiza_docs_por_categoria() {
         .unwrap();
 
     assert_eq!(outcome.docs_imported, 1);
-    // organizado em docs_dir/adrs/<nome-canônico>
-    let mirrored = docs_dir.join("adrs/ADR-0001-protocolo-como-anotacao.md");
-    assert!(mirrored.exists(), "doc não foi organizado em {mirrored:?}");
+    // organized under docs_dir/adrs/<canonical-name>
+    let mirrored = docs_dir.join("adrs/ADR-0001-protocol-as-annotation.md");
+    assert!(mirrored.exists(), "doc was not organized in {mirrored:?}");
     assert!(
-        fs::read_to_string(&mirrored).unwrap().contains("protocolo como anotação")
+        fs::read_to_string(&mirrored).unwrap().contains("protocol as annotation")
     );
-    assert!(logs.iter().any(|l| l.contains("espelhados")));
+    assert!(logs.iter().any(|l| l.contains("mirrored")));
 }
 
 #[test]
-fn run_logged_move_doc_solto_no_docs_dir_para_categoria() {
+fn run_logged_moves_loose_doc_in_docs_dir_to_category() {
     let dir = TmpDir::new("organize");
     let docs_dir = dir.0.join("ext-docs");
     fs::create_dir_all(&docs_dir).unwrap();
-    // doc escrito solto na raiz do docs_dir (caso slyde)
+    // doc written loose at the root of docs_dir
     let loose = docs_dir.join("PRD-00-overview.md");
-    fs::write(&loose, "# PRD-00\nvisão\n").unwrap();
+    fs::write(&loose, "# PRD-00\nvision\n").unwrap();
     let loose_abs = fs::canonicalize(&loose).unwrap();
     let store = Store::new(dir.0.join(".backlog"));
 
@@ -260,19 +260,19 @@ fn run_logged_move_doc_solto_no_docs_dir_para_categoria() {
     let outcome = ingest.run_logged(&mut |_| {}).unwrap();
 
     assert_eq!(outcome.docs_imported, 1);
-    // foi MOVIDO para prd/ (original removido, sem duplicar)
+    // MOVED to prd/ (original removed, no duplication)
     assert!(docs_dir.join("prd/PRD-00-overview.md").exists());
-    assert!(!loose.exists(), "original solto deveria ter sido movido");
+    assert!(!loose.exists(), "the loose original should have been moved");
 }
 
 #[test]
-fn create_stubs_deduplica_por_refs_em_reexecucao() {
+fn create_stubs_dedupes_by_refs_on_rerun() {
     let dir = TmpDir::new("dedup");
     let store = Store::new(dir.0.join(".backlog"));
 
     create_stubs(&store, &[proposed("IR tipos", "impl", &["rfc-0002"])]).unwrap();
-    // re-executar com a mesma ref (case diferente) não duplica
+    // re-running with the same ref (different case) doesn't duplicate
     let again = create_stubs(&store, &[proposed("IR tipos again", "impl", &["RFC-0002"])]).unwrap();
-    assert!(again.is_empty(), "não deveria recriar a mesma ref");
+    assert!(again.is_empty(), "should not recreate the same ref");
     assert_eq!(store.list(None).unwrap().len(), 1);
 }

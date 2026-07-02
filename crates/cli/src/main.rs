@@ -13,17 +13,17 @@ use anyhow::Result;
 use crate::app::App;
 use crate::config::{Config, init_project};
 
-/// `jaum`            conecta no daemon (subindo-o se preciso) e abre a TUI cliente.
-/// `jaum --daemon N` roda o daemon do projeto N (uso interno; auto-spawned).
-/// `jaum shutdown`   derruba o daemon (encerra sessões).
-/// `jaum --local`    abre a TUI antiga in-process (sem daemon; debug).
-/// `jaum init [dirs] registra o projeto do cwd (auto-detecta repos, ou os dirs).
-/// `jaum ingest`     varre o projeto com o claude e monta o backlog a partir dos docs.
-/// `jaum list`       lista o backlog do projeto atual sem TUI.
+/// `jaum`            connects to the daemon (starting it if needed) and opens the client TUI.
+/// `jaum --daemon N` runs the daemon for project N (internal use; auto-spawned).
+/// `jaum shutdown`   shuts the daemon down (stops sessions).
+/// `jaum --local`    opens the old in-process TUI (no daemon; debug).
+/// `jaum init [dirs] registers the cwd project (auto-detects repos, or the given dirs).
+/// `jaum ingest`     scans the project with claude and builds the backlog from the docs.
+/// `jaum list`       lists the current project's backlog without the TUI.
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        // daemon foreground (já destacado pelo spawner): roda o servidor.
+        // foreground daemon (already detached by the spawner): runs the server.
         Some("--daemon") => {
             let idx: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             let cfg = Config::load()?;
@@ -34,13 +34,13 @@ fn main() -> Result<()> {
         Some("shutdown") => {
             let sock = daemon::socket_path()?;
             if daemon::shutdown(&sock)? {
-                println!("daemon encerrado");
+                println!("daemon stopped");
             } else {
-                println!("nenhum daemon rodando");
+                println!("no daemon running");
             }
             Ok(())
         }
-        // derruba o daemon atual e reanexa (pega o binário recém-instalado).
+        // shut down the current daemon and reattach (picks up the freshly installed binary).
         Some("restart") => {
             let sock = daemon::socket_path()?;
             let _ = daemon::shutdown(&sock)?;
@@ -63,20 +63,20 @@ fn main() -> Result<()> {
             let cwd = std::env::current_dir()?;
             let project = init_project(&cwd, &dirs)?;
             println!(
-                "projeto '{}' registrado em ~/jaum/config.toml",
+                "project '{}' registered in ~/jaum/config.toml",
                 project.name
             );
             println!("  docs:    {}", project.docs.display());
             println!("  backlog: {}", project.backlog.display());
-            println!("  (o repo {} fica intocado)", project.root.display());
+            println!("  (the repo {} stays untouched)", project.root.display());
             if project.repos.is_empty() {
-                println!("  repos: (nenhum detectado — adicione em ~/jaum/config.toml)");
+                println!("  repos: (none detected — add them in ~/jaum/config.toml)");
             } else {
                 for r in &project.repos {
                     println!("  repo: {} -> {}", r.slug, r.path.display());
                 }
             }
-            println!("\npróximo: abra o `jaum`, rode o ingest (i) e o setup (S).");
+            println!("\nnext: open `jaum`, run ingest (i) and setup (S).");
             Ok(())
         }
         Some("ingest") => {
@@ -84,19 +84,19 @@ fn main() -> Result<()> {
             let idx = select_project(&cfg)?;
             let project = &cfg.projects[idx];
             let store = jaum_core::Store::new(&project.backlog);
-            // varre os docs externos (~/jaum/<projeto>/docs) + os repos
+            // scan the external docs (~/jaum/<project>/docs) + the repos
             let add_dirs: Vec<PathBuf> = project.repos.iter().map(|r| r.path.clone()).collect();
             let executor = jaum_adapters::ClaudeExecutor::new();
             let ingest =
                 jaum_flows::ingest::Ingest::new(&store, &executor, project.docs.clone(), add_dirs);
 
             eprintln!(
-                "varrendo '{}' com o claude (pode levar alguns segundos)...",
+                "scanning '{}' with claude (may take a few seconds)...",
                 project.name
             );
             let outcome = ingest.run()?;
             println!(
-                "ingest: {} stub(s) criados, {} doc(s) espelhados em docs/",
+                "ingest: {} stub(s) created, {} doc(s) mirrored into docs/",
                 outcome.created.len(),
                 outcome.docs_imported
             );
@@ -117,12 +117,12 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        // default: anexa no daemon (subindo-o se preciso).
+        // default: attach to the daemon (starting it if needed).
         _ => attach(),
     }
 }
 
-/// Conecta no daemon; se não houver um vivo, sobe-o destacado e espera o socket.
+/// Connects to the daemon; if none is alive, starts it detached and waits for the socket.
 fn attach() -> Result<()> {
     let cfg = Config::load()?;
     let idx = select_project(&cfg)?;
@@ -130,7 +130,7 @@ fn attach() -> Result<()> {
 
     if !daemon::is_running(&sock) {
         daemon::spawn_detached(idx)?;
-        // espera o socket subir (até ~2s)
+        // wait for the socket to come up (up to ~2s)
         for _ in 0..200 {
             if daemon::is_running(&sock) {
                 break;
@@ -138,13 +138,13 @@ fn attach() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         if !daemon::is_running(&sock) {
-            anyhow::bail!("o daemon não subiu; veja ~/jaum/daemon.log");
+            anyhow::bail!("the daemon did not come up; see ~/jaum/daemon.log");
         }
     }
     client::run(&sock)
 }
 
-/// Escolhe o projeto: o do cwd, senão o primeiro. Erra se não há nenhum.
+/// Picks the project: the cwd's, otherwise the first. Errors if there is none.
 fn select_project(cfg: &Config) -> Result<usize> {
     config::ensure_usable(cfg)?;
     if let Ok(cwd) = std::env::current_dir()

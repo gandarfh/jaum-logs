@@ -26,10 +26,10 @@ impl Drop for TmpDir {
     }
 }
 
-/// Escreve um `gh` falso e determinístico, exercitando construção de args e
-/// parse de saída sem rede/auth. Convenções:
-///   pr create            -> imprime URL com PR 142 (precedida de um aviso)
-///   pr list (head normal)-> "7"; (head "missing/branch") -> ""
+/// Writes a fake, deterministic `gh` exercising arg construction and output
+/// parsing without network/auth. Conventions:
+///   pr create            -> prints URL with PR 142 (preceded by a warning)
+///   pr list (normal head)-> "7"; (head "missing/branch") -> ""
 ///   pr view <n>          -> 1=OPEN 2=MERGED 3=CLOSED 99=WEIRD
 fn fake_gh(dir: &TmpDir) -> String {
     let path = dir.0.join("gh");
@@ -60,7 +60,7 @@ esac
 }
 
 #[test]
-fn pr_create_extrai_numero_da_url() {
+fn pr_create_extracts_number_from_url() {
     let dir = TmpDir::new("create");
     let gh = Gh::with_bin(fake_gh(&dir));
     let n = gh.pr_create(&dir.0, "feat/x").unwrap();
@@ -68,21 +68,21 @@ fn pr_create_extrai_numero_da_url() {
 }
 
 #[test]
-fn pr_number_parseia_resultado() {
+fn pr_number_parses_result() {
     let dir = TmpDir::new("number");
     let gh = Gh::with_bin(fake_gh(&dir));
     assert_eq!(gh.pr_number(&dir.0, "feat/x").unwrap(), 7);
 }
 
 #[test]
-fn pr_number_zero_quando_nao_existe() {
+fn pr_number_zero_when_none_exists() {
     let dir = TmpDir::new("number-zero");
     let gh = Gh::with_bin(fake_gh(&dir));
     assert_eq!(gh.pr_number(&dir.0, "missing/branch").unwrap(), 0);
 }
 
 #[test]
-fn pr_merge_state_mapeia_estados() {
+fn pr_merge_state_maps_states() {
     let dir = TmpDir::new("state");
     let gh = Gh::with_bin(fake_gh(&dir));
     assert_eq!(gh.pr_merge_state(&dir.0, 1).unwrap(), MergeState::Open);
@@ -92,10 +92,10 @@ fn pr_merge_state_mapeia_estados() {
 }
 
 #[test]
-fn pr_merge_state_zero_eh_not_created_sem_chamar_gh() {
-    // bin inexistente: se chamasse o gh, falharia. pr==0 curto-circuita.
-    let gh = Gh::with_bin("/nao/existe/gh");
-    // pr==0 curto-circuita antes de chamar o gh; o path nem é usado.
+fn pr_merge_state_zero_is_not_created_without_calling_gh() {
+    // nonexistent bin: if it called gh, it would fail. pr==0 short-circuits.
+    let gh = Gh::with_bin("/does/not/exist/gh");
+    // pr==0 short-circuits before calling gh; the path isn't even used.
     assert_eq!(
         gh.pr_merge_state(std::path::Path::new("."), 0).unwrap(),
         MergeState::NotCreated

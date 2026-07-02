@@ -4,12 +4,12 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use jaum_core::MergeState;
 
-/// Adapter de `gh` via shell-out. O GitHub é downstream: a ferramenta cria PR
-/// e **lê** número e estado de merge, nunca mergeia.
+/// `gh` adapter via shell-out. GitHub is downstream: the tool creates PRs and
+/// **reads** the number and merge state, never merges.
 ///
-/// O `gh` roda DENTRO do diretório do repo (`dir`) e auto-detecta o repositório
-/// do GitHub pelo remote — assim não dependemos do slug interno estar no formato
-/// `owner/name` (projetos cujo slug é só o nome da pasta também funcionam).
+/// `gh` runs INSIDE the repo directory (`dir`) and auto-detects the GitHub
+/// repository from the remote — so we don't depend on the internal slug being
+/// in `owner/name` form (projects whose slug is just the folder name also work).
 pub struct Gh {
     bin: String,
 }
@@ -27,20 +27,20 @@ impl Gh {
         }
     }
 
-    /// Permite apontar para um binário alternativo (usado em testes).
+    /// Points to an alternative binary (used in tests).
     pub fn with_bin(bin: impl Into<String>) -> Self {
         Self { bin: bin.into() }
     }
 
-    /// Abre um PR para `branch`, rodando o `gh` no diretório do repo. Devolve o
-    /// número. NUNCA mergeia — só cria.
+    /// Opens a PR for `branch`, running `gh` in the repo directory. Returns the
+    /// number. NEVER merges — only creates.
     pub fn pr_create(&self, dir: &Path, branch: &str) -> Result<u64> {
         let out = self.run(dir, &["pr", "create", "--head", branch, "--fill"])?;
         parse_pr_number_from_url(&out)
-            .with_context(|| format!("extraindo número do PR da saída do gh: {out:?}"))
+            .with_context(|| format!("extracting PR number from gh output: {out:?}"))
     }
 
-    /// Número do PR aberto/fechado para `branch`, ou `0` se nenhum existe.
+    /// Number of the open/closed PR for `branch`, or `0` if none exists.
     pub fn pr_number(&self, dir: &Path, branch: &str) -> Result<u64> {
         let out = self.run(
             dir,
@@ -54,10 +54,10 @@ impl Gh {
             return Ok(0);
         }
         s.parse()
-            .with_context(|| format!("parseando número do PR: {s:?}"))
+            .with_context(|| format!("parsing PR number: {s:?}"))
     }
 
-    /// Estado de merge do PR. `pr == 0` é tratado como `NotCreated` sem chamar o gh.
+    /// PR merge state. `pr == 0` is treated as `NotCreated` without calling gh.
     pub fn pr_merge_state(&self, dir: &Path, pr: u64) -> Result<MergeState> {
         if pr == 0 {
             return Ok(MergeState::NotCreated);
@@ -74,7 +74,7 @@ impl Gh {
         })
     }
 
-    /// Diff do PR (por número), puxado do GitHub. Vazio se `pr == 0`.
+    /// PR diff (by number), pulled from GitHub. Empty if `pr == 0`.
     pub fn pr_diff(&self, dir: &Path, pr: u64) -> Result<String> {
         if pr == 0 {
             return Ok(String::new());
@@ -82,7 +82,7 @@ impl Gh {
         self.run(dir, &["pr", "diff", &pr.to_string()])
     }
 
-    /// Título + corpo do PR (por número). `("", "")` se `pr == 0`.
+    /// PR title + body (by number). `("", "")` if `pr == 0`.
     pub fn pr_view(&self, dir: &Path, pr: u64) -> Result<(String, String)> {
         if pr == 0 {
             return Ok((String::new(), String::new()));
@@ -101,10 +101,10 @@ impl Gh {
             .current_dir(dir)
             .args(args)
             .output()
-            .with_context(|| format!("executando {} {args:?} em {}", self.bin, dir.display()))?;
+            .with_context(|| format!("running {} {args:?} in {}", self.bin, dir.display()))?;
         if !out.status.success() {
             bail!(
-                "{} {args:?} falhou: {}",
+                "{} {args:?} failed: {}",
                 self.bin,
                 String::from_utf8_lossy(&out.stderr).trim()
             );
@@ -113,8 +113,8 @@ impl Gh {
     }
 }
 
-/// Extrai o número do PR da URL emitida pelo `gh pr create`. O gh pode imprimir
-/// avisos antes da URL, então usamos a última linha não vazia.
+/// Extracts the PR number from the URL emitted by `gh pr create`. gh may print
+/// warnings before the URL, so we use the last non-empty line.
 fn parse_pr_number_from_url(s: &str) -> Option<u64> {
     let line = s.lines().rev().find(|l| !l.trim().is_empty())?;
     line.trim().rsplit('/').next()?.parse().ok()

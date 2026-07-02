@@ -1,9 +1,9 @@
-//! Flows de orquestração do jaum-logs: combinam store + adapters para executar
-//! o fluxo (play, e nas próximas fases review/ingest/docs/conflict/finish).
-//! Casca fina: orquestra, não escreve código de feature nem faz merge.
+//! Orchestration flows for jaum-logs: combine store + adapters to run the
+//! pipeline (play, review, ingest, docs, conflict, finish).
+//! Thin shell: orchestrates only, never writes feature code and never merges.
 
-/// Modelo do claude usado nas sessões interativas de play/review/setup.
-/// Centralizado aqui para trocar num único lugar.
+/// Claude model used in interactive play/review/setup sessions.
+/// Centralized here so it can be swapped in one place.
 pub const AGENT_MODEL: &str = "claude-fable-5";
 
 pub mod conflict;

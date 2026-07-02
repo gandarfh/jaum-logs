@@ -1,69 +1,70 @@
 # jaum-logs
 
-Orquestrador de backlog sobre o **Claude Code** (CLI `claude`). Gerencia um
-backlog em markdown e dirige sessões do Claude Code de forma controlada, com
-duas garantias centrais:
+Backlog orchestrator on top of **Claude Code** (the `claude` CLI). It manages a
+markdown backlog and drives Claude Code sessions in a controlled way, with two
+core guarantees:
 
-1. **Constraints não são esquecidas.** Diretrizes "não faça X" são reinjetadas a
-   cada iteração da sessão (não só na abertura).
-2. **Escopo tem borda.** Escopo extra vira `deferred` + um novo backlog, em vez
-   de inflar a task atual.
+1. **Constraints are not forgotten.** "Don't do X" directives are reinjected on
+   every session iteration (not just at startup).
+2. **Scope has a boundary.** Extra scope becomes `deferred` + a new backlog item,
+   instead of bloating the current task.
 
-## Princípios
+## Principles
 
-- O diretório **`.backlog/` (markdown) é a única fonte de verdade**. GitHub/`gh`
-  é downstream — número de PR e estado de merge são *lidos*, nunca duplicados.
-- A ferramenta é uma **casca fina e tool-agnóstica**: não escreve código de
-  feature, não escreve RFC/ADR, não faz merge. Ela orquestra.
-- O **Claude Code é um executor plugável** atrás de um trait; trocar de
-  ferramenta = trocar só o adapter.
-- **Core reaproveitável** (`jaum-core`) separado dos **adapters** (git, gh,
+- The **`.backlog/` directory (markdown) is the single source of truth**.
+  GitHub/`gh` is downstream — PR number and merge state are *read*, never
+  duplicated.
+- The tool is a **thin, tool-agnostic shell**: it does not write feature code,
+  does not write RFCs/ADRs, does not merge. It orchestrates.
+- **Claude Code is a pluggable executor** behind a trait; swapping tools =
+  swapping just the adapter.
+- **Reusable core** (`jaum-core`) kept separate from the **adapters** (git, gh,
   executor, ui).
 
-## Estrutura
+## Structure
 
 ```
 jaum-logs/
   Cargo.toml            # workspace
   crates/
-    core/               # jaum-core: modelo de dados + store do .backlog/
+    core/               # jaum-core: data model + .backlog/ store
       src/{model,store,error}.rs
       tests/store.rs
-    cli/                # jaum: binário (TUI ratatui entra na fase 7)
+    cli/                # jaum: binary (ratatui TUI lands in phase 7)
       src/main.rs
 ```
 
-## Garantias
+## Guarantees
 
-A ferramenta classifica o que é garantido como **hard**, **detectivo** e
-**apenas sinalizado** — e é explícita sobre cada nível.
+The tool classifies what is guaranteed as **hard**, **detective**, and
+**signal-only** — and is explicit about each level.
 
-### Mecânico (hard) — bloqueado de fato
+### Mechanical (hard) — actually blocked
 
-- **Não-merge**: a ferramenta nunca executa `git merge`/`gh pr merge`. Merge é
-  comando do usuário, fora da ferramenta.
-- **Terminal, não API**: usa só o CLI `claude`, nunca a API da Anthropic.
-- **PR-only**: o play abre PR (`gh pr create`), jamais mergeia.
-- **Paralelo entre repos diferentes**: worktree por repo linkado.
-- **Constraints `enforce: hook`**: viram PreToolUse hook (regex) que bloqueia
-  preventivamente em toda chamada (caminho, comando, migration, merge).
+- **No-merge**: the tool never runs `git merge`/`gh pr merge`. Merge is a user
+  command, outside the tool.
+- **Terminal, not API**: uses only the `claude` CLI, never the Anthropic API.
+- **PR-only**: play opens a PR (`gh pr create`), never merges.
+- **Parallelism across different repos**: one worktree per linked repo.
+- **Constraints `enforce: hook`**: become a PreToolUse hook (regex) that blocks
+  preventively on every call (path, command, migration, merge).
 
-### Detectivo (obrigatório, não opcional)
+### Detective (mandatory, not optional)
 
-- **Constraints `enforce: review`** (semânticas: abstração nova, API estável,
-  refactor): o hook não as pega, então o review é **obrigado** a checá-las item a
-  item. `is_clean` falha se alguma reprovar.
+- **Constraints `enforce: review`** (semantic: new abstraction, stable API,
+  refactor): the hook does not catch these, so the review is **required** to
+  check them item by item. `is_clean` fails if any of them fails.
 
-### Apenas sinalizado
+### Signal-only
 
-- **Overlap no mesmo repo**: tasks `wip` tocando o mesmo recurso são sinalizadas,
-  não bloqueadas.
-- **Disciplina de doc lifecycle** (RFC/ADR).
-- **Projeto infinito**: contido via `deferred`, mas não impedido.
+- **Overlap in the same repo**: `wip` tasks touching the same resource are
+  signaled, not blocked.
+- **Doc lifecycle discipline** (RFC/ADR).
+- **Infinite project**: contained via `deferred`, but not prevented.
 
-## Modelo de dados
+## Data model
 
-Cada task é um markdown com frontmatter YAML em `.backlog/TASK-NNN.md`:
+Each task is a markdown file with YAML frontmatter in `.backlog/TASK-NNN.md`:
 
 ```markdown
 ---
@@ -74,15 +75,15 @@ rfcs: [RFC-003, RFC-007]
 adrs: [ADR-011]
 prs:
   - repo: tono-lang/parser
-    pr: 142             # 0 = ainda não criado (lido do gh)
+    pr: 142             # 0 = not created yet (read from gh)
     branch: feat/task-012
 deferred:
   - "primitivo decimal fica pra TASK-024"
 constraints:
   - text: "nao tocar em src/legacy/"
-    enforce: hook       # mecânica  -> bloqueio PREVENTIVO via PreToolUse hook
+    enforce: hook       # mechanical -> PREVENTIVE block via PreToolUse hook
   - text: "manter API estavel"
-    enforce: review     # semântica -> checagem DETECTIVA obrigatória no review
+    enforce: review     # semantic  -> mandatory DETECTIVE check in review
 ---
 
 ## Objetivo
@@ -92,21 +93,21 @@ constraints:
 - [ ] ...
 ```
 
-`type: spike` gera documento (RFC/ADR), **não** tem PR nem play. Relatórios de
-review ficam em `.backlog/TASK-NNN.review.md`.
+`type: spike` produces a document (RFC/ADR), has **no** PR and no play. Review
+reports live in `.backlog/TASK-NNN.review.md`.
 
 ## Stack
 
-`ratatui` + `crossterm` (TUI) · `portable-pty` + `tui-term` (sessão `claude`
-embutida) · `tokio` (subprocessos) · `gray_matter` + `serde` + `serde_yaml_ng`
-(frontmatter) · `anyhow` + `thiserror` (erros) · `git`/`gh` via `std::process`.
+`ratatui` + `crossterm` (TUI) · `portable-pty` + `tui-term` (embedded `claude`
+session) · `tokio` (subprocesses) · `gray_matter` + `serde` + `serde_yaml_ng`
+(frontmatter) · `anyhow` + `thiserror` (errors) · `git`/`gh` via `std::process`.
 
-## Status de implementação
+## Implementation status
 
-- [x] Fase 1 — `store` + modelo de dados + parse/escrita de frontmatter (testes)
-- [x] Fase 2 — adapters `git` e `gh`
-- [x] Fase 3 — `executor` trait + impl Claude Code (oneshot, depois PTY)
-- [x] Fase 4 — `play` (prompt, guard flags, hook PreToolUse + reinjeção via UserPromptSubmit)
-- [x] Fase 5 — `review` (contexto cheio, report, check semântico, is_clean)
-- [x] Fase 6 — `conflict` + `finish`
-- [ ] Fase 7 — TUI ratatui
+- [x] Phase 1 — `store` + data model + frontmatter parse/write (tests)
+- [x] Phase 2 — `git` and `gh` adapters
+- [x] Phase 3 — `executor` trait + Claude Code impl (oneshot, then PTY)
+- [x] Phase 4 — `play` (prompt, guard flags, PreToolUse hook + reinjection via UserPromptSubmit)
+- [x] Phase 5 — `review` (full context, report, semantic check, is_clean)
+- [x] Phase 6 — `conflict` + `finish`
+- [ ] Phase 7 — ratatui TUI

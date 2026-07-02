@@ -26,8 +26,8 @@ impl Drop for TmpDir {
     }
 }
 
-/// Fake `claude` que imprime cada argv em uma linha — deixa o teste assertar
-/// exatamente como as flags foram montadas, sem rede.
+/// Fake `claude` that prints each argv on its own line — lets the test assert
+/// exactly how the flags were assembled, without network.
 fn fake_claude(dir: &TmpDir) -> String {
     let path = dir.0.join("claude");
     fs::write(&path, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n").unwrap();
@@ -38,30 +38,30 @@ fn fake_claude(dir: &TmpDir) -> String {
 }
 
 #[test]
-fn oneshot_monta_print_prompt_e_flags() {
+fn oneshot_builds_print_prompt_and_flags() {
     let dir = TmpDir::new("oneshot");
     let exec = ClaudeExecutor::with_bin(fake_claude(&dir));
     let flags = ExecFlags::new()
         .with_disallowed(["Edit", "Bash(git merge)"])
-        .with_append_system_prompt("nao mergeie")
+        .with_append_system_prompt("do not merge")
         .with_model("opus");
 
-    let out = exec.spawn_oneshot("faça a task", &flags).unwrap();
+    let out = exec.spawn_oneshot("do the task", &flags).unwrap();
 
-    // prompt posicional vem antes de --print
+    // positional prompt comes before --print
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[0], "faça a task");
+    assert_eq!(lines[0], "do the task");
     assert_eq!(lines[1], "--print");
     assert!(out.contains("--disallowedTools"));
-    assert!(out.contains("Bash(git merge)")); // arg único, parênteses preservados
+    assert!(out.contains("Bash(git merge)")); // single arg, parentheses preserved
     assert!(out.contains("--append-system-prompt"));
-    assert!(out.contains("nao mergeie"));
+    assert!(out.contains("do not merge"));
     assert!(out.contains("--model"));
     assert!(out.contains("opus"));
 }
 
 #[test]
-fn oneshot_propaga_erro_de_exit_nao_zero() {
+fn oneshot_propagates_nonzero_exit_error() {
     let dir = TmpDir::new("oneshot-err");
     let path = dir.0.join("claude");
     fs::write(&path, "#!/usr/bin/env bash\necho 'boom' >&2\nexit 3\n").unwrap();
@@ -75,13 +75,13 @@ fn oneshot_propaga_erro_de_exit_nao_zero() {
 }
 
 #[test]
-fn streaming_repassa_cada_linha_e_devolve_tudo() {
+fn streaming_forwards_each_line_and_returns_all() {
     let dir = TmpDir::new("stream");
     let path = dir.0.join("claude");
-    // imprime 3 linhas de "evento" no stdout
+    // prints 3 "event" lines to stdout
     fs::write(
         &path,
-        "#!/usr/bin/env bash\nprintf 'um\\ndois\\ntres\\n'\n",
+        "#!/usr/bin/env bash\nprintf 'one\\ntwo\\nthree\\n'\n",
     )
     .unwrap();
     let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -95,12 +95,12 @@ fn streaming_repassa_cada_linha_e_devolve_tudo() {
         .spawn_oneshot_streaming("x", &ExecFlags::new(), &mut on_line)
         .unwrap();
 
-    assert_eq!(seen, vec!["um", "dois", "tres"]);
-    assert_eq!(out, "um\ndois\ntres\n");
+    assert_eq!(seen, vec!["one", "two", "three"]);
+    assert_eq!(out, "one\ntwo\nthree\n");
 }
 
 #[test]
-fn streaming_propaga_erro_de_exit_nao_zero() {
+fn streaming_propagates_nonzero_exit_error() {
     let dir = TmpDir::new("stream-err");
     let path = dir.0.join("claude");
     fs::write(&path, "#!/usr/bin/env bash\necho 'kaboom' >&2\nexit 4\n").unwrap();
@@ -118,23 +118,23 @@ fn streaming_propaga_erro_de_exit_nao_zero() {
 
 #[test]
 fn interactive_roundtrip_via_pty() {
-    // usa `cat` como sessão: ecoa o que recebe.
+    // uses `cat` as the session: echoes what it receives.
     let exec = ClaudeExecutor::with_bin("cat");
     let mut session = exec.spawn_interactive("", &ExecFlags::new()).unwrap();
 
     let mut reader = session.reader().unwrap();
     session.write_line("ping").unwrap();
-    session.write_input(&[0x04]).unwrap(); // Ctrl-D: EOF -> cat encerra
+    session.write_input(&[0x04]).unwrap(); // Ctrl-D: EOF -> cat exits
 
     let mut buf = String::new();
-    reader.read_to_string(&mut buf).unwrap(); // bloqueia até EOF
-    assert!(buf.contains("ping"), "PTY não ecoou o input:\n{buf:?}");
-    assert!(session.wait().unwrap(), "cat deveria sair com sucesso");
+    reader.read_to_string(&mut buf).unwrap(); // blocks until EOF
+    assert!(buf.contains("ping"), "PTY did not echo the input:\n{buf:?}");
+    assert!(session.wait().unwrap(), "cat should exit successfully");
 }
 
 #[test]
-fn interactive_kill_encerra_sessao() {
-    // `sleep 5` via extra args; matamos antes de terminar.
+fn interactive_kill_terminates_session() {
+    // `sleep 5` via extra args; we kill it before it finishes.
     let exec = ClaudeExecutor::with_bin("sleep");
     let flags = ExecFlags {
         extra: vec!["5".to_string()],
@@ -144,10 +144,10 @@ fn interactive_kill_encerra_sessao() {
 
     assert!(
         session.try_wait().unwrap().is_none(),
-        "deveria estar rodando"
+        "should still be running"
     );
     session.kill().unwrap();
-    // após kill, wait retorna (sem sucesso por ter sido morto)
+    // after kill, wait returns (unsuccessful since it was killed)
     let success = session.wait().unwrap();
-    assert!(!success, "sessão morta não deveria reportar sucesso");
+    assert!(!success, "a killed session should not report success");
 }

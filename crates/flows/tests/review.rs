@@ -38,19 +38,19 @@ prs:
     pr: 7
     branch: feat/task-001
 constraints:
-  - text: "nao tocar em src/legacy/"
+  - text: "do not touch src/legacy/"
     enforce: hook
-  - text: "manter API estavel"
+  - text: "keep the API stable"
     enforce: review
   - text: "sem abstracao nova"
     enforce: review
 ---
 
-## Objetivo
+## Objective
 x
 "#;
 
-/// Executor de mentira: spawn_interactive devolve sessão real sobre `cat`.
+/// Fake executor: spawn_interactive returns a real session over `cat`.
 struct FakeExec;
 impl Executor for FakeExec {
     fn spawn_oneshot(&self, _p: &str, _f: &ExecFlags) -> anyhow::Result<String> {
@@ -61,8 +61,8 @@ impl Executor for FakeExec {
     }
 }
 
-/// Executor que devolve uma saída `stream-json` fixa (o default de
-/// `spawn_oneshot_streaming` alimenta as linhas a partir do `spawn_oneshot`).
+/// Executor that returns a fixed `stream-json` output (the default
+/// `spawn_oneshot_streaming` feeds the lines from `spawn_oneshot`).
 struct StreamExec(String);
 impl Executor for StreamExec {
     fn spawn_oneshot(&self, _p: &str, _f: &ExecFlags) -> anyhow::Result<String> {
@@ -93,7 +93,7 @@ fn setup(
     git_init(&repos_root.join("repo"));
     let repos =
         std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    // gh falso: `true` ignora args e devolve vazio (sem rede nos testes).
+    // fake gh: `true` ignores args and returns empty (no network in tests).
     (Store::new(&backlog), Git::new(), Gh::with_bin("true"), docs, repos)
 }
 
@@ -122,18 +122,18 @@ fn git_init(repo: &Path) {
 // --- read-only ------------------------------------------------------------
 
 #[test]
-fn read_only_flags_bloqueia_toda_escrita() {
+fn read_only_flags_block_all_writes() {
     let f = read_only_flags();
     for t in ["Edit", "Write", "NotebookEdit", "Bash"] {
         assert!(
             f.disallowed_tools.iter().any(|x| x == t),
-            "faltou bloquear {t}"
+            "missing block for {t}"
         );
     }
     assert_eq!(f.model.as_deref(), Some(jaum_flows::AGENT_MODEL));
 }
 
-// --- is_clean (puro) ------------------------------------------------------
+// --- is_clean (pure) ------------------------------------------------------
 
 fn report(findings: Vec<Finding>, constraints: Vec<ConstraintResult>) -> ReviewReport {
     ReviewReport {
@@ -152,35 +152,35 @@ fn cr(text: &str, v: ConstraintVerdict) -> ConstraintResult {
 }
 
 #[test]
-fn is_clean_so_com_zero_findings_e_todas_ok() {
-    let limpo = report(
+fn is_clean_only_with_zero_findings_and_all_ok() {
+    let clean = report(
         vec![],
-        vec![cr("manter API estavel", ConstraintVerdict::Ok)],
+        vec![cr("keep the API stable", ConstraintVerdict::Ok)],
     );
-    assert!(limpo.is_clean());
+    assert!(clean.is_clean());
 }
 
 #[test]
-fn is_clean_falha_com_finding() {
+fn is_clean_fails_with_finding() {
     let r = report(
         vec![Finding {
             file: "src/api.rs".into(),
             line: Some(42),
-            message: "mudou assinatura".into(),
+            message: "signature changed".into(),
             reference: Some("RFC-003".into()),
             severity: Severity::Major,
         }],
-        vec![cr("manter API estavel", ConstraintVerdict::Ok)],
+        vec![cr("keep the API stable", ConstraintVerdict::Ok)],
     );
     assert!(!r.is_clean());
 }
 
 #[test]
-fn is_clean_falha_com_constraint_reprovada_ou_pendente() {
-    let reprovada = report(vec![], vec![cr("x", ConstraintVerdict::Reprovado)]);
-    assert!(!reprovada.is_clean());
-    let pendente = report(vec![], vec![cr("x", ConstraintVerdict::Pending)]);
-    assert!(!pendente.is_clean(), "pendente não pode passar");
+fn is_clean_fails_with_rejected_or_pending_constraint() {
+    let rejected = report(vec![], vec![cr("x", ConstraintVerdict::Failed)]);
+    assert!(!rejected.is_clean());
+    let pending = report(vec![], vec![cr("x", ConstraintVerdict::Pending)]);
+    assert!(!pending.is_clean(), "pending must not pass");
 }
 
 fn finding(message: &str, severity: Severity) -> Finding {
@@ -194,61 +194,61 @@ fn finding(message: &str, severity: Severity) -> Finding {
 }
 
 #[test]
-fn minor_e_nit_nao_reprovam_so_blocker_e_major() {
-    // minor/nit: informativos, não reprovam.
-    let so_minor = report(vec![finding("cosmético", Severity::Minor)], vec![]);
-    assert!(so_minor.is_clean(), "minor não deve reprovar");
-    assert_eq!(so_minor.blocking_count(), 0);
+fn minor_and_nit_do_not_fail_only_blocker_and_major() {
+    // minor/nit: informational, don't fail.
+    let only_minor = report(vec![finding("cosmetic", Severity::Minor)], vec![]);
+    assert!(only_minor.is_clean(), "minor must not fail");
+    assert_eq!(only_minor.blocking_count(), 0);
 
-    // major: reprova.
+    // major: fails.
     let major = report(vec![finding("bug importante", Severity::Major)], vec![]);
     assert!(!major.is_clean());
     assert_eq!(major.blocking_count(), 1);
 
-    // blocker também.
+    // blocker too.
     let blk = report(vec![finding("quebra", Severity::Blocker)], vec![]);
     assert!(!blk.is_clean());
     assert_eq!(blk.blocking_count(), 1);
 }
 
-// --- contexto e checklist -------------------------------------------------
+// --- context and checklist ------------------------------------------------
 
 #[test]
-fn check_semantic_constraints_so_pega_enforce_review_como_pending() {
+fn check_semantic_constraints_only_takes_enforce_review_as_pending() {
     let dir = TmpDir::new("checklist");
     let (store, git, gh, docs, repos) = setup(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
 
     let items = review.check_semantic_constraints("TASK-001").unwrap();
-    assert_eq!(items.len(), 2); // só as enforce: review
+    assert_eq!(items.len(), 2); // only the enforce: review ones
     assert!(
         items
             .iter()
             .all(|i| i.verdict == ConstraintVerdict::Pending)
     );
-    assert!(items.iter().any(|i| i.text == "manter API estavel"));
-    // a enforce: hook NÃO entra
+    assert!(items.iter().any(|i| i.text == "keep the API stable"));
+    // the enforce: hook does NOT enter
     assert!(!items.iter().any(|i| i.text.contains("src/legacy")));
 }
 
 #[test]
-fn build_context_traz_docs_diff_e_checklist() {
+fn build_context_brings_docs_diff_and_checklist() {
     let dir = TmpDir::new("context");
     let (store, git, gh, docs, repos) = setup(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
 
     let ctx = review.build_context("TASK-001").unwrap();
-    assert!(ctx.contains("RFC-003")); // todos os docs
+    assert!(ctx.contains("RFC-003")); // all docs
     assert!(ctx.contains("ADR-011"));
-    assert!(ctx.contains("Diff dos PRs"));
+    assert!(ctx.contains("PR diffs"));
     assert!(ctx.contains("myorg/repo"));
-    assert!(ctx.contains("manter API estavel")); // checklist
+    assert!(ctx.contains("keep the API stable")); // checklist
     assert!(ctx.contains("sem abstracao nova"));
-    // o working tree é apontado pra leitura (Read/Grep/Glob)
+    // the working tree is pointed out for reading (Read/Grep/Glob)
     assert!(ctx.contains("Working tree"));
 }
 
-/// `gh` falso que devolve diff + título/corpo do PR.
+/// Fake `gh` that returns diff + PR title/body.
 fn fake_gh(dir: &TmpDir) -> Gh {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.0.join("gh");
@@ -267,22 +267,22 @@ fi\n",
 }
 
 #[test]
-fn build_context_puxa_diff_e_descricao_do_pr_via_gh() {
+fn build_context_pulls_diff_and_pr_description_via_gh() {
     let dir = TmpDir::new("ghpr");
     let (store, git, _gh, docs, repos) = setup(&dir);
     let gh = fake_gh(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
 
     let ctx = review.build_context("TASK-001").unwrap();
-    assert!(ctx.contains("PR #7: Add parser")); // título do PR
-    assert!(ctx.contains("Implements the deck parser")); // corpo do PR
-    assert!(ctx.contains("+novo")); // diff vindo do gh
+    assert!(ctx.contains("PR #7: Add parser")); // PR title
+    assert!(ctx.contains("Implements the deck parser")); // PR body
+    assert!(ctx.contains("+novo")); // diff coming from gh
 }
 
-// --- persistência ---------------------------------------------------------
+// --- persistence ----------------------------------------------------------
 
 #[test]
-fn write_e_load_report_roundtrip() {
+fn write_and_load_report_roundtrip() {
     let dir = TmpDir::new("persist");
     let (store, git, gh, docs, repos) = setup(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
@@ -291,51 +291,51 @@ fn write_e_load_report_roundtrip() {
         vec![Finding {
             file: "src/api.rs".into(),
             line: Some(42),
-            message: "mudou assinatura".into(),
+            message: "signature changed".into(),
             reference: Some("RFC-003".into()),
             severity: Severity::Major,
         }],
         vec![
-            cr("manter API estavel", ConstraintVerdict::Reprovado),
+            cr("keep the API stable", ConstraintVerdict::Failed),
             cr("sem abstracao nova", ConstraintVerdict::Ok),
         ],
     );
     review.write_report(&original).unwrap();
 
-    // arquivo no lugar certo e legível
+    // file in the right place and readable
     let path = dir.0.join(".backlog/TASK-001.review.md");
     assert!(path.exists());
     let raw = fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("src/api.rs:42 - mudou assinatura (viola RFC-003)"));
-    assert!(raw.contains("[REPROVADO] manter API estavel"));
+    assert!(raw.contains("src/api.rs:42 - signature changed (violates RFC-003)"));
+    assert!(raw.contains("[REJECTED] keep the API stable"));
 
-    // roundtrip estruturado
+    // structured roundtrip
     let loaded = review.load_report("TASK-001").unwrap();
     assert_eq!(loaded, original);
     assert!(!review.is_clean("TASK-001").unwrap());
 }
 
 #[test]
-fn report_limpo_marca_is_clean_true() {
+fn clean_report_marks_is_clean_true() {
     let dir = TmpDir::new("clean");
     let (store, git, gh, docs, repos) = setup(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
 
-    let limpo = report(
+    let clean = report(
         vec![],
         vec![
-            cr("manter API estavel", ConstraintVerdict::Ok),
+            cr("keep the API stable", ConstraintVerdict::Ok),
             cr("sem abstracao nova", ConstraintVerdict::Ok),
         ],
     );
-    review.write_report(&limpo).unwrap();
+    review.write_report(&clean).unwrap();
     assert!(review.is_clean("TASK-001").unwrap());
 }
 
 // --- handoff --------------------------------------------------------------
 
 #[test]
-fn handoff_injeta_findings_na_sessao() {
+fn handoff_injects_findings_into_session() {
     let dir = TmpDir::new("handoff");
     let (store, git, gh, docs, repos) = setup(&dir);
     let review = Review::new(&store, &git, &gh, &FakeExec, &docs, repos, String::new());
@@ -344,15 +344,15 @@ fn handoff_injeta_findings_na_sessao() {
         vec![Finding {
             file: "src/api.rs".into(),
             line: Some(42),
-            message: "mudou assinatura".into(),
+            message: "signature changed".into(),
             reference: Some("RFC-003".into()),
             severity: Severity::Major,
         }],
-        vec![cr("manter API estavel", ConstraintVerdict::Reprovado)],
+        vec![cr("keep the API stable", ConstraintVerdict::Failed)],
     );
     review.write_report(&r).unwrap();
 
-    // sessão de play de mentira sobre `cat`
+    // fake play session over `cat`
     let mut session = ClaudeExecutor::with_bin("cat")
         .spawn_interactive("", &ExecFlags::default())
         .unwrap();
@@ -365,50 +365,50 @@ fn handoff_injeta_findings_na_sessao() {
     reader.read_to_string(&mut buf).unwrap();
     assert!(
         buf.contains("src/api.rs:42"),
-        "handoff não injetou os findings:\n{buf}"
+        "handoff did not inject the findings:\n{buf}"
     );
-    assert!(buf.contains("constraint reprovada: manter API estavel"));
+    assert!(buf.contains("failed constraint: keep the API stable"));
 }
 
 #[test]
-fn handoff_message_lista_findings_e_constraints_reprovadas() {
+fn handoff_message_lists_findings_and_rejected_constraints() {
     let r = report(
         vec![Finding {
             file: "src/api.rs".into(),
             line: Some(42),
-            message: "mudou assinatura".into(),
+            message: "signature changed".into(),
             reference: Some("RFC-003".into()),
             severity: Severity::Major,
         }],
         vec![
-            cr("manter API estavel", ConstraintVerdict::Reprovado),
-            cr("sem abstracao nova", ConstraintVerdict::Ok), // ok não entra
+            cr("keep the API stable", ConstraintVerdict::Failed),
+            cr("sem abstracao nova", ConstraintVerdict::Ok), // ok doesn't enter
         ],
     );
     let msg = jaum_flows::review::handoff_message(&r);
-    assert!(msg.contains("corrija"));
+    assert!(msg.contains("fix"));
     assert!(msg.contains("src/api.rs:42"));
-    assert!(msg.contains("constraint reprovada: manter API estavel"));
-    assert!(!msg.contains("sem abstracao nova")); // ok não vira pendência
+    assert!(msg.contains("failed constraint: keep the API stable"));
+    assert!(!msg.contains("sem abstracao nova")); // ok doesn't become a pending item
 }
 
-// --- captura estruturada (gap #1) -----------------------------------------
+// --- structured capture ---------------------------------------------------
 
 #[test]
-fn capture_logged_grava_report_e_mescla_checklist() {
+fn capture_logged_writes_report_and_merges_checklist() {
     use serde_json::json;
     let dir = TmpDir::new("capture");
     let (store, git, gh, docs, repos) = setup(&dir);
 
-    // o claude devolve só veredicto de UMA constraint; a outra deve virar pending.
+    // claude returns a verdict for only ONE constraint; the other must become pending.
     let result = json!({
         "type":"result","subtype":"success","is_error":false,"result":"ok",
         "structured_output": {
             "findings": [
-                {"file":"src/api.rs","line":42,"message":"mudou assinatura","reference":"RFC-003"}
+                {"file":"src/api.rs","line":42,"message":"signature changed","reference":"RFC-003"}
             ],
             "constraints": [
-                {"text":"manter API estavel","verdict":"reprovado","note":"assinatura mudou"}
+                {"text":"keep the API stable","verdict":"failed","note":"signature changed"}
             ]
         }
     });
@@ -421,32 +421,32 @@ fn capture_logged_grava_report_e_mescla_checklist() {
         .capture_logged("TASK-001", &mut |l| logs.push(l.to_string()))
         .unwrap();
 
-    // findings vieram do claude
+    // findings came from claude
     assert_eq!(report.findings.len(), 1);
     assert_eq!(report.findings[0].file, "src/api.rs");
-    // checklist é canônico: as 2 constraints `enforce: review` da fixture
+    // checklist is canonical: the 2 `enforce: review` constraints from the fixture
     assert_eq!(report.constraints.len(), 2);
     let api = report
         .constraints
         .iter()
-        .find(|c| c.text == "manter API estavel")
+        .find(|c| c.text == "keep the API stable")
         .unwrap();
-    assert_eq!(api.verdict, ConstraintVerdict::Reprovado);
-    // a não mencionada fica pending (o jaum garante a estrutura)
-    let outra = report
+    assert_eq!(api.verdict, ConstraintVerdict::Failed);
+    // the unmentioned one stays pending (jaum guarantees the structure)
+    let other = report
         .constraints
         .iter()
         .find(|c| c.text == "sem abstracao nova")
         .unwrap();
-    assert_eq!(outra.verdict, ConstraintVerdict::Pending);
+    assert_eq!(other.verdict, ConstraintVerdict::Pending);
 
     assert!(!report.is_clean());
-    // persistiu de fato (roundtrip)
+    // actually persisted (roundtrip)
     assert_eq!(review.load_report("TASK-001").unwrap(), report);
-    assert!(logs.iter().any(|l| l.contains("review gravado")));
+    assert!(logs.iter().any(|l| l.contains("review written")));
 }
 
-// --- critérios de aceite ---------------------------------------------------
+// --- acceptance criteria --------------------------------------------------
 
 const FIXTURE_CRITERIA: &str = r#"---
 id: TASK-002
@@ -454,21 +454,21 @@ type: impl
 status: review
 ---
 
-## Objetivo
+## Objective
 Fazer X
 
-## Criterio de aceite
+## Acceptance criteria
 - [ ] mostra saldo na tela
 - [x] some com o loading
 - valida entrada vazia
 - [ ] 
 
 ## Notas
-- isto nao e criterio
+- this is not a criterion
 "#;
 
 #[test]
-fn acceptance_checklist_extrai_criterios_do_corpo() {
+fn acceptance_checklist_extracts_criteria_from_body() {
     let dir = TmpDir::new("criteria");
     let (store, git, gh, docs, repos) = setup(&dir);
     fs::write(dir.0.join(".backlog/TASK-002.md"), FIXTURE_CRITERIA).unwrap();
@@ -476,26 +476,26 @@ fn acceptance_checklist_extrai_criterios_do_corpo() {
 
     let items = review.acceptance_checklist("TASK-002").unwrap();
     let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
-    // checkbox retirado, placeholder vazio e item de "## Notas" ignorados
+    // checkbox stripped, empty placeholder and "## Notas" item ignored
     assert_eq!(
         texts,
         vec!["mostra saldo na tela", "some com o loading", "valida entrada vazia"]
     );
     assert!(items.iter().all(|i| i.verdict == ConstraintVerdict::Pending));
 
-    // o contexto do review inclui o corpo e o checklist obrigatório de critérios
+    // the review context includes the body and the mandatory criteria checklist
     let ctx = review.build_context("TASK-002").unwrap();
-    assert!(ctx.contains("Critérios de aceite a validar"));
+    assert!(ctx.contains("Acceptance criteria to validate"));
     assert!(ctx.contains("mostra saldo na tela"));
 }
 
 #[test]
-fn is_clean_falha_com_criterio_nao_atendido() {
+fn is_clean_fails_with_unmet_criterion() {
     let mut r = report(vec![], vec![]);
-    r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Reprovado)];
-    assert!(!r.is_clean(), "critério reprovado reprova o review");
+    r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Failed)];
+    assert!(!r.is_clean(), "rejected criterion fails the review");
     r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Pending)];
-    assert!(!r.is_clean(), "critério pendente não pode passar");
+    assert!(!r.is_clean(), "pending criterion must not pass");
     r.criteria = vec![cr("mostra saldo", ConstraintVerdict::Ok)];
-    assert!(r.is_clean(), "todos ok -> limpo");
+    assert!(r.is_clean(), "all ok -> clean");
 }

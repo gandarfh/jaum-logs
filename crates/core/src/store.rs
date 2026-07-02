@@ -10,8 +10,8 @@ use serde::de::DeserializeOwned;
 use crate::error::JaumError;
 use crate::model::{Constraint, Enforce, Repo, Status, Task, TaskType};
 
-/// Dono do diretório `.backlog/`: a única fonte de verdade do backlog.
-/// Toda leitura/escrita de task passa por aqui.
+/// Owner of the `.backlog/` directory: the single source of truth for the backlog.
+/// Every task read/write goes through here.
 pub struct Store {
     root: PathBuf,
 }
@@ -21,7 +21,7 @@ impl Store {
         Self { root: root.into() }
     }
 
-    /// Store apontando para `.backlog/` relativo ao diretório atual.
+    /// Store pointing at `.backlog/` relative to the current directory.
     pub fn open() -> Self {
         Self::new(".backlog")
     }
@@ -34,23 +34,23 @@ impl Store {
         self.root.join(format!("{id}.md"))
     }
 
-    /// Caminho do relatório de review da task (`.backlog/TASK-NNN.review.md`).
+    /// Path of the task's review report (`.backlog/TASK-NNN.review.md`).
     pub fn review_path(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.review.md"))
     }
 
-    // --- leitura -----------------------------------------------------------
+    // --- reads -------------------------------------------------------------
 
-    /// Lê e parseia uma task de um caminho arbitrário.
+    /// Reads and parses a task from an arbitrary path.
     pub fn parse(&self, path: &Path) -> Result<Task> {
         let content = fs::read_to_string(path)
-            .with_context(|| format!("lendo task em {}", path.display()))?;
+            .with_context(|| format!("reading task at {}", path.display()))?;
 
         let matter = Matter::<YAML>::new();
         let parsed = matter
             .parse::<Task>(&content)
             .map_err(anyhow::Error::from)
-            .with_context(|| format!("parseando frontmatter de {}", path.display()))?;
+            .with_context(|| format!("parsing frontmatter of {}", path.display()))?;
 
         let mut task = parsed.data.ok_or_else(|| JaumError::MalformedFrontmatter {
             path: path.display().to_string(),
@@ -60,14 +60,14 @@ impl Store {
         Ok(task)
     }
 
-    /// Lista tasks, opcionalmente filtrando por status. Ordena por id.
+    /// Lists tasks, optionally filtering by status. Sorted by id.
     pub fn list(&self, status: Option<Status>) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         if !self.root.exists() {
             return Ok(out);
         }
         for entry in fs::read_dir(&self.root)
-            .with_context(|| format!("lendo diretório {}", self.root.display()))?
+            .with_context(|| format!("reading directory {}", self.root.display()))?
         {
             let path = entry?.path();
             if !is_task_file(&path) {
@@ -82,7 +82,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Busca a task por id (convenção: arquivo `TASK-NNN.md`).
+    /// Fetches the task by id (convention: `TASK-NNN.md` file).
     pub fn get(&self, id: &str) -> Result<Task> {
         let path = self.task_path(id);
         if !path.exists() {
@@ -91,16 +91,16 @@ impl Store {
         self.parse(&path)
     }
 
-    // --- escrita -----------------------------------------------------------
+    // --- writes ------------------------------------------------------------
 
-    /// Grava a task como markdown com frontmatter YAML. Usa `task.path` se
-    /// presente, senão `.backlog/{id}.md`.
+    /// Writes the task as markdown with YAML frontmatter. Uses `task.path` if
+    /// present, otherwise `.backlog/{id}.md`.
     pub fn write(&self, task: &Task) -> Result<()> {
         fs::create_dir_all(&self.root)
-            .with_context(|| format!("criando diretório {}", self.root.display()))?;
+            .with_context(|| format!("creating directory {}", self.root.display()))?;
 
-        let yaml = serde_yaml_ng::to_string(task).context("serializando frontmatter")?;
-        // Normaliza independente de a crate prefixar `---` ou não.
+        let yaml = serde_yaml_ng::to_string(task).context("serializing frontmatter")?;
+        // Normalize whether or not the crate prefixes `---`.
         let yaml = yaml.trim_start_matches("---\n").trim_end();
         let body = task.body.trim();
         let content = format!("---\n{yaml}\n---\n\n{body}\n");
@@ -110,41 +110,41 @@ impl Store {
             .clone()
             .unwrap_or_else(|| self.task_path(&task.id));
         fs::write(&path, content)
-            .with_context(|| format!("gravando task em {}", path.display()))?;
+            .with_context(|| format!("writing task at {}", path.display()))?;
         Ok(())
     }
 
-    // --- IO genérico de markdown+frontmatter (review reports, docs) --------
+    // --- generic markdown+frontmatter IO (review reports, docs) ------------
 
-    /// Grava `meta` (frontmatter YAML) + `body` num caminho arbitrário.
+    /// Writes `meta` (YAML frontmatter) + `body` to an arbitrary path.
     pub fn write_doc<T: Serialize>(&self, path: &Path, meta: &T, body: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("criando diretório {}", parent.display()))?;
+                .with_context(|| format!("creating directory {}", parent.display()))?;
         }
-        let yaml = serde_yaml_ng::to_string(meta).context("serializando frontmatter")?;
+        let yaml = serde_yaml_ng::to_string(meta).context("serializing frontmatter")?;
         let yaml = yaml.trim_start_matches("---\n").trim_end();
         let content = format!("---\n{yaml}\n---\n\n{}\n", body.trim());
-        fs::write(path, content).with_context(|| format!("gravando {}", path.display()))?;
+        fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
-    /// Lê `(frontmatter, body)` de um markdown com frontmatter YAML.
+    /// Reads `(frontmatter, body)` from a markdown file with YAML frontmatter.
     pub fn read_doc<T: DeserializeOwned>(&self, path: &Path) -> Result<(T, String)> {
         let content =
-            fs::read_to_string(path).with_context(|| format!("lendo {}", path.display()))?;
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let matter = Matter::<YAML>::new();
         let parsed = matter
             .parse::<T>(&content)
             .map_err(anyhow::Error::from)
-            .with_context(|| format!("parseando frontmatter de {}", path.display()))?;
+            .with_context(|| format!("parsing frontmatter of {}", path.display()))?;
         let data = parsed.data.ok_or_else(|| JaumError::MalformedFrontmatter {
             path: path.display().to_string(),
         })?;
         Ok((data, parsed.content.trim().to_string()))
     }
 
-    /// Cria um stub de task `impl`/`backlog` a partir de referências de RFC.
+    /// Creates an `impl`/`backlog` task stub from RFC references.
     pub fn create_stub(&self, rfc_refs: &[String]) -> Result<Task> {
         let id = self.next_id()?;
         let task = Task {
@@ -157,14 +157,14 @@ impl Store {
             deferred: Vec::new(),
             constraints: Vec::new(),
             locks: Vec::new(),
-            body: "## Objetivo\n\n## Criterio de aceite\n".to_string(),
+            body: "## Objective\n\n## Acceptance criteria\n".to_string(),
             path: Some(self.task_path(&id)),
         };
         self.write(&task)?;
         Ok(task)
     }
 
-    /// Cria um backlog rico (usado pelo ingest): tipo, refs de RFC/ADR e corpo.
+    /// Creates a rich backlog (used by ingest): type, RFC/ADR refs and body.
     pub fn create_backlog(
         &self,
         task_type: TaskType,
@@ -197,8 +197,8 @@ impl Store {
         Ok(task)
     }
 
-    /// Vincula um repo+branch à task (cria o `PrLink` com `pr: 0` se não existir,
-    /// ou atualiza o branch se o repo já estava vinculado). Usado no setup do play.
+    /// Links a repo+branch to the task (creates the `PrLink` with `pr: 0` if it
+    /// doesn't exist, or updates the branch if the repo was already linked). Used in play setup.
     pub fn link_repo(&self, id: &str, repo: &str, branch: &str) -> Result<Task> {
         let mut task = self.get(id)?;
         if let Some(link) = task.prs.iter_mut().find(|p| p.repo == repo) {
@@ -214,7 +214,7 @@ impl Store {
         Ok(task)
     }
 
-    /// Registra o número de um PR já existente (lido do `gh`) no vínculo do repo.
+    /// Records the number of an existing PR (read from `gh`) on the repo's link.
     pub fn set_pr(&self, id: &str, repo: &str, pr_num: u64) -> Result<Task> {
         let mut task = self.get(id)?;
         let link = task
@@ -230,8 +230,8 @@ impl Store {
         Ok(task)
     }
 
-    /// Registra escopo extra em `deferred` e materializa um novo backlog a
-    /// partir dele — a borda contra o "projeto infinito". Devolve a task criada.
+    /// Records extra scope in `deferred` and materializes a new backlog from it —
+    /// the guard against the "infinite project". Returns the created task.
     pub fn add_deferred(&self, id: &str, text: &str) -> Result<Task> {
         let mut origin = self.get(id)?;
         origin.deferred.push(text.to_string());
@@ -249,7 +249,7 @@ impl Store {
             constraints: Vec::new(),
             locks: Vec::new(),
             body: format!(
-                "## Objetivo\n\n{text}\n\n_Derivado de {id}._\n\n## Criterio de aceite\n"
+                "## Objective\n\n{text}\n\n_Derived from {id}._\n\n## Acceptance criteria\n"
             ),
             path: Some(self.task_path(&new_id)),
         };
@@ -257,7 +257,7 @@ impl Store {
         Ok(spawned)
     }
 
-    // --- consultas derivadas ----------------------------------------------
+    // --- derived queries --------------------------------------------------
 
     pub fn linked_repos(&self, id: &str) -> Result<Vec<Repo>> {
         Ok(self.get(id)?.linked_repos())
@@ -272,9 +272,9 @@ impl Store {
             .collect())
     }
 
-    // --- internos ----------------------------------------------------------
+    // --- internals ---------------------------------------------------------
 
-    /// Próximo id sequencial `TASK-NNN` (maior número existente + 1).
+    /// Next sequential id `TASK-NNN` (highest existing number + 1).
     fn next_id(&self) -> Result<String> {
         let mut max = 0u32;
         if self.root.exists() {
@@ -289,7 +289,7 @@ impl Store {
     }
 }
 
-/// Arquivo de task: `TASK-*.md`, excluindo os relatórios `*.review.md`.
+/// Task file: `TASK-*.md`, excluding the `*.review.md` reports.
 fn is_task_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -297,7 +297,7 @@ fn is_task_file(path: &Path) -> bool {
     name.starts_with("TASK-") && name.ends_with(".md") && !name.ends_with(".review.md")
 }
 
-/// Extrai o número de `TASK-NNN...` do nome do arquivo (review files incluídos).
+/// Extracts the number from `TASK-NNN...` in the file name (review files included).
 fn parse_task_number(path: &Path) -> Option<u32> {
     let name = path.file_name()?.to_str()?;
     let rest = name.strip_prefix("TASK-")?;

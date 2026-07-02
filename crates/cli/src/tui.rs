@@ -1,4 +1,4 @@
-//! Render (ratatui) e event loop (crossterm) da TUI.
+//! TUI render (ratatui) and event loop (crossterm).
 
 use std::time::Duration;
 
@@ -17,15 +17,15 @@ use tui_term::widget::PseudoTerminal;
 use crate::app::{App, BoardCard, BoardFocus, InputKind, SessionKind, Tab, status_label};
 use jaum_flows::review::{ConstraintResult, ConstraintVerdict};
 
-// --- tema (estética Charm/Lipgloss) ---------------------------------------
-const ACCENT: Color = Color::Rgb(180, 142, 255); // lavanda (assinatura Charm)
-const PINK: Color = Color::Rgb(255, 121, 198); // rosa de destaque
-const BORDER: Color = Color::Rgb(82, 80, 112); // borda discreta
-const SUBTLE: Color = Color::Rgb(128, 128, 150); // texto esmaecido
-const SEL_BG: Color = Color::Rgb(54, 48, 92); // fundo da seleção
+// --- theme (Charm/Lipgloss aesthetic) -------------------------------------
+const ACCENT: Color = Color::Rgb(180, 142, 255); // lavender (Charm signature)
+const PINK: Color = Color::Rgb(255, 121, 198); // accent pink
+const BORDER: Color = Color::Rgb(82, 80, 112); // subtle border
+const SUBTLE: Color = Color::Rgb(128, 128, 150); // dimmed text
+const SEL_BG: Color = Color::Rgb(54, 48, 92); // selection background
 const BG_TITLE_FG: Color = Color::Rgb(20, 20, 28);
 
-/// Painel base no estilo Charm: borda arredondada, título em "chip" e padding.
+/// Charm-style base panel: rounded border, chip title, and padding.
 fn panel(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -41,7 +41,7 @@ fn panel(title: &str) -> Block<'static> {
         ))
 }
 
-/// Painel sem padding (para o PTY preencher a área exata).
+/// Panel without padding (so the PTY fills the exact area).
 fn panel_tight(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -56,7 +56,7 @@ fn panel_tight(title: &str) -> Block<'static> {
         ))
 }
 
-/// Estilo da linha selecionada (barra de fundo + texto forte).
+/// Selected-line style (background bar + bold text).
 fn sel_style() -> Style {
     Style::default()
         .bg(SEL_BG)
@@ -67,8 +67,8 @@ fn sel_style() -> Style {
 const MARGIN_X: u16 = 2;
 const MARGIN_Y: u16 = 1;
 
-/// Geometria central: margem externa (gutter) + header/corpo/footer com folga.
-/// Usado pelo render E pelo `sync_pty_size` para concordarem no tamanho do PTY.
+/// Central geometry: outer gutter + header/body/footer with spacing.
+/// Used by render AND `sync_pty_size` so they agree on the PTY size.
 fn root_layout(area: Rect) -> (Rect, Rect, Rect) {
     let inner = area.inner(Margin {
         vertical: MARGIN_Y,
@@ -76,9 +76,9 @@ fn root_layout(area: Rect) -> (Rect, Rect, Rect) {
     });
     let rows = Layout::vertical([
         Constraint::Length(1), // header
-        Constraint::Length(1), // folga
-        Constraint::Min(0),    // corpo
-        Constraint::Length(1), // folga
+        Constraint::Length(1), // spacer
+        Constraint::Min(0),    // body
+        Constraint::Length(1), // spacer
         Constraint::Length(1), // footer
     ])
     .split(inner);
@@ -127,7 +127,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// Suspende a TUI, abre o `conventions.md` no `$EDITOR` e retoma, recarregando.
+/// Suspends the TUI, opens `conventions.md` in `$EDITOR`, then resumes and reloads.
 fn edit_conventions(terminal: &mut DefaultTerminal, app: &mut App) {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     ratatui::restore();
@@ -137,25 +137,25 @@ fn edit_conventions(terminal: &mut DefaultTerminal, app: &mut App) {
     *terminal = ratatui::init();
     let _ = terminal.clear();
     app.reload_conventions();
-    app.status_msg = "conventions.md atualizado".into();
+    app.status_msg = "conventions.md updated".into();
 }
 
-/// Mantém o PTY e o parser vt100 no tamanho EXATO do pane Session (corpo menos
-/// as bordas). Sem isso, o `claude` quebra linha numa largura diferente da
-/// renderizada e o texto sai corrompido.
+/// Keeps the PTY and vt100 parser at the EXACT size of the Session pane (body
+/// minus borders). Otherwise `claude` wraps at a different width than rendered
+/// and the text comes out corrupted.
 fn sync_pty_size(terminal: &DefaultTerminal, app: &mut App) {
     let Ok(size) = terminal.size() else { return };
     sync_pty_to(app, size.width, size.height);
 }
 
-/// Como `sync_pty_size`, mas a partir de um tamanho explícito (usado pelo daemon,
-/// que renderiza num backend em memória sem terminal real). Sincroniza só a
-/// sessão SELECIONADA (a exibida) com o pane do terminal da master-detail.
+/// Like `sync_pty_size`, but from an explicit size (used by the daemon, which
+/// renders to an in-memory backend without a real terminal). Syncs only the
+/// SELECTED (displayed) session with the master-detail terminal pane.
 pub(crate) fn sync_pty_to(app: &mut App, width: u16, height: u16) {
     let (_h, body, _f) = root_layout(Rect::new(0, 0, width, height));
-    // o chat é a 3ª coluna do Board (ou a área toda em fullscreen).
+    // the chat is the 3rd Board column (or the whole area in fullscreen).
     let term = if app.chat_fullscreen { body } else { board_layout(body)[2] };
-    // o pane do terminal tem borda (-2 em cada eixo)
+    // the terminal pane has a border (-2 on each axis)
     let cols = term.width.saturating_sub(2);
     let rows = term.height.saturating_sub(2);
     if cols == 0 || rows == 0 {
@@ -174,7 +174,7 @@ pub(crate) fn sync_pty_to(app: &mut App, width: u16, height: u16) {
     }
 }
 
-/// Área interior (sem borda) do pane do chat, em coords absolutas.
+/// Interior area (borderless) of the chat pane, in absolute coords.
 pub(crate) fn session_term_area(app: &App, width: u16, height: u16) -> Rect {
     let (_h, body, _f) = root_layout(Rect::new(0, 0, width, height));
     let term = if app.chat_fullscreen { body } else { board_layout(body)[2] };
@@ -186,9 +186,9 @@ pub(crate) fn session_term_area(app: &App, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Trata um evento de mouse sobre a aba Session: se o claude está em modo mouse
-/// (SGR), encaminha o evento pro PTY; senão, rola a scrollback do terminal
-/// embutido (vt100) com a roda.
+/// Handles a mouse event over the Session tab: if claude is in mouse mode
+/// (SGR), forwards the event to the PTY; otherwise scrolls the embedded
+/// terminal's scrollback (vt100) with the wheel.
 pub(crate) fn handle_mouse(app: &mut App, ev: crossterm::event::MouseEvent, width: u16, height: u16) {
     use crossterm::event::MouseEventKind;
     if app.tab != Tab::Board || app.board_focus != BoardFocus::Chat {
@@ -214,7 +214,7 @@ pub(crate) fn handle_mouse(app: &mut App, ev: crossterm::event::MouseEvent, widt
         && screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr;
 
     if mouse_on {
-        let col = ev.column - area.x + 1; // 1-based, relativo ao PTY
+        let col = ev.column - area.x + 1; // 1-based, relative to the PTY
         let row = ev.row - area.y + 1;
         if let Some(bytes) = encode_mouse_sgr(&ev, col, row)
             && let Some(s) = &mut e.session
@@ -224,7 +224,7 @@ pub(crate) fn handle_mouse(app: &mut App, ev: crossterm::event::MouseEvent, widt
         return;
     }
 
-    // claude não capturou o mouse: roda a scrollback do terminal embutido.
+    // claude didn't capture the mouse: scroll the embedded terminal's scrollback.
     let back = e.parser.screen().scrollback();
     match ev.kind {
         MouseEventKind::ScrollUp => e.parser.screen_mut().set_scrollback(back + 3),
@@ -233,7 +233,7 @@ pub(crate) fn handle_mouse(app: &mut App, ev: crossterm::event::MouseEvent, widt
     }
 }
 
-/// Codifica um evento de mouse no protocolo SGR (1006): `ESC [ < cb ; col ; row (M|m)`.
+/// Encodes a mouse event in the SGR protocol (1006): `ESC [ < cb ; col ; row (M|m)`.
 fn encode_mouse_sgr(ev: &crossterm::event::MouseEvent, col: u16, row: u16) -> Option<Vec<u8>> {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
     let btn = |b: MouseButton| match b {
@@ -265,7 +265,7 @@ fn encode_mouse_sgr(ev: &crossterm::event::MouseEvent, col: u16, row: u16) -> Op
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
-    // 0) overlay de logs de job (ingest/captura/init)
+    // 0) job log overlay (ingest/capture/init)
     if app.job_overlay {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.dismiss_job(),
@@ -278,7 +278,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 0) picker de projeto (overlay)
+    // 0) project picker (overlay)
     if app.project_picker {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.close_picker(),
@@ -290,7 +290,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 0.5) overlay de detalhe da task
+    // 0.5) task detail overlay
     if app.detail_open {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.close_detail(),
@@ -301,7 +301,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 0.6) overlay de visualização de doc (markdown)
+    // 0.6) doc view overlay (markdown)
     if app.doc_open {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.close_doc(),
@@ -312,7 +312,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 1) captura de texto (defer / convenção / nova task)
+    // 1) text capture (defer / convention / new task)
     if app.input.is_some() {
         match key.code {
             KeyCode::Esc => app.input = None,
@@ -336,9 +336,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 2) foco no Chat (Board): TODAS as teclas vão para o `claude`. Comandos do
-    //    jaum via prefixo Ctrl+G: Ctrl+G 1-2 aba · q sair · f finaliza · x remove
-    //    · z fullscreen · n/p card · h volta pros cards · g envia Ctrl+G literal.
+    // 2) Chat focus (Board): ALL keys go to `claude`. jaum commands via the
+    //    Ctrl+G prefix: Ctrl+G 1-2 tab · q quit · f finish · x remove · z
+    //    fullscreen · n/p card · h back to cards · g sends literal Ctrl+G.
     if app.tab == Tab::Board && app.board_focus == BoardFocus::Chat && app.selected_card_is_live() {
         if app.pending_prefix {
             app.pending_prefix = false;
@@ -379,7 +379,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             app.pending_prefix = true;
             return;
         }
-        // Esc sai do chat de volta pros cards (não é repassado ao PTY).
+        // Esc leaves the chat back to the cards (not forwarded to the PTY).
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             app.board_focus = BoardFocus::Cards;
             return;
@@ -397,20 +397,20 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Ctrl+C sai (em raw mode não vira SIGINT; precisa ser tratado aqui)
+    // Ctrl+C quits (in raw mode it doesn't become SIGINT; handle it here)
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.should_quit = true;
         return;
     }
 
-    // 3) navegação (foco em listas: Tasks/Cards no Board, ou Docs)
+    // 3) navigation (list focus: Tasks/Cards on the Board, or Docs)
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Tab => app.tab = app.tab.next(),
         KeyCode::Char(c @ '1'..='2') => {
             app.tab = Tab::from_index(c as usize - '1' as usize);
         }
-        // j/k navegam DENTRO do painel em foco; h/l movem o foco (Tasks↔Cards↔Chat).
+        // j/k navigate WITHIN the focused panel; h/l move focus (Tasks↔Cards↔Chat).
         KeyCode::Char('j') | KeyCode::Down => match (app.tab, app.board_focus) {
             (Tab::Docs, _) => app.docs_next(),
             (Tab::Board, BoardFocus::Cards) => app.card_next(),
@@ -421,7 +421,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             (Tab::Board, BoardFocus::Cards) => app.card_prev(),
             (Tab::Board, _) => app.select_prev(),
         },
-        // Shift+J/K rola o preview do doc sem abrir o overlay.
+        // Shift+J/K scrolls the doc preview without opening the overlay.
         KeyCode::Char('J') if app.tab == Tab::Docs => app.doc_scroll_down(),
         KeyCode::Char('K') if app.tab == Tab::Docs => app.doc_scroll_up(),
         KeyCode::Char('g') | KeyCode::Home => app.select_first(),
@@ -461,7 +461,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('S') => app.setup_start(),
         KeyCode::Char('P') => app.open_picker(),
         KeyCode::Char('e') => app.request_edit_conventions(),
-        // captura rápida
+        // quick capture
         KeyCode::Char('c') => app.start_input(InputKind::Convention),
         KeyCode::Char('n') => app.start_input(InputKind::NewTask),
         KeyCode::Char('N') => app.start_input(InputKind::NewTaskClaude),
@@ -469,8 +469,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         _ => {}
     }
 
-    // Comandos de ação re-mostram o toast (feedback no retry): re-tentar um
-    // comando que falha igual exibe o erro de novo, em vez de silêncio.
+    // Action commands re-show the toast (retry feedback): retrying a command
+    // that fails the same way shows the error again instead of going silent.
     if matches!(
         key.code,
         KeyCode::Char('p' | 'r' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
@@ -479,7 +479,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Traduz uma tecla para bytes do PTY (cobertura básica).
+/// Translates a key into PTY bytes (basic coverage).
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
@@ -534,7 +534,7 @@ pub(crate) fn render(f: &mut Frame, app: &App) {
     }
 }
 
-/// Overlay de logs ao vivo de um job (ingest/captura/init).
+/// Live log overlay for a job (ingest/capture/init).
 fn render_job(f: &mut Frame, app: &App) {
     use ratatui::widgets::Clear;
     let Some(job) = &app.job else { return };
@@ -543,15 +543,15 @@ fn render_job(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let (state_txt, color) = if job.finished {
-        ("concluído", Color::Green)
+        ("done", Color::Green)
     } else {
-        ("rodando…", ACCENT)
+        ("running…", ACCENT)
     };
-    // dica de navegação: muda conforme está ao vivo ou travado lendo.
+    // nav hint: changes depending on whether it's live or paused reading.
     let nav = if job.follow {
-        "j/k rola · Esc fecha"
+        "j/k scroll · Esc close"
     } else {
-        "j/k rola · G ao vivo · Esc fecha"
+        "j/k scroll · G live · Esc close"
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -566,13 +566,13 @@ fn render_job(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
 
-    // área interna: bordas (-2) + padding horizontal (2+2) e padding superior (1).
+    // inner area: borders (-2) + horizontal padding (2+2) and top padding (1).
     let inner_w = area.width.saturating_sub(6).max(1) as usize;
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
 
     let lines: Vec<Line> = job.logs.iter().map(|l| job_log_line(l)).collect();
 
-    // estima a altura com wrap para clampar o scroll e fazer o follow.
+    // estimate wrapped height to clamp the scroll and drive follow.
     let wrapped: usize = job
         .logs
         .iter()
@@ -592,10 +592,10 @@ fn render_job(f: &mut Frame, app: &App) {
     f.render_widget(p, area);
 }
 
-/// Estiliza uma linha de log do job conforme seu prefixo.
+/// Styles a job log line based on its prefix.
 fn job_log_line(l: &str) -> Line<'static> {
     if let Some(rest) = l.strip_prefix("→ ") {
-        // "Tool argumento…" — destaca o nome da tool.
+        // "Tool argument…" — highlights the tool name.
         let (tool, arg) = rest.split_once(' ').unwrap_or((rest, ""));
         let mut spans = vec![
             Span::styled("→ ", Style::default().fg(PINK)),
@@ -624,7 +624,7 @@ fn job_log_line(l: &str) -> Line<'static> {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ))
     } else if let Some(rest) = l.strip_prefix('[') {
-        // "[modelo] texto…" — modelo esmaecido, texto claro.
+        // "[model] text…" — dimmed model, bright text.
         match rest.split_once("] ") {
             Some((model, text)) => Line::from(vec![
                 Span::styled(format!("[{model}] "), Style::default().fg(ACCENT)),
@@ -637,7 +637,7 @@ fn job_log_line(l: &str) -> Line<'static> {
     }
 }
 
-/// Estilo de cor por status (board e badges).
+/// Color style per status (board and badges).
 fn status_color(s: jaum_core::Status) -> Color {
     use jaum_core::Status;
     match s {
@@ -649,7 +649,7 @@ fn status_color(s: jaum_core::Status) -> Color {
     }
 }
 
-/// Skin do termimad casado com o tema Charm do app (lavanda/rosa/esmaecido).
+/// termimad skin matched to the app's Charm theme (lavender/pink/dimmed).
 fn md_skin() -> termimad::MadSkin {
     use termimad::crossterm::style::Color::Rgb;
     let mut skin = termimad::MadSkin::default();
@@ -661,11 +661,11 @@ fn md_skin() -> termimad::MadSkin {
     skin
 }
 
-/// Render de markdown -> linhas do ratatui. A prosa vai pro termimad (temas,
-/// wrap, código, listas) via ANSI + `ansi-to-tui`; as tabelas são renderizadas
-/// aqui (`render_table`) com moldura completa e wrap por célula, porque a tabela
-/// do termimad fica sem borda de topo/base e com padding inconsistente.
-/// `width` é a largura interna do painel de destino.
+/// Markdown render -> ratatui lines. Prose goes to termimad (themes, wrap,
+/// code, lists) via ANSI + `ansi-to-tui`; tables are rendered here
+/// (`render_table`) with a full border and per-cell wrap, because termimad's
+/// table has no top/bottom border and inconsistent padding.
+/// `width` is the inner width of the target panel.
 fn markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -673,11 +673,11 @@ fn markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let mut i = 0;
     while i < lines.len() {
         let raw = lines[i];
-        // tabela GFM: linha com `|` seguida de uma linha separadora `|---|`.
+        // GFM table: a row with `|` followed by a `|---|` separator line.
         if is_table_row(raw) && i + 1 < lines.len() && is_table_separator(lines[i + 1]) {
             flush_prose(&mut prose, &mut out, width);
             let mut rows = vec![raw];
-            i += 2; // pula cabeçalho + separador
+            i += 2; // skip header + separator
             while i < lines.len() && is_table_row(lines[i]) && !is_table_separator(lines[i]) {
                 rows.push(lines[i]);
                 i += 1;
@@ -693,7 +693,7 @@ fn markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     out
 }
 
-/// Renderiza a prosa acumulada via termimad (ANSI -> Text) e esvazia o buffer.
+/// Renders accumulated prose via termimad (ANSI -> Text) and clears the buffer.
 fn flush_prose(prose: &mut String, out: &mut Vec<Line<'static>>, width: u16) {
     use ansi_to_tui::IntoText;
     if !prose.trim().is_empty() {
@@ -707,7 +707,7 @@ fn flush_prose(prose: &mut String, out: &mut Vec<Line<'static>>, width: u16) {
     prose.clear();
 }
 
-/// Texto plano de uma célula (sem marcadores inline) — usado p/ medir e wrapar.
+/// Plain text of a cell (no inline markers) — used to measure and wrap.
 fn strip_inline(s: &str) -> String {
     s.replace("**", "").replace('`', "")
 }
@@ -729,7 +729,7 @@ fn is_table_separator(r: &str) -> bool {
             .all(|c| !c.is_empty() && c.contains('-') && c.chars().all(|ch| ch == '-' || ch == ':'))
 }
 
-/// Quebra uma linha de tabela em células (respeita `\|` escapado).
+/// Splits a table row into cells (respects escaped `\|`).
 fn split_row(r: &str) -> Vec<String> {
     let t = r.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
@@ -740,8 +740,8 @@ fn split_row(r: &str) -> Vec<String> {
         .collect()
 }
 
-/// Quebra o texto de uma célula em linhas de até `w` colunas (word-wrap;
-/// palavra maior que `w` é cortada).
+/// Wraps a cell's text into lines of up to `w` columns (word-wrap; a word
+/// longer than `w` is hard-split).
 fn wrap_cell(text: &str, w: usize) -> Vec<String> {
     if w == 0 {
         return vec![String::new()];
@@ -780,8 +780,8 @@ fn wrap_cell(text: &str, w: usize) -> Vec<String> {
     out
 }
 
-/// Renderiza uma tabela GFM com moldura arredondada completa, cabeçalho em
-/// destaque e wrap por célula p/ caber em `width`. `rows[0]` é o cabeçalho.
+/// Renders a GFM table with a full rounded border, highlighted header, and
+/// per-cell wrap to fit `width`. `rows[0]` is the header.
 fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
     let bs = Style::default().fg(BORDER);
     let cells: Vec<Vec<String>> = rows.iter().map(|r| split_row(r)).collect();
@@ -789,7 +789,7 @@ fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
     if ncol == 0 {
         return;
     }
-    // largura natural (máx.) de cada coluna.
+    // natural (max) width of each column.
     let mut widths = vec![0usize; ncol];
     for row in &cells {
         for (ci, c) in row.iter().enumerate() {
@@ -799,8 +799,8 @@ fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
             }
         }
     }
-    // encolhe as maiores colunas até a moldura caber (cada coluna gasta w+3:
-    // 1 borda + 2 espaços; +1 pela borda final).
+    // shrink the widest columns until the frame fits (each column costs w+3:
+    // 1 border + 2 spaces; +1 for the final border).
     const MIN_COL: usize = 3;
     let budget = (width as usize).saturating_sub(3 * ncol + 1);
     let floor = MIN_COL * ncol;
@@ -819,7 +819,7 @@ fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
         sum -= 1;
     }
 
-    // desenha uma régua horizontal (topo/meio/base).
+    // draws a horizontal rule (top/middle/bottom).
     let rule = |left: char, mid: char, right: char| -> Line<'static> {
         let mut s = String::new();
         s.push(left);
@@ -864,7 +864,7 @@ fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
     out.push(rule('╰', '┴', '╯'));
 }
 
-/// Overlay de visualização de um doc (markdown renderizado).
+/// Doc view overlay (rendered markdown).
 fn render_doc_view(f: &mut Frame, app: &App) {
     use ratatui::widgets::Clear;
 
@@ -876,20 +876,20 @@ fn render_doc_view(f: &mut Frame, app: &App) {
         .get(app.docs_selected)
         .cloned()
         .unwrap_or_default();
-    // lê fresh a cada frame: reflete edições externas (setup) sem fechar/reabrir.
+    // read fresh each frame: reflects external edits (setup) without close/reopen.
     let content = app
         .docs
         .get(app.docs_selected)
         .map(|rel| std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default())
         .unwrap_or_default();
     let p = Paragraph::new(markdown_lines(&content, area.width.saturating_sub(7)))
-        .block(overlay_panel(&format!("{title} · j/k rola · Esc fecha")))
+        .block(overlay_panel(&format!("{title} · j/k scroll · Esc close")))
         .wrap(Wrap { trim: false })
         .scroll((app.doc_scroll, 0));
     f.render_widget(p, area);
 }
 
-/// Painel de overlay: como `panel`, mas com borda de acento (foco).
+/// Overlay panel: like `panel`, but with an accent border (focus).
 fn overlay_panel(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -905,8 +905,8 @@ fn overlay_panel(title: &str) -> Block<'static> {
         ))
 }
 
-/// Linhas do conteúdo de uma task (metadados + corpo em markdown). Reusado pelo
-/// preview do Board e pelo overlay de detalhe.
+/// Content lines of a task (metadata + markdown body). Reused by the Board
+/// preview and the detail overlay.
 fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = Vec::new();
@@ -936,7 +936,7 @@ fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     }
     for pr in &t.prs {
         let n = if pr.pr == 0 {
-            "PR não criado".to_string()
+            "PR not created".to_string()
         } else {
             format!("PR #{}", pr.pr)
         };
@@ -969,20 +969,20 @@ fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// Overlay com o conteúdo completo da task selecionada (Enter/`o`).
+/// Overlay with the full content of the selected task (Enter/`o`).
 fn render_detail(f: &mut Frame, app: &App) {
     use ratatui::widgets::Clear;
     let Some(t) = app.selected_task() else { return };
     let area = centered_rect(80, 80, f.area());
     f.render_widget(Clear, area);
     let p = Paragraph::new(task_detail_lines(t, area.width.saturating_sub(7)))
-        .block(overlay_panel(&format!("{} · j/k rola · Esc fecha", t.id)))
+        .block(overlay_panel(&format!("{} · j/k scroll · Esc close", t.id)))
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
     f.render_widget(p, area);
 }
 
-/// Header: logo + pills das abas (esquerda) e nome do projeto (direita).
+/// Header: logo + tab pills (left) and project name (right).
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([
         Constraint::Min(0),
@@ -1022,7 +1022,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(right), cols[1]);
 }
 
-/// Overlay central com a lista de projetos (tecla `P`).
+/// Central overlay with the project list (`P` key).
 fn render_picker(f: &mut Frame, app: &App) {
     use ratatui::widgets::Clear;
 
@@ -1038,13 +1038,13 @@ fn render_picker(f: &mut Frame, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.picker_selected));
     let list = List::new(items)
-        .block(overlay_panel("Projects · Enter troca · Esc fecha"))
+        .block(overlay_panel("Projects · Enter switch · Esc close"))
         .highlight_style(sel_style())
         .highlight_symbol("▌ ");
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// Retângulo centralizado (percentuais da área).
+/// Centered rectangle (percentages of the area).
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let vert = Layout::default()
         .direction(Direction::Vertical)
@@ -1064,7 +1064,7 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
         .split(vert[1])[1]
 }
 
-/// Split do Board: tasks | itens da task (cards) | chat/conteúdo.
+/// Board split: tasks | task items (cards) | chat/content.
 pub(crate) fn board_layout(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::horizontal([
         Constraint::Percentage(24),
@@ -1075,7 +1075,7 @@ pub(crate) fn board_layout(area: Rect) -> std::rc::Rc<[Rect]> {
     .split(area)
 }
 
-/// Bloco com borda de destaque quando o painel está em foco.
+/// Block with a highlighted border when the panel is focused.
 fn panel_focus(title: &str, focused: bool) -> Block<'static> {
     let b = panel(title);
     if focused {
@@ -1086,7 +1086,7 @@ fn panel_focus(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn render_board(f: &mut Frame, app: &App, area: Rect) {
-    // fullscreen do chat: o conteúdo do card ocupa a área toda.
+    // chat fullscreen: the card content takes the whole area.
     if app.chat_fullscreen {
         render_card_content(f, app, area);
         return;
@@ -1104,9 +1104,9 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
     let mut last_status: Option<Status> = None;
     let active = app.active_task_ids();
 
-    // linha sintética "· projeto" (topo): abriga as sessões de setup.
+    // synthetic "· project" row (top): holds the setup sessions.
     let mut proj = vec![Span::styled(
-        "· projeto",
+        "· project",
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if app.sessions.iter().any(|e| e.is_live() && e.kind == SessionKind::Setup) {
@@ -1143,16 +1143,16 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("{} ", badge.0), Style::default().fg(badge.1)),
             Span::styled(t.id.clone(), Style::default().add_modifier(Modifier::BOLD)),
         ];
-        // sessão viva aberta nesta task (há chat pra entrar).
+        // live session open on this task (there's a chat to enter).
         if app.sessions.iter().any(|e| e.is_live() && e.task.as_deref() == Some(t.id.as_str())) {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
-        // veredito do review (se houver `.review.md`).
+        // review verdict (if there's a `.review.md`).
         if let Some(n) = app.review_badge(&t.id) {
             let (g, c) = if n == 0 { ("✓", Color::Green) } else { ("⚑", Color::Red) };
             spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
         }
-        // glifo de paralelismo (só quando há tasks ativas e esta não é uma delas).
+        // parallelism glyph (only when there are active tasks and this isn't one).
         if !active.contains(&t.id) {
             if app.parallel_conflict_with_active(&t.id).is_some() {
                 spans.push(Span::styled(" ⚠", Style::default().fg(Color::Yellow)));
@@ -1166,13 +1166,13 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
 
     if items.is_empty() {
         items.push(ListItem::new(Span::styled(
-            "vazio — `i` para ingerir os docs",
+            "empty — `i` to ingest the docs",
             Style::default().fg(SUBTLE),
         )));
     }
 
     let selected_row = if app.project_selected {
-        Some(0) // a linha · projeto é o primeiro item
+        Some(0) // the · project row is the first item
     } else {
         row_to_task.iter().position(|r| *r == Some(app.selected))
     };
@@ -1187,35 +1187,35 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// Coluna do meio: detalhe compacto da task no topo + a lista de cards (sessões
-/// + veredito). Cards são as linhas navegáveis (`card_selected`).
+/// Middle column: compact task detail at the top + the card list (sessions
+/// + verdict). Cards are the navigable rows (`card_selected`).
 fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.board_focus == BoardFocus::Cards;
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_to_card: Vec<Option<usize>> = Vec::new();
-    // corpo da task (objetivo/descrição), renderizado abaixo dos Itens.
+    // task body (goal/description), rendered below the Items.
     let mut body_lines: Vec<Line<'static>> = Vec::new();
     let mut detail = |items: &mut Vec<ListItem>, l: Line<'static>| {
         items.push(ListItem::new(l));
         row_to_card.push(None);
     };
 
-    // detalhe compacto (linha · projeto ou task)
+    // compact detail (· project row or task)
     let title = if app.project_selected {
         detail(
             &mut items,
-            Line::from(Span::styled("config do projeto (setup)", Style::default().fg(SUBTLE))),
+            Line::from(Span::styled("project config (setup)", Style::default().fg(SUBTLE))),
         );
         if app.setup_needed() {
             detail(
                 &mut items,
                 Line::from(Span::styled(
-                    "setup pendente — S abre o chat",
+                    "setup pending — S opens the chat",
                     Style::default().fg(Color::Yellow),
                 )),
             );
         }
-        "· projeto".to_string()
+        "· project".to_string()
     } else if let Some(t) = app.selected_task() {
         detail(
             &mut items,
@@ -1228,55 +1228,55 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             let pr_txt = if pr.pr != 0 {
                 format!("PR #{} · {}", pr.pr, pr.branch)
             } else {
-                format!("sem PR · {}", pr.branch)
+                format!("no PR · {}", pr.branch)
             };
             detail(&mut items, Line::from(Span::styled(pr_txt, Style::default().fg(SUBTLE))));
         }
         if let Some(r) = app.load_review(&t.id) {
             let (txt, c) = if r.is_clean() {
-                ("review LIMPO".to_string(), Color::Green)
+                ("review CLEAN".to_string(), Color::Green)
             } else {
-                (format!("review SUJO · {} pend.", r.unmet_count()), Color::Red)
+                (format!("review DIRTY · {} pending", r.unmet_count()), Color::Red)
             };
             detail(&mut items, Line::from(Span::styled(txt, Style::default().fg(c))));
         }
         if app.parallel_conflict_with_active(&t.id).is_some() {
             detail(
                 &mut items,
-                Line::from(Span::styled("⚠ conflita em paralelo", Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled("⚠ parallel conflict", Style::default().fg(Color::Yellow))),
             );
         } else if app.is_parallel_safe(&t.id) {
             detail(
                 &mut items,
-                Line::from(Span::styled("‖ paralelo ok", Style::default().fg(Color::Green))),
+                Line::from(Span::styled("‖ parallel ok", Style::default().fg(Color::Green))),
             );
         }
         if !t.body.trim().is_empty() {
-            // largura interna da List: chrome do painel (6) + highlight_symbol
-            // (2) + 1 col de margem, p/ o termimad não estourar e re-quebrar.
+            // List inner width: panel chrome (6) + highlight_symbol (2) + 1 col
+            // of margin, so termimad doesn't overflow and re-wrap.
             body_lines = markdown_lines(&t.body, area.width.saturating_sub(9));
         }
         t.id.clone()
     } else {
-        let p = Paragraph::new("selecione uma task (j/k)")
+        let p = Paragraph::new("select a task (j/k)")
             .style(Style::default().fg(SUBTLE))
             .block(panel_focus("Task", focused));
         f.render_widget(p, area);
         return;
     };
 
-    // separador + cards
+    // separator + cards
     detail(&mut items, Line::from(""));
     detail(
         &mut items,
-        Line::from(Span::styled("Itens", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Items", Style::default().add_modifier(Modifier::BOLD))),
     );
     let cards = app.task_cards();
     if cards.is_empty() {
         detail(
             &mut items,
             Line::from(Span::styled(
-                "  (nenhum) — p play · R review · r veredito",
+                "  (none) — p play · R review · r verdict",
                 Style::default().fg(SUBTLE),
             )),
         );
@@ -1287,7 +1287,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // corpo da task (objetivo/descrição) abaixo dos Itens.
+    // task body (goal/description) below the Items.
     if !body_lines.is_empty() {
         items.push(ListItem::new(Line::from("")));
         row_to_card.push(None);
@@ -1308,7 +1308,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// Uma linha de card na coluna do meio.
+/// A single card row in the middle column.
 fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
     match card {
         BoardCard::Session(i) => {
@@ -1321,9 +1321,9 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
                 ("✓", Color::DarkGray)
             };
             let age = if e.is_live() {
-                format!("ativa · {}", fmt_dur(age_of(e.last_activity)))
+                format!("active · {}", fmt_dur(age_of(e.last_activity)))
             } else {
-                "encerrada".to_string()
+                "closed".to_string()
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(color)),
@@ -1338,9 +1338,9 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
                 .map(|r| r.is_clean())
                 .unwrap_or(true);
             let (dot, color, txt) = if clean {
-                ("✓", Color::Green, "veredito (LIMPO)")
+                ("✓", Color::Green, "verdict (CLEAN)")
             } else {
-                ("⚑", Color::Red, "veredito (SUJO)")
+                ("⚑", Color::Red, "verdict (DIRTY)")
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(color)),
@@ -1350,8 +1350,8 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
     }
 }
 
-/// Painel direito: conteúdo do card selecionado (chat da sessão, veredito, ou o
-/// detalhe da task se não há card).
+/// Right panel: content of the selected card (session chat, verdict, or the
+/// task detail if there's no card).
 fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.board_focus == BoardFocus::Chat || app.chat_fullscreen;
     match app.selected_card() {
@@ -1360,8 +1360,8 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
             let id = app.selected_task().map(|t| t.id.clone());
             let lines = verdict_lines(app, id.as_deref());
             let title = match &id {
-                Some(i) => format!("Veredito · {i}"),
-                None => "Veredito".to_string(),
+                Some(i) => format!("Verdict · {i}"),
+                None => "Verdict".to_string(),
             };
             let p = Paragraph::new(lines)
                 .block(panel_focus(&title, focused))
@@ -1369,16 +1369,16 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(p, area);
         }
         None => {
-            // sem card: detalhe da task (ou dica).
+            // no card: task detail (or hint).
             let (title, lines) = match app.selected_task() {
                 Some(t) => (
-                    format!("{} · Enter expande", t.id),
+                    format!("{} · Enter expand", t.id),
                     task_detail_lines(t, area.width.saturating_sub(7)),
                 ),
                 None => (
-                    "Detalhes".to_string(),
+                    "Details".to_string(),
                     vec![Line::from(Span::styled(
-                        "selecione uma task (j/k)",
+                        "select a task (j/k)",
                         Style::default().fg(SUBTLE),
                     ))],
                 ),
@@ -1391,14 +1391,14 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Renderiza o PTY da sessão de índice `i` (ou a mensagem de histórico).
+/// Renders the PTY of session index `i` (or the history message).
 fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
     let hint = if app.pending_prefix {
-        "Ctrl+G… (n/p card · f finaliza · x remove · z zoom · g=Ctrl+G)"
+        "Ctrl+G… (n/p card · f finish · x remove · z zoom · g=Ctrl+G)"
     } else if focused {
-        "digitando no claude · Ctrl+G = comando jaum"
+        "typing in claude · Ctrl+G = jaum command"
     } else {
-        "l/→ entra no chat"
+        "l/→ enter chat"
     };
     let block = if focused {
         panel_tight(&format!("chat — {hint}")).border_style(Style::default().fg(ACCENT))
@@ -1407,7 +1407,7 @@ fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
     };
     match app.sessions.get(i) {
         Some(e) if !e.is_live() => {
-            let msg = "Sessão encerrada (histórico). Sem terminal vivo.\nO contexto fica salvo no claude; abra um novo play/review para continuar.";
+            let msg = "Session closed (history). No live terminal.\nContext is saved in claude; open a new play/review to continue.";
             f.render_widget(
                 Paragraph::new(msg).style(Style::default().fg(SUBTLE)).block(block),
                 area,
@@ -1421,13 +1421,13 @@ fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
     }
 }
 
-/// Corpo do veredito (findings + constraints + critérios) para o painel direito.
+/// Verdict body (findings + constraints + criteria) for the right panel.
 fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     let report = id.and_then(|i| app.load_review(i));
     let mut lines: Vec<Line> = Vec::new();
     let Some(r) = report else {
         lines.push(Line::from(
-            "Sem review ainda. `r` roda o veredito (grava o report); `R` abre o chat de review.",
+            "No review yet. `r` runs the verdict (writes the report); `R` opens the review chat.",
         ));
         return lines;
     };
@@ -1435,14 +1435,14 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![
         Span::raw("is_clean: "),
         if clean {
-            Span::styled("LIMPO", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            Span::styled("CLEAN", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
         } else {
-            Span::styled("SUJO", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            Span::styled("DIRTY", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
         },
     ]));
     lines.push(Line::from(Span::styled(
         format!(
-            "{} bloqueante(s) · {} finding(s) · minor/nit não reprovam",
+            "{} blocking · {} finding(s) · minor/nit don't fail",
             r.blocking_count(),
             r.findings.len()
         ),
@@ -1450,33 +1450,33 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     )));
     if !clean {
         lines.push(Line::from(Span::styled(
-            "`H` envia as pendências para a sessão de play corrigir",
+            "`H` sends the open items to the play session to fix",
             Style::default().fg(SUBTLE),
         )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("Findings", Style::default().add_modifier(Modifier::BOLD))));
     if r.findings.is_empty() {
-        lines.push(Line::from("  (nenhum)"));
+        lines.push(Line::from("  (none)"));
     } else {
         for finding in &r.findings {
             lines.push(Line::from(format!("  {}", finding.render())));
         }
     }
     push_verdict_section(&mut lines, "Constraints (enforce: review)", &r.constraints);
-    push_verdict_section(&mut lines, "Critérios de aceite", &r.criteria);
+    push_verdict_section(&mut lines, "Acceptance criteria", &r.criteria);
     lines
 }
 
-/// Idade de um instante de parede (quanto tempo desde `t`). Tolerante a relógio
-/// que andou para trás (clamp em zero).
+/// Age of a wall-clock instant (time since `t`). Tolerant of a clock that went
+/// backwards (clamped to zero).
 fn age_of(t: std::time::SystemTime) -> std::time::Duration {
     std::time::SystemTime::now()
         .duration_since(t)
         .unwrap_or_default()
 }
 
-/// Duração curta e legível: `8s`, `3m`, `1h2m`.
+/// Short, readable duration: `8s`, `3m`, `1h2m`.
 fn fmt_dur(d: std::time::Duration) -> String {
     let s = d.as_secs();
     if s < 60 {
@@ -1489,8 +1489,8 @@ fn fmt_dur(d: std::time::Duration) -> String {
 }
 
 
-/// Empurra um cabeçalho + os itens de um checklist (constraint/critério) com o
-/// veredito colorido, no detalhe da aba Review.
+/// Pushes a header + the items of a checklist (constraint/criterion) with the
+/// colored verdict, in the Review tab detail.
 fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintResult]) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -1499,7 +1499,7 @@ fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintR
     )));
     if items.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  (nenhum)",
+            "  (none)",
             Style::default().fg(SUBTLE),
         )));
         return;
@@ -1507,8 +1507,8 @@ fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintR
     for c in items {
         let (tag, color) = match c.verdict {
             ConstraintVerdict::Ok => ("OK", Color::Green),
-            ConstraintVerdict::Reprovado => ("REPROVADO", Color::Red),
-            ConstraintVerdict::Pending => ("PENDENTE", Color::Yellow),
+            ConstraintVerdict::Failed => ("FAILED", Color::Red),
+            ConstraintVerdict::Pending => ("PENDING", Color::Yellow),
         };
         lines.push(Line::from(vec![
             Span::styled(format!("  [{tag}] "), Style::default().fg(color)),
@@ -1520,7 +1520,7 @@ fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintR
 fn render_docs(f: &mut Frame, app: &App, area: Rect) {
     if app.docs.is_empty() {
         let p = Paragraph::new(format!(
-            "(nenhum .md em {})\n\nEscreva os docs de design aqui; depois tecle `i` para o ingest.",
+            "(no .md in {})\n\nWrite the design docs here; then press `i` to ingest.",
             app.docs_dir.display()
         ))
         .block(panel("Docs"))
@@ -1547,7 +1547,7 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
         let group = group_of(rel);
         if last_group.as_deref() != Some(group.as_str()) {
             let label = if group.is_empty() {
-                "(raiz)".to_string()
+                "(root)".to_string()
             } else {
                 group.to_uppercase()
             };
@@ -1578,14 +1578,14 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-/// Preview ao vivo (markdown renderizado) do doc selecionado.
+/// Live preview (rendered markdown) of the selected doc.
 fn render_docs_preview(f: &mut Frame, app: &App, area: Rect) {
     let (title, lines) = match app.docs.get(app.docs_selected) {
         Some(rel) => {
             let file = rel.rsplit('/').next().unwrap_or(rel).to_string();
             let content = std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default();
             (
-                format!("{file} · J/K rola · Enter expande"),
+                format!("{file} · J/K scroll · Enter expand"),
                 markdown_lines(&content, area.width.saturating_sub(7)),
             )
         }
@@ -1598,7 +1598,7 @@ fn render_docs_preview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
-/// Cor por categoria de doc (só estética).
+/// Color per doc category (purely aesthetic).
 fn doc_group_color(group: &str) -> Color {
     match group.to_lowercase().as_str() {
         "rfcs" | "rfc" => Color::Cyan,
@@ -1610,14 +1610,14 @@ fn doc_group_color(group: &str) -> Color {
 }
 
 fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
-    // modo input: prompt ativo
+    // input mode: active prompt
     if let Some((kind, buf)) = &app.input {
         let label = match kind {
             InputKind::Defer => "defer",
-            InputKind::Convention => "convenção",
-            InputKind::NewTask => "nova task",
-            InputKind::NewTaskClaude => "task (claude investiga)",
-            InputKind::InitPath => "init (caminho do projeto)",
+            InputKind::Convention => "convention",
+            InputKind::NewTask => "new task",
+            InputKind::NewTaskClaude => "task (claude investigates)",
+            InputKind::InitPath => "init (project path)",
         };
         let line = Line::from(vec![
             Span::styled(
@@ -1630,7 +1630,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(format!(" {buf}")),
             Span::styled("█", Style::default().fg(PINK)),
             Span::styled(
-                "   Enter confirma · Esc cancela",
+                "   Enter confirm · Esc cancel",
                 Style::default().fg(SUBTLE),
             ),
         ]);
@@ -1638,17 +1638,17 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // statusline (esquerda) + key caps (direita)
+    // statusline (left) + key caps (right)
     let keys = [
         ("p", "play"),
         ("r", "review"),
         ("f", "finish"),
-        ("a", "paralelo"),
+        ("a", "parallel"),
         ("S", "setup"),
         ("i", "ingest"),
         ("I", "init"),
         ("N", "claude"),
-        ("q", "sair"),
+        ("q", "quit"),
     ];
     let mut hint: Vec<Span> = Vec::new();
     for (k, label) in keys {
@@ -1667,7 +1667,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(hint)).right_aligned(), cols[1]);
 }
 
-/// Snackbar temporário no canto superior direito (feedback de interação).
+/// Temporary snackbar in the top-right corner (interaction feedback).
 fn render_toast(f: &mut Frame, msg: &str) {
     use ratatui::widgets::Clear;
     let area = f.area();
@@ -1675,7 +1675,7 @@ fn render_toast(f: &mut Frame, msg: &str) {
         .min(area.width.saturating_sub(2))
         .max(14);
     let x = area.right().saturating_sub(w + 1);
-    let y = area.top() + 4; // abaixo da barra de tabs
+    let y = area.top() + 4; // below the tab bar
     let rect = Rect {
         x,
         y,
@@ -1710,22 +1710,22 @@ mod tests {
     }
 
     #[test]
-    fn markdown_remove_marcadores_de_negrito() {
-        // termimad renderiza o negrito e descarta os `**`.
-        let ls = markdown_lines("um **texto** forte", 80);
+    fn markdown_strips_bold_markers() {
+        // termimad renders bold and discards the `**`.
+        let ls = markdown_lines("a **bold** word", 80);
         let s: String = ls.iter().map(plain).collect();
-        assert!(s.contains("texto"));
+        assert!(s.contains("bold"));
         assert!(!s.contains("**"));
     }
 
     #[test]
-    fn markdown_tabela_moldura_completa_e_conteudo() {
+    fn markdown_table_full_border_and_content() {
         let md = "| a | bb |\n|---|----|\n| 1 | 22 |";
         let ls = markdown_lines(md, 80);
         let s: String = ls.iter().map(plain).collect();
         assert!(s.contains("bb"));
         assert!(s.contains("22"));
-        // moldura: topo ╭ + cabeçalho + separador ├ + linha + base ╰.
+        // border: top ╭ + header + separator ├ + row + base ╰.
         assert_eq!(ls.len(), 5);
         assert!(plain(&ls[0]).starts_with('╭'));
         assert!(plain(&ls[0]).contains('┬'));
@@ -1734,10 +1734,10 @@ mod tests {
     }
 
     #[test]
-    fn markdown_tabela_larga_faz_wrap_por_celula() {
-        let md = "| col |\n|-----|\n| uma frase bem longa que nao cabe |";
+    fn markdown_wide_table_wraps_per_cell() {
+        let md = "| col |\n|-----|\n| a very long phrase that does not fit |";
         let ls = markdown_lines(md, 20);
-        // topo + cabeçalho + separador + várias linhas da célula + base.
+        // top + header + separator + several cell lines + base.
         assert!(ls.len() > 5);
         assert!(plain(ls.first().unwrap()).starts_with('╭'));
         assert!(plain(ls.last().unwrap()).starts_with('╰'));
@@ -1748,23 +1748,23 @@ mod tests {
     }
 
     #[test]
-    fn encode_sgr_scroll_e_click() {
-        // roda pra cima: botão 64, sufixo M
+    fn encode_sgr_scroll_and_click() {
+        // scroll up: button 64, suffix M
         assert_eq!(
             encode_mouse_sgr(&ev(MouseEventKind::ScrollUp), 5, 9).unwrap(),
             b"\x1b[<64;5;9M".to_vec()
         );
-        // press do esquerdo: cb 0, M
+        // left press: cb 0, M
         assert_eq!(
             encode_mouse_sgr(&ev(MouseEventKind::Down(MouseButton::Left)), 2, 3).unwrap(),
             b"\x1b[<0;2;3M".to_vec()
         );
-        // release: mesmo cb, sufixo m
+        // release: same cb, suffix m
         assert_eq!(
             encode_mouse_sgr(&ev(MouseEventKind::Up(MouseButton::Left)), 2, 3).unwrap(),
             b"\x1b[<0;2;3m".to_vec()
         );
-        // movimento puro não vira nada
+        // pure movement encodes to nothing
         assert!(encode_mouse_sgr(&ev(MouseEventKind::Moved), 1, 1).is_none());
     }
 }

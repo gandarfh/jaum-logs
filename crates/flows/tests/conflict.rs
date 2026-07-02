@@ -25,7 +25,7 @@ impl Drop for TmpDir {
 
 fn task_md(id: &str, status: &str, repo: &str, branch: &str) -> String {
     format!(
-        "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: {repo}\n    pr: 0\n    branch: {branch}\n---\n\n## Objetivo\nx\n"
+        "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: {repo}\n    pr: 0\n    branch: {branch}\n---\n\n## Objective\nx\n"
     )
 }
 
@@ -43,7 +43,7 @@ fn store_with(dir: &TmpDir, tasks: &[(&str, &str, &str, &str)]) -> Store {
 }
 
 #[test]
-fn detect_overlap_sinaliza_wip_no_mesmo_repo() {
+fn detect_overlap_flags_wip_in_same_repo() {
     let dir = TmpDir::new("overlap");
     let store = store_with(
         &dir,
@@ -64,13 +64,13 @@ fn detect_overlap_sinaliza_wip_no_mesmo_repo() {
 }
 
 #[test]
-fn detect_overlap_ignora_nao_wip() {
+fn detect_overlap_ignores_non_wip() {
     let dir = TmpDir::new("overlap-status");
     let store = store_with(
         &dir,
         &[
             ("TASK-001", "wip", "org/parser", "feat/a"),
-            ("TASK-002", "review", "org/parser", "feat/b"), // não é wip
+            ("TASK-002", "review", "org/parser", "feat/b"), // not wip
         ],
     );
     let conflict = Conflict::new(&store);
@@ -78,7 +78,7 @@ fn detect_overlap_ignora_nao_wip() {
 }
 
 #[test]
-fn active_sessions_lista_wip() {
+fn active_sessions_lists_wip() {
     let dir = TmpDir::new("active");
     let store = store_with(
         &dir,
@@ -96,7 +96,7 @@ fn active_sessions_lista_wip() {
 }
 
 #[test]
-fn lock_acquire_exclui_outra_task_e_release_libera() {
+fn lock_acquire_excludes_other_task_and_release_frees() {
     let dir = TmpDir::new("lock");
     let store = store_with(
         &dir,
@@ -113,15 +113,15 @@ fn lock_acquire_exclui_outra_task_e_release_libera() {
         vec![("port:8080".to_string(), "TASK-001".to_string())]
     );
 
-    // outra task não pega o mesmo recurso
+    // another task can't grab the same resource
     let err = conflict.lock_acquire("TASK-002", "port:8080").unwrap_err();
-    assert!(err.to_string().contains("já está travado por TASK-001"));
+    assert!(err.to_string().contains("is already locked by TASK-001"));
 
-    // re-acquire pela mesma task é idempotente
+    // re-acquire by the same task is idempotent
     conflict.lock_acquire("TASK-001", "port:8080").unwrap();
     assert_eq!(conflict.held_locks().unwrap().len(), 1);
 
-    // release libera para a outra
+    // release frees it for the other task
     conflict.lock_release("TASK-001", "port:8080").unwrap();
     assert!(conflict.held_locks().unwrap().is_empty());
     conflict.lock_acquire("TASK-002", "port:8080").unwrap();

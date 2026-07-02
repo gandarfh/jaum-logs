@@ -1,6 +1,6 @@
-//! Adapters de borda do jaum-logs: shell-out para `git` e `gh`.
-//! Mantêm o core tool-agnóstico. Worktree e `gh` não têm crate boa, então
-//! são acionados via `std::process` (sem git2 para worktree).
+//! jaum-logs edge adapters: shell-out to `git` and `gh`.
+//! They keep the core tool-agnostic. Worktree and `gh` lack a good crate, so
+//! they're driven via `std::process` (no git2 for worktree).
 
 pub mod executor;
 pub mod gh;

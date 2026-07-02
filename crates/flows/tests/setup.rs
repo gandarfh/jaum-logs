@@ -36,33 +36,33 @@ impl Executor for FakeExec {
 }
 
 #[test]
-fn branch_leaks_id_pega_padrao_da_task() {
+fn branch_leaks_id_catches_task_pattern() {
     assert!(branch_leaks_id("feat/task-001"));
     assert!(branch_leaks_id("TASK-12-fix"));
     assert!(branch_leaks_id("chore/refactor-task-3"));
-    // branches que descrevem o trabalho não disparam
+    // branches that describe the work don't trigger
     assert!(!branch_leaks_id("feat/markdown-deck-parser"));
-    assert!(!branch_leaks_id("fix/task-runner-timeout")); // "task-runner", sem dígito
+    assert!(!branch_leaks_id("fix/task-runner-timeout")); // "task-runner", no digit
 }
 
 #[test]
-fn is_template_detecta_vazio_e_scaffold() {
+fn is_template_detects_empty_and_scaffold() {
     assert!(is_template(""));
     assert!(is_template(
-        "# Convenções\n\nUma por linha (use `-`).\n\n- \n"
+        "# Conventions\n\nOne per line (use `-`).\n\n- \n"
     ));
-    assert!(!is_template("# Convenções\n\n- não referenciar nº de RFC em comentários\n"));
+    assert!(!is_template("# Conventions\n\n- do not reference RFC numbers in comments\n"));
 }
 
 #[test]
-fn build_prompt_traz_tasks_repos_e_setup_obrigatorio() {
+fn build_prompt_brings_tasks_repos_and_required_setup() {
     let dir = TmpDir::new("prompt");
     let backlog = dir.0.join("backlog");
     fs::create_dir_all(&backlog).unwrap();
-    // task sem prs (como nasce do ingest)
+    // task with no prs (as it's born from ingest)
     fs::write(
         backlog.join("TASK-001.md"),
-        "---\nid: TASK-001\ntype: impl\nstatus: backlog\nrfcs: [RFC-0001]\n---\n\n## Objetivo\nimplementar o parser\n",
+        "---\nid: TASK-001\ntype: impl\nstatus: backlog\nrfcs: [RFC-0001]\n---\n\n## Objective\nimplement the parser\n",
     )
     .unwrap();
     let store = Store::new(&backlog);
@@ -71,42 +71,42 @@ fn build_prompt_traz_tasks_repos_e_setup_obrigatorio() {
     let setup = Setup::new(&store, &FakeExec, dir.0.clone(), repos, "");
     let p = setup.build_prompt().unwrap();
 
-    assert!(p.contains("Contrato")); // declara o contrato positivamente
-    assert!(p.contains("Seu trabalho"));
+    assert!(p.contains("Contract")); // states the contract positively
+    assert!(p.contains("Your work"));
     assert!(p.contains("TASK-001"));
-    assert!(p.contains("SEM repo")); // sinaliza que falta vincular
-    assert!(p.contains("org/app")); // slug disponível
-    assert!(p.contains("template")); // conventions vazio
-    assert!(p.contains("prs")); // schema de vínculo
+    assert!(p.contains("NO repo")); // flags the missing link
+    assert!(p.contains("org/app")); // available slug
+    assert!(p.contains("template")); // conventions empty
+    assert!(p.contains("prs")); // link schema
 }
 
 #[test]
-fn build_prompt_sinaliza_branch_com_id_vazado() {
+fn build_prompt_flags_branch_with_leaked_id() {
     let dir = TmpDir::new("leak");
     let backlog = dir.0.join("backlog");
     fs::create_dir_all(&backlog).unwrap();
     fs::write(
         backlog.join("TASK-001.md"),
-        "---\nid: TASK-001\ntype: impl\nstatus: backlog\nprs:\n  - repo: org/app\n    pr: 0\n    branch: feat/task-001\n---\n\n## Objetivo\nx\n",
+        "---\nid: TASK-001\ntype: impl\nstatus: backlog\nprs:\n  - repo: org/app\n    pr: 0\n    branch: feat/task-001\n---\n\n## Objective\nx\n",
     )
     .unwrap();
     let store = Store::new(&backlog);
     let repos = HashMap::from([("org/app".to_string(), dir.0.join("repo"))]);
     let setup = Setup::new(&store, &FakeExec, dir.0.clone(), repos, "");
     let p = setup.build_prompt().unwrap();
-    assert!(p.contains("vaza o id"));
+    assert!(p.contains("leaks the id"));
 }
 
 #[test]
-fn start_abre_sessao_interativa() {
+fn start_opens_interactive_session() {
     let dir = TmpDir::new("start");
     let backlog = dir.0.join("backlog");
     fs::create_dir_all(&backlog).unwrap();
     let store = Store::new(&backlog);
     let setup = Setup::new(&store, &FakeExec, dir.0.clone(), HashMap::new(), "");
-    // não deve panicar montando a sessão (cat como executor de mentira)
+    // must not panic building the session (cat as a fake executor)
     let (mut s, uuid) = setup.start().unwrap();
-    assert!(!uuid.is_empty(), "start deve devolver um session-id");
+    assert!(!uuid.is_empty(), "start must return a session-id");
     s.write_input(&[0x04]).unwrap();
     assert!(s.wait().unwrap());
 }

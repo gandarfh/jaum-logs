@@ -7,7 +7,7 @@ mod config;
 use config::{Config, Project, RepoMap, slug_from_url};
 
 #[test]
-fn slug_from_url_ssh_e_https() {
+fn slug_from_url_ssh_and_https() {
     assert_eq!(
         slug_from_url("git@github.com:tono-lang/parser.git").as_deref(),
         Some("tono-lang/parser")
@@ -23,7 +23,7 @@ fn slug_from_url_ssh_e_https() {
 }
 
 #[test]
-fn repo_map_constroi_slug_para_path() {
+fn repo_map_builds_slug_to_path() {
     let project = Project {
         name: "x".into(),
         root: PathBuf::from("/p"),

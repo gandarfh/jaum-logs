@@ -4,9 +4,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-/// Adapter de `git` via shell-out. Opera sobre o diretório local de um
-/// repositório (`repo`). O mapeamento slug "owner/name" -> caminho local é
-/// responsabilidade de quem orquestra (play), não deste adapter.
+/// `git` adapter via shell-out. Operates on a repository's local directory
+/// (`repo`). Mapping the "owner/name" slug -> local path is the orchestrator's
+/// (play's) responsibility, not this adapter's.
 pub struct Git {
     bin: String,
 }
@@ -24,12 +24,12 @@ impl Git {
         }
     }
 
-    /// Permite apontar para um binário alternativo (usado em testes).
+    /// Points to an alternative binary (used in tests).
     pub fn with_bin(bin: impl Into<String>) -> Self {
         Self { bin: bin.into() }
     }
 
-    /// Cria a branch a partir do HEAD atual. Idempotente: se já existe, no-op.
+    /// Creates the branch from the current HEAD. Idempotent: no-op if it exists.
     pub fn branch_create(&self, repo: &Path, branch: &str) -> Result<()> {
         if self.branch_exists(repo, branch)? {
             return Ok(());
@@ -38,10 +38,10 @@ impl Git {
         Ok(())
     }
 
-    /// Cria uma worktree para `branch` (criando a branch se ainda não existir).
-    /// Devolve o caminho da worktree. Idempotente: se a worktree já existe no
-    /// caminho determinístico, reusa (ex.: re-play de uma task wip cuja worktree
-    /// foi preservada num shutdown anterior).
+    /// Creates a worktree for `branch` (creating the branch if it doesn't exist
+    /// yet). Returns the worktree path. Idempotent: if the worktree already
+    /// exists at the deterministic path, reuse it (e.g. re-playing a wip task
+    /// whose worktree was preserved by an earlier shutdown).
     pub fn worktree_add(&self, repo: &Path, branch: &str) -> Result<PathBuf> {
         let path = self.worktree_path(repo, branch);
         if path.exists() {
@@ -49,7 +49,7 @@ impl Git {
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("criando diretório de worktrees {}", parent.display()))?;
+                .with_context(|| format!("creating worktrees directory {}", parent.display()))?;
         }
         let path_str = path.to_string_lossy().into_owned();
         if self.branch_exists(repo, branch)? {
@@ -60,8 +60,8 @@ impl Git {
         Ok(path)
     }
 
-    /// Remove a worktree de `branch`. Não usa `--force`: worktree suja falha,
-    /// para não descartar trabalho silenciosamente.
+    /// Removes `branch`'s worktree. Doesn't use `--force`: a dirty worktree
+    /// fails, so we don't discard work silently.
     pub fn worktree_remove(&self, repo: &Path, branch: &str) -> Result<()> {
         let path = self.worktree_path(repo, branch);
         let path_str = path.to_string_lossy().into_owned();
@@ -69,15 +69,15 @@ impl Git {
         Ok(())
     }
 
-    /// Diff de `branch` contra a branch default (three-dot: mudanças desde a
-    /// divergência). É o diff do PR, usado pelo review.
+    /// Diff of `branch` against the default branch (three-dot: changes since the
+    /// divergence). This is the PR diff, used by review.
     pub fn diff(&self, repo: &Path, branch: &str) -> Result<String> {
         let base = self.default_branch(repo)?;
         let spec = format!("{base}...{branch}");
         self.run(repo, &["diff", &spec])
     }
 
-    // --- internos ----------------------------------------------------------
+    // --- internals ---------------------------------------------------------
 
     fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool> {
         let out = Command::new(&self.bin)
@@ -86,11 +86,11 @@ impl Git {
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{branch}"))
             .output()
-            .with_context(|| format!("executando {} rev-parse", self.bin))?;
+            .with_context(|| format!("running {} rev-parse", self.bin))?;
         Ok(out.status.success())
     }
 
-    /// Detecta a branch default: `origin/HEAD`, senão `main`, senão `master`.
+    /// Detects the default branch: `origin/HEAD`, else `main`, else `master`.
     fn default_branch(&self, repo: &Path) -> Result<String> {
         if let Ok(out) = self.run(
             repo,
@@ -110,13 +110,13 @@ impl Git {
             }
         }
         bail!(
-            "não foi possível detectar a branch default de {}",
+            "could not detect the default branch of {}",
             repo.display()
         )
     }
 
-    /// Caminho da worktree: irmão do repo, fora da árvore de trabalho principal.
-    /// `feat/task-012` vira `feat-task-012` para ser um nome de diretório válido.
+    /// Worktree path: sibling of the repo, outside the main working tree.
+    /// `feat/task-012` becomes `feat-task-012` to be a valid directory name.
     fn worktree_path(&self, repo: &Path, branch: &str) -> PathBuf {
         let safe = branch.replace('/', "-");
         let name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
@@ -129,10 +129,10 @@ impl Git {
             .arg(repo)
             .args(args)
             .output()
-            .with_context(|| format!("executando {} {args:?}", self.bin))?;
+            .with_context(|| format!("running {} {args:?}", self.bin))?;
         if !out.status.success() {
             bail!(
-                "{} {args:?} falhou: {}",
+                "{} {args:?} failed: {}",
                 self.bin,
                 String::from_utf8_lossy(&out.stderr).trim()
             );

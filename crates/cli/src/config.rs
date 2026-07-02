@@ -1,5 +1,5 @@
-//! Config global do jaum em `~/jaum/config.toml`: lista de projetos, cada um
-//! com seu `.backlog/`, `docs/` e N repos (slug -> caminho local).
+//! Global jaum config in `~/jaum/config.toml`: list of projects, each with its
+//! own `.backlog/`, `docs/` and N repos (slug -> local path).
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,19 +9,19 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// Um repo de um projeto: slug "owner/name" e caminho local.
+/// A project's repo: "owner/name" slug and local path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoMap {
     pub slug: String,
     pub path: PathBuf,
 }
 
-/// Um projeto. Tudo do jaum é EXTERNO (`~/jaum/<nome>/...`); `root` é a pasta do
-/// projeto (só código), usada para reconhecer o cwd e detectar os repos.
+/// A project. Everything jaum owns is EXTERNAL (`~/jaum/<name>/...`); `root` is the
+/// project folder (code only), used to recognize the cwd and detect repos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
-    /// Pasta do projeto (onde o `jaum init` rodou). O jaum nunca escreve aqui.
+    /// Project folder (where `jaum init` ran). jaum never writes here.
     #[serde(default)]
     pub root: PathBuf,
     pub backlog: PathBuf,
@@ -34,7 +34,7 @@ pub struct Project {
 }
 
 impl Project {
-    /// Mapa slug -> path para alimentar Play/Review.
+    /// slug -> path map to feed Play/Review.
     pub fn repo_map(&self) -> HashMap<String, PathBuf> {
         self.repos
             .iter()
@@ -42,7 +42,7 @@ impl Project {
             .collect()
     }
 
-    /// Diretório externo do projeto no jaum (`~/jaum/<nome>`).
+    /// Project's external directory in jaum (`~/jaum/<name>`).
     pub fn home(&self) -> PathBuf {
         self.backlog
             .parent()
@@ -50,60 +50,60 @@ impl Project {
             .unwrap_or_else(|| self.backlog.clone())
     }
 
-    /// Caminho do `conventions.md` (boas práticas do projeto, externo).
+    /// Path of `conventions.md` (project conventions, external).
     pub fn conventions_path(&self) -> PathBuf {
         self.home().join("conventions.md")
     }
 }
 
-/// Template inicial do `conventions.md`.
-pub const CONVENTIONS_TEMPLATE: &str = "# Convenções do projeto\n\nBoas práticas injetadas em toda sessão de play e checadas no review.\nUma por linha (use `-`). Edite na TUI (`e`) ou capture na hora (`c`).\n\n- \n";
+/// Initial `conventions.md` template.
+pub const CONVENTIONS_TEMPLATE: &str = "# Project conventions\n\nGuidelines injected into every play session and checked at review.\nOne per line (use `-`). Edit in the TUI (`e`) or capture on the fly (`c`).\n\n- \n";
 
-/// Config global: todos os projetos conhecidos.
+/// Global config: all known projects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub projects: Vec<Project>,
 }
 
-/// Diretório base do jaum: `~/jaum`.
+/// jaum base directory: `~/jaum`.
 pub fn jaum_home() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("variável HOME não definida")?;
+    let home = std::env::var_os("HOME").context("HOME variable not set")?;
     Ok(PathBuf::from(home).join("jaum"))
 }
 
 impl Config {
-    /// Caminho do arquivo de config: `~/jaum/config.toml`.
+    /// Config file path: `~/jaum/config.toml`.
     pub fn path() -> Result<PathBuf> {
         Ok(jaum_home()?.join("config.toml"))
     }
 
-    /// Carrega a config (vazia se o arquivo ainda não existe).
+    /// Load the config (empty if the file does not exist yet).
     pub fn load() -> Result<Config> {
         let path = Self::path()?;
         if !path.exists() {
             return Ok(Config::default());
         }
-        let raw = fs::read_to_string(&path).with_context(|| format!("lendo {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("parseando {}", path.display()))
+        let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
     }
 
-    /// Grava a config em `~/jaum/config.toml`.
+    /// Write the config to `~/jaum/config.toml`.
     pub fn save(&self) -> Result<()> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("criando {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let raw = toml::to_string_pretty(self).context("serializando config")?;
-        fs::write(&path, raw).with_context(|| format!("gravando {}", path.display()))
+        let raw = toml::to_string_pretty(self).context("serializing config")?;
+        fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))
     }
 
     pub fn find(&self, name: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.name == name)
     }
 
-    /// Projeto correspondente ao diretório atual: por `root` (layout externo);
-    /// fallback para o layout antigo (backlog dentro do projeto).
+    /// Project matching the current directory: by `root` (external layout);
+    /// falls back to the old layout (backlog inside the project).
     pub fn project_for_cwd(&self, cwd: &Path) -> Option<&Project> {
         let cwd = fs::canonicalize(cwd).ok()?;
         self.projects.iter().find(|p| {
@@ -117,26 +117,26 @@ impl Config {
     }
 }
 
-/// Scaffolding EXTERNO: cria `~/jaum/<nome>/{docs,backlog,work}`, detecta os
-/// repos dentro de `root` e registra o projeto. NÃO escreve nada no `root`.
+/// EXTERNAL scaffolding: creates `~/jaum/<name>/{docs,backlog,work}`, detects the
+/// repos inside `root` and registers the project. Writes NOTHING under `root`.
 pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> {
-    let root = fs::canonicalize(root).with_context(|| format!("resolvendo {}", root.display()))?;
+    let root = fs::canonicalize(root).with_context(|| format!("resolving {}", root.display()))?;
     let name = root
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("projeto")
+        .unwrap_or("project")
         .to_string();
 
     let home = jaum_home()?.join(&name);
     for sub in ["docs", "backlog", "work"] {
         fs::create_dir_all(home.join(sub))
-            .with_context(|| format!("criando {}", home.join(sub).display()))?;
+            .with_context(|| format!("creating {}", home.join(sub).display()))?;
     }
-    // conventions.md (boas práticas do projeto) — não sobrescreve se já existe
+    // conventions.md (project conventions) — do not overwrite if it exists
     let conv = home.join("conventions.md");
     if !conv.exists() {
         fs::write(&conv, CONVENTIONS_TEMPLATE)
-            .with_context(|| format!("criando {}", conv.display()))?;
+            .with_context(|| format!("creating {}", conv.display()))?;
     }
 
     let repo_dirs = if explicit_repos.is_empty() {
@@ -166,7 +166,7 @@ pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> 
 
     let mut cfg = Config::load()?;
     if cfg.find(&name).is_some() {
-        // substitui a entrada de mesmo nome
+        // replace the entry with the same name
         cfg.projects.retain(|p| p.name != name);
     }
     cfg.projects.push(project.clone());
@@ -174,13 +174,13 @@ pub fn init_project(root: &Path, explicit_repos: &[PathBuf]) -> Result<Project> 
     Ok(project)
 }
 
-/// Detecta repos git DENTRO do projeto: o próprio `root` e seus subdiretórios
-/// diretos. NÃO varre irmãos (a pasta-pai), para não puxar projetos vizinhos.
-/// Ignora worktrees (onde `.git` é um arquivo, não um diretório).
+/// Detects git repos INSIDE the project: `root` itself and its direct
+/// subdirectories. Does NOT scan siblings (the parent folder), to avoid pulling in
+/// neighboring projects. Ignores worktrees (where `.git` is a file, not a directory).
 fn detect_repos(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut consider = |dir: &Path| {
-        // só clones de verdade: `.git` é um diretório (worktree tem `.git` arquivo)
+        // real clones only: `.git` is a directory (a worktree has a `.git` file)
         if dir.join(".git").is_dir()
             && let Ok(canon) = fs::canonicalize(dir)
             && !found.contains(&canon)
@@ -200,7 +200,7 @@ fn detect_repos(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Slug "owner/name" pelo remote origin; fallback para o nome da pasta.
+/// "owner/name" slug from the origin remote; falls back to the folder name.
 fn repo_slug(repo: &Path) -> String {
     if let Ok(out) = Command::new("git")
         .arg("-C")
@@ -220,10 +220,10 @@ fn repo_slug(repo: &Path) -> String {
         .to_string()
 }
 
-/// Extrai "owner/name" de uma URL git (ssh ou https).
+/// Extracts "owner/name" from a git URL (ssh or https).
 pub(crate) fn slug_from_url(url: &str) -> Option<String> {
     let s = url.trim_end_matches(".git");
-    // git@host:owner/name  ou  https://host/owner/name
+    // git@host:owner/name  or  https://host/owner/name
     let tail = s.rsplit(':').next()?;
     let parts: Vec<&str> = tail.rsplit('/').take(2).collect();
     if parts.len() == 2 {
@@ -232,10 +232,10 @@ pub(crate) fn slug_from_url(url: &str) -> Option<String> {
     None
 }
 
-/// Garante que exista ao menos um projeto utilizável; senão, instrui o init.
+/// Ensures at least one usable project exists; otherwise points to init.
 pub fn ensure_usable(cfg: &Config) -> Result<()> {
     if cfg.projects.is_empty() {
-        bail!("nenhum projeto registrado. Rode `jaum init` na raiz de um projeto.");
+        bail!("no project registered. Run `jaum init` at a project root.");
     }
     Ok(())
 }

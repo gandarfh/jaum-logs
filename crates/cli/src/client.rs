@@ -1,6 +1,6 @@
-//! Cliente TUI: render puro. Conecta no daemon, encaminha teclas/resize e desenha
-//! os frames que chegam. Toda a lógica de estado vive no daemon — aqui só se pinta
-//! o `Buffer` recebido. `q`/`Ctrl+C` viram detach (o daemon manda `Detach`).
+//! TUI client: pure render. Connects to the daemon, forwards keys/resize and draws
+//! incoming frames. All state logic lives in the daemon — here we only paint the
+//! received `Buffer`. `q`/`Ctrl+C` become detach (the daemon sends `Detach`).
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
@@ -20,14 +20,14 @@ use ratatui::layout::{Position, Rect};
 use crate::backend::apply_cells;
 use crate::protocol::{ClientMsg, ServerMsg, read_msg, write_msg};
 
-/// Eventos vindos da thread leitora do socket para o loop principal.
+/// Events from the socket reader thread to the main loop.
 enum SrvEvent {
     Redraw,
     Detach,
     Editor(String),
 }
 
-/// Conecta no daemon e roda o loop do cliente até detach.
+/// Connect to the daemon and run the client loop until detach.
 pub fn run(sock: &Path) -> Result<()> {
     let mut write_half = UnixStream::connect(sock)?;
     let read_half = write_half.try_clone()?;
@@ -36,7 +36,7 @@ pub fn run(sock: &Path) -> Result<()> {
     let (stx, srx) = channel::<SrvEvent>();
     spawn_reader(read_half, screen.clone(), stx);
 
-    // handshake: manda o tamanho atual para o daemon renderizar e devolver um full.
+    // handshake: send the current size so the daemon renders and returns a full frame.
     let (cols, rows) = crossterm::terminal::size()?;
     write_msg(&mut write_half, &ClientMsg::Resize { cols, rows })?;
 
@@ -48,7 +48,7 @@ pub fn run(sock: &Path) -> Result<()> {
     res
 }
 
-/// Loop principal: aplica eventos do servidor, redesenha e encaminha input.
+/// Main loop: apply server events, redraw, and forward input.
 fn client_loop(
     terminal: &mut DefaultTerminal,
     write_half: &mut UnixStream,
@@ -57,7 +57,7 @@ fn client_loop(
 ) -> Result<()> {
     let mut needs_redraw = false;
     loop {
-        // 1) eventos do servidor
+        // 1) server events
         while let Ok(ev) = srx.try_recv() {
             match ev {
                 SrvEvent::Redraw => needs_redraw = true,
@@ -69,14 +69,14 @@ fn client_loop(
             }
         }
 
-        // 2) redesenha a partir do buffer compartilhado
+        // 2) redraw from the shared buffer
         if needs_redraw {
             let buf = screen.lock().unwrap().clone();
             terminal.draw(|f| blit(f, &buf))?;
             needs_redraw = false;
         }
 
-        // 3) input local -> daemon
+        // 3) local input -> daemon
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
@@ -94,8 +94,8 @@ fn client_loop(
     }
 }
 
-/// Suspende a TUI, roda o `$EDITOR` no caminho pedido e retoma, pedindo um frame
-/// completo de volta. É o único passo interativo delegado ao cliente.
+/// Suspend the TUI, run `$EDITOR` on the requested path and resume, asking for a
+/// full frame back. This is the only interactive step delegated to the client.
 fn run_editor(terminal: &mut DefaultTerminal, write_half: &mut UnixStream, path: &str) -> Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     ratatui::restore();
@@ -108,7 +108,7 @@ fn run_editor(terminal: &mut DefaultTerminal, write_half: &mut UnixStream, path:
     Ok(())
 }
 
-/// Copia o buffer do daemon no frame do terminal (recorta na sobreposição).
+/// Copy the daemon's buffer into the terminal frame (clipped to the overlap).
 fn blit(f: &mut Frame, src: &Buffer) {
     let dst = f.buffer_mut();
     let (da, sa) = (dst.area, src.area);
@@ -125,7 +125,7 @@ fn blit(f: &mut Frame, src: &Buffer) {
     }
 }
 
-/// Thread leitora: aplica frames no buffer compartilhado e sinaliza o loop.
+/// Reader thread: applies frames to the shared buffer and signals the loop.
 fn spawn_reader(read_half: UnixStream, screen: Arc<Mutex<Buffer>>, stx: Sender<SrvEvent>) {
     thread::spawn(move || {
         let mut r = BufReader::new(read_half);

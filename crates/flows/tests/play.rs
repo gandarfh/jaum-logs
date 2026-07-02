@@ -38,19 +38,19 @@ prs:
     pr: 0
     branch: feat/task-001
 constraints:
-  - text: "nao tocar em src/legacy/"
+  - text: "do not touch src/legacy/"
     enforce: hook
-  - text: "nao rodar migration"
+  - text: "do not run migration"
     enforce: hook
-  - text: "manter API estavel"
+  - text: "keep API stable"
     enforce: review
 ---
 
-## Objetivo
-Implementar enum aberto.
+## Objective
+Implement an open enum.
 
-## Criterio de aceite
-- [ ] feito
+## Acceptance criteria
+- [ ] done
 "#;
 
 fn task() -> Task {
@@ -60,63 +60,63 @@ fn task() -> Task {
     store.get("TASK-001").unwrap()
 }
 
-// --- partes puras ---------------------------------------------------------
+// --- pure parts -----------------------------------------------------------
 
 #[test]
-fn build_prompt_inclui_objetivo_contexto_e_constraints() {
+fn build_prompt_includes_objective_context_and_constraints() {
     let p = build_prompt(&task(), "");
-    assert!(p.contains("Implementar enum aberto"));
+    assert!(p.contains("Implement an open enum"));
     assert!(p.contains("RFC-003"));
     assert!(p.contains("ADR-011"));
-    assert!(p.contains("manter API estavel")); // enforce: review aparece no corpo
-    assert!(p.contains("NUNCA faça merge"));
+    assert!(p.contains("keep API stable")); // enforce: review shows up in the body
+    assert!(p.contains("NEVER merge"));
 }
 
 #[test]
-fn guard_flags_bloqueia_merge_e_injeta_constraints() {
+fn guard_flags_blocks_merge_and_injects_constraints() {
     let f = guard_flags(&task(), "");
     assert!(f.disallowed_tools.iter().any(|t| t.contains("git merge")));
     assert!(f.disallowed_tools.iter().any(|t| t.contains("gh pr merge")));
     let sys = f.append_system_prompt.unwrap();
-    assert!(sys.contains("nao tocar em src/legacy/"));
-    assert!(sys.contains("manter API estavel"));
+    assert!(sys.contains("do not touch src/legacy/"));
+    assert!(sys.contains("keep API stable"));
     assert_eq!(f.model.as_deref(), Some(jaum_flows::AGENT_MODEL));
 }
 
 #[test]
-fn reinjection_inclui_convencoes_do_projeto() {
-    let t = reinjection_text(&task(), "- não referenciar nº de RFC em comentários");
-    assert!(t.contains("Convenções do projeto"));
-    assert!(t.contains("não referenciar nº de RFC"));
-    // e ainda traz as constraints da task
-    assert!(t.contains("nao rodar migration"));
+fn reinjection_includes_project_conventions() {
+    let t = reinjection_text(&task(), "- do not reference RFC numbers in comments");
+    assert!(t.contains("Project conventions"));
+    assert!(t.contains("do not reference RFC numbers"));
+    // and still carries the task constraints
+    assert!(t.contains("do not run migration"));
 }
 
 #[test]
-fn reinjection_separa_mecanicas_de_semanticas() {
+fn reinjection_separates_mechanical_from_semantic() {
     let t = reinjection_text(&task(), "");
-    assert!(t.contains("Bloqueadas mecanicamente"));
-    assert!(t.contains("nao rodar migration"));
-    assert!(t.contains("Sua responsabilidade"));
-    assert!(t.contains("manter API estavel"));
+    assert!(t.contains("Mechanically blocked"));
+    assert!(t.contains("do not run migration"));
+    assert!(t.contains("Your responsibility"));
+    assert!(t.contains("keep API stable"));
 }
 
 #[test]
-fn reinjection_define_convencoes_de_saida_do_repo() {
+fn reinjection_defines_repo_output_conventions() {
     let t = reinjection_text(&task(), "");
-    assert!(t.contains("INGLÊS")); // PR/commits em inglês
-    assert!(t.contains("travessões")); // sem travessões, estilo pragmático
-    assert!(t.contains("Generated with Claude Code")); // proíbe a atribuição de IA
+    assert!(t.contains("ENGLISH")); // PR/commits in English
+    assert!(t.contains("em dashes")); // no em dashes, pragmatic style
+    assert!(t.contains("Generated with Claude Code")); // forbids AI attribution
 }
 
 #[test]
-fn settings_desliga_co_author_de_ia() {
+fn settings_disables_ai_co_author() {
     use std::path::Path;
     let s = jaum_flows::play::settings_json(Path::new("/p/pre.sh"), Path::new("/p/re.txt"));
     assert_eq!(s["includeCoAuthoredBy"], serde_json::json!(false));
 }
 
-// --- execução real do PreToolUse hook (patch 1) ---------------------------
+// --- real PreToolUse hook execution ---------------------------------------
 
 fn run_hook(script: &str, stdin_json: &str) -> String {
     let dir = TmpDir::new("hook");
@@ -140,7 +140,7 @@ fn run_hook(script: &str, stdin_json: &str) -> String {
 }
 
 #[test]
-fn hook_bloqueia_merge_sempre() {
+fn hook_blocks_merge_always() {
     let s = pretool_hook_script(&task());
     let out = run_hook(
         &s,
@@ -154,7 +154,7 @@ fn hook_bloqueia_merge_sempre() {
 }
 
 #[test]
-fn hook_bloqueia_constraint_de_caminho() {
+fn hook_blocks_path_constraint() {
     let s = pretool_hook_script(&task());
     let out = run_hook(
         &s,
@@ -162,13 +162,13 @@ fn hook_bloqueia_constraint_de_caminho() {
     );
     assert!(
         out.contains("deny"),
-        "deveria bloquear src/legacy/; out: {out}"
+        "should block src/legacy/; out: {out}"
     );
     assert!(out.contains("src/legacy/"));
 }
 
 #[test]
-fn hook_bloqueia_constraint_de_keyword() {
+fn hook_blocks_keyword_constraint() {
     let s = pretool_hook_script(&task());
     let out = run_hook(
         &s,
@@ -176,12 +176,12 @@ fn hook_bloqueia_constraint_de_keyword() {
     );
     assert!(
         out.contains("deny"),
-        "deveria bloquear migration; out: {out}"
+        "should block migration; out: {out}"
     );
 }
 
 #[test]
-fn hook_libera_acao_que_nao_casa_constraint() {
+fn hook_allows_action_that_matches_no_constraint() {
     let s = pretool_hook_script(&task());
     let out = run_hook(
         &s,
@@ -189,13 +189,13 @@ fn hook_libera_acao_que_nao_casa_constraint() {
     );
     assert!(
         out.trim().is_empty(),
-        "não deveria bloquear src/main.rs; out: {out}"
+        "should not block src/main.rs; out: {out}"
     );
 }
 
 #[test]
-fn hook_nao_bloqueia_constraint_enforce_review() {
-    // "manter API estavel" é enforce: review -> hook NÃO pega (é detectivo no review)
+fn hook_does_not_block_enforce_review_constraint() {
+    // "keep API stable" is enforce: review -> hook does NOT catch it (detected in review)
     let s = pretool_hook_script(&task());
     let out = run_hook(
         &s,
@@ -203,11 +203,11 @@ fn hook_nao_bloqueia_constraint_enforce_review() {
     );
     assert!(
         out.trim().is_empty(),
-        "review constraints não entram no hook; out: {out}"
+        "review constraints don't go through the hook; out: {out}"
     );
 }
 
-// --- start (executor de mentira sobre `cat` + git fixture) ----------------
+// --- start (fake executor over `cat` + git fixture) -----------------------
 
 struct Rec {
     calls: RefCell<Vec<(String, ExecFlags)>>,
@@ -223,7 +223,7 @@ impl Executor for Rec {
         self.calls
             .borrow_mut()
             .push((prompt.to_string(), flags.clone()));
-        // sessão real sobre `cat` só para devolver um Session válido
+        // real session over `cat`, just to return a valid Session
         ClaudeExecutor::with_bin("cat").spawn_interactive("", &ExecFlags::default())
     }
 }
@@ -250,7 +250,7 @@ fn git_init(repo: &Path) {
 }
 
 #[test]
-fn start_cria_worktree_instala_hooks_e_marca_wip() {
+fn start_creates_worktree_installs_hooks_and_marks_wip() {
     let root = TmpDir::new("start");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
@@ -269,34 +269,34 @@ fn start_cria_worktree_instala_hooks_e_marca_wip() {
 
     let mut ps = play.start("TASK-001").unwrap();
 
-    // worktree e artefatos no disco
-    assert!(ps.worktrees[0].1.exists(), "worktree não criada");
+    // worktree and artifacts on disk
+    assert!(ps.worktrees[0].1.exists(), "worktree not created");
     assert!(ps.artifacts.settings_path.exists());
     assert!(ps.artifacts.pretool_path.exists());
 
-    // status virou wip
+    // status became wip
     assert_eq!(store.get("TASK-001").unwrap().status, Status::Wip);
 
-    // flags e prompt corretos chegaram ao executor
+    // correct flags and prompt reached the executor
     let calls = rec.calls.borrow();
     let (prompt, flags) = &calls[0];
-    assert!(prompt.contains("Implementar enum aberto"));
+    assert!(prompt.contains("Implement an open enum"));
     assert!(
         flags
             .disallowed_tools
             .iter()
             .any(|t| t.contains("git merge"))
     );
-    assert!(flags.settings.is_some(), "hook (--settings) não aplicado");
-    assert!(flags.cwd.is_some(), "cwd (worktree) não aplicada");
+    assert!(flags.settings.is_some(), "hook (--settings) not applied");
+    assert!(flags.cwd.is_some(), "cwd (worktree) not applied");
     drop(calls);
 
     play.stop(&mut ps).unwrap();
-    assert!(!ps.worktrees[0].1.exists(), "worktree não removida no stop");
+    assert!(!ps.worktrees[0].1.exists(), "worktree not removed on stop");
 }
 
 #[test]
-fn start_injeta_session_id_e_resume_retoma_sem_prompt() {
+fn start_injects_session_id_and_resume_resumes_without_prompt() {
     let root = TmpDir::new("resume");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
@@ -314,27 +314,27 @@ fn start_injeta_session_id_e_resume_retoma_sem_prompt() {
     let play = Play::new(&store, &git, &rec, root.0.join(".jaum"), repos, String::new());
 
     let ps = play.start("TASK-001").unwrap();
-    // start injeta --session-id com o uuid devolvido (não --resume)
+    // start injects --session-id with the returned uuid (not --resume)
     {
         let calls = rec.calls.borrow();
         let (_prompt, flags) = &calls[0];
         assert_eq!(flags.session_id.as_deref(), Some(ps.claude_session_id.as_str()));
-        assert!(flags.resume.is_none(), "start não deve usar --resume");
+        assert!(flags.resume.is_none(), "start must not use --resume");
     }
 
-    // resume injeta --resume <uuid>, sem prompt posicional, sem session_id
+    // resume injects --resume <uuid>, no positional prompt, no session_id
     let cwd = ps.worktrees[0].1.clone();
     let _ = play.resume("TASK-001", &ps.claude_session_id, &cwd).unwrap();
     let calls = rec.calls.borrow();
     let (prompt, flags) = calls.last().unwrap();
-    assert!(prompt.is_empty(), "resume não reenvia o prompt inicial");
+    assert!(prompt.is_empty(), "resume does not resend the initial prompt");
     assert_eq!(flags.resume.as_deref(), Some(ps.claude_session_id.as_str()));
-    assert!(flags.session_id.is_none(), "resume não usa --session-id");
-    assert!(flags.cwd.is_some(), "resume mantém a cwd da worktree");
+    assert!(flags.session_id.is_none(), "resume does not use --session-id");
+    assert!(flags.cwd.is_some(), "resume keeps the worktree cwd");
 }
 
 #[test]
-fn start_recusa_spike() {
+fn start_rejects_spike() {
     let root = TmpDir::new("spike");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
@@ -355,7 +355,7 @@ fn start_recusa_spike() {
     );
 
     let err = match play.start("TASK-001") {
-        Ok(_) => panic!("deveria recusar spike"),
+        Ok(_) => panic!("should reject spike"),
         Err(e) => e,
     };
     assert!(err.to_string().contains("spike"));

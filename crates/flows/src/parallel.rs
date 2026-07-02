@@ -1,6 +1,6 @@
-//! Análise de paralelismo: usa o LLM para decidir quais tasks REALMENTE colidem
-//! (mesmos arquivos/área no mesmo repo), não só "compartilham repo". É read-only;
-//! grava um relatório INTERNO consumido pelo Board — nunca escreve no repositório.
+//! Parallelism analysis: uses the LLM to decide which tasks REALLY collide
+//! (same files/area in the same repo), not just "share a repo". Read-only;
+//! produces an INTERNAL report consumed by the Board — never writes to the repo.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 
 use crate::ingest::summarize_event;
 
-/// Um conflito entre duas tasks: elas se cruzam (mesmos arquivos/área) e não
-/// devem rodar em paralelo.
+/// A conflict between two tasks: they overlap (same files/area) and must not
+/// run in parallel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Conflict {
     pub a: String,
@@ -23,15 +23,15 @@ pub struct Conflict {
     pub reason: String,
 }
 
-/// Relatório de paralelismo: os pares que colidem. Tasks sem aresta entre si
-/// podem rodar em paralelo.
+/// Parallelism report: the colliding pairs. Tasks with no edge between them
+/// can run in parallel.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParallelReport {
     pub conflicts: Vec<Conflict>,
 }
 
 impl ParallelReport {
-    /// O conflito entre duas tasks (em qualquer ordem), se houver.
+    /// The conflict between two tasks (in either order), if any.
     pub fn conflict_between(&self, x: &str, y: &str) -> Option<&Conflict> {
         self.conflicts
             .iter()
@@ -39,13 +39,13 @@ impl ParallelReport {
     }
 }
 
-/// Orquestrador da análise. Genérico no executor (testável com fake).
+/// Analysis orchestrator. Generic over the executor (testable with a fake).
 pub struct Parallel<'a, E: Executor> {
     store: &'a Store,
     executor: &'a E,
-    /// cwd da varredura (raiz do projeto ou docs); só precisa ser um dir válido.
+    /// cwd of the scan (project or docs root); just needs to be a valid dir.
     root: PathBuf,
-    /// Repos liberados para leitura (`--add-dir`), onde a análise inspeciona o código.
+    /// Repos opened for reading (`--add-dir`), where the analysis inspects the code.
     repos: HashMap<String, PathBuf>,
 }
 
@@ -64,7 +64,7 @@ impl<'a, E: Executor> Parallel<'a, E> {
         }
     }
 
-    /// Flags read-only + acesso de leitura aos repos + saída estruturada.
+    /// Read-only flags + read access to the repos + structured output.
     fn flags(&self) -> ExecFlags {
         let mut extra = vec![
             "--output-format".to_string(),
@@ -88,8 +88,8 @@ impl<'a, E: Executor> Parallel<'a, E> {
         }
     }
 
-    /// Analisa as tasks abertas (não-merged) e devolve os pares que colidem.
-    /// `on_line` recebe um resumo legível de cada evento (logs ao vivo).
+    /// Analyzes the open (non-merged) tasks and returns the colliding pairs.
+    /// `on_line` receives a readable summary of each event (live logs).
     pub fn analyze_logged(&self, on_line: &mut dyn FnMut(&str)) -> Result<ParallelReport> {
         let open: Vec<Task> = self
             .store
@@ -97,7 +97,7 @@ impl<'a, E: Executor> Parallel<'a, E> {
             .into_iter()
             .filter(|t| t.status != Status::Merged)
             .collect();
-        // menos de duas tasks: nada a comparar.
+        // fewer than two tasks: nothing to compare.
         if open.len() < 2 {
             return Ok(ParallelReport::default());
         }
@@ -115,8 +115,8 @@ impl<'a, E: Executor> Parallel<'a, E> {
     }
 }
 
-/// Extrai os conflitos da saída `stream-json`: o último evento `result` traz o
-/// envelope com `structured_output`.
+/// Extracts the conflicts from `stream-json` output: the last `result` event
+/// carries the envelope with `structured_output`.
 pub fn parse_stream(out: &str) -> Result<ParallelReport> {
     let mut last_result: Option<Value> = None;
     for line in out.lines() {
@@ -130,37 +130,37 @@ pub fn parse_stream(out: &str) -> Result<ParallelReport> {
             last_result = Some(v);
         }
     }
-    let v = last_result.context("stream-json sem evento `result` final")?;
+    let v = last_result.context("stream-json has no final `result` event")?;
     parse_envelope(&v)
 }
 
-/// Extrai os conflitos de um envelope `result` (json ou último evento do stream).
+/// Extracts the conflicts from a `result` envelope (json or last stream event).
 pub fn parse_structured(out: &str) -> Result<ParallelReport> {
     let v: Value = serde_json::from_str(out.trim())
-        .context("parseando a saída JSON do claude (--output-format json)")?;
+        .context("parsing claude's JSON output (--output-format json)")?;
     parse_envelope(&v)
 }
 
 fn parse_envelope(v: &Value) -> Result<ParallelReport> {
     if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         bail!(
-            "claude reportou erro: {}",
+            "claude reported an error: {}",
             v.get("result")
                 .and_then(Value::as_str)
-                .unwrap_or("desconhecido")
+                .unwrap_or("unknown")
         );
     }
     let so = v
         .get("structured_output")
-        .context("saída sem `structured_output` (o --json-schema foi aplicado?)")?;
+        .context("output has no `structured_output` (was --json-schema applied?)")?;
     let conflicts = match so.get("conflicts") {
-        Some(c) => serde_json::from_value(c.clone()).context("desserializando os conflitos")?,
+        Some(c) => serde_json::from_value(c.clone()).context("deserializing the conflicts")?,
         None => Vec::new(),
     };
     Ok(ParallelReport { conflicts })
 }
 
-/// Schema da saída estruturada.
+/// Schema of the structured output.
 pub fn schema() -> Value {
     json!({
         "type": "object",
@@ -169,16 +169,16 @@ pub fn schema() -> Value {
         "properties": {
             "conflicts": {
                 "type": "array",
-                "description": "Apenas os PARES de tasks que realmente colidem (mesmos arquivos/área no mesmo repo). Quem não aparece aqui pode rodar em paralelo.",
+                "description": "Only the PAIRS of tasks that actually collide (same files/area in the same repo). Anything not listed here can run in parallel.",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["a", "b", "repo", "reason"],
                     "properties": {
-                        "a": { "type": "string", "description": "id da primeira task (ex.: TASK-002)" },
-                        "b": { "type": "string", "description": "id da segunda task" },
-                        "repo": { "type": "string", "description": "slug do repo onde colidem (ex.: owner/name)" },
-                        "reason": { "type": "string", "description": "Por que colidem, curto e concreto (ex.: ambas editam src/render.rs)." }
+                        "a": { "type": "string", "description": "id of the first task (e.g. TASK-002)" },
+                        "b": { "type": "string", "description": "id of the second task" },
+                        "repo": { "type": "string", "description": "slug of the repo where they collide (e.g. owner/name)" },
+                        "reason": { "type": "string", "description": "Why they collide, short and concrete (e.g. both edit src/render.rs)." }
                     }
                 }
             }
@@ -186,22 +186,22 @@ pub fn schema() -> Value {
     })
 }
 
-/// Prompt da análise: lista as tasks abertas e pede os pares que colidem.
+/// Analysis prompt: lists the open tasks and asks for the colliding pairs.
 pub fn build_prompt(tasks: &[Task]) -> String {
     let mut p = String::new();
     p.push_str(
-        "Você analisa quais tarefas podem rodar EM PARALELO sem conflito. Duas tasks \
-conflitam quando, ao serem implementadas, mexeriam nos MESMOS arquivos ou na mesma \
-área do código (no mesmo repositório). Tasks em repositórios diferentes NUNCA \
-conflitam. Estar no mesmo repo NÃO é conflito por si só: só conflita se as áreas se \
-cruzam de verdade.\n\n\
-Inspecione os repositórios (somente leitura) para confirmar onde cada task mexeria. \
-Seja preciso: na dúvida, considere que NÃO conflitam (paralelo é o padrão). Reporte \
-apenas os pares que colidem.\n\n## Tasks abertas\n\n",
+        "You analyze which tasks can run IN PARALLEL without conflict. Two tasks \
+conflict when, once implemented, they would touch the SAME files or the same \
+area of the code (in the same repository). Tasks in different repositories NEVER \
+conflict. Being in the same repo is NOT a conflict by itself: they only conflict if \
+their areas genuinely overlap.\n\n\
+Inspect the repositories (read-only) to confirm where each task would touch. \
+Be precise: when in doubt, assume they do NOT conflict (parallel is the default). Report \
+only the colliding pairs.\n\n## Open tasks\n\n",
     );
     for t in tasks {
         let repos = t.linked_repos().join(", ");
-        p.push_str(&format!("### {} (repos: {})\n", t.id, if repos.is_empty() { "nenhum".into() } else { repos }));
+        p.push_str(&format!("### {} (repos: {})\n", t.id, if repos.is_empty() { "none".into() } else { repos }));
         let body = t.body.trim();
         if !body.is_empty() {
             p.push_str(body);

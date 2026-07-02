@@ -1,10 +1,10 @@
-//! Paralelo: sinaliza (não bloqueia) overlap entre tasks no mesmo repo e
-//! gerencia locks por recurso (porta/build/db) gravados no frontmatter.
+//! Parallelism: flags (never blocks) overlap between tasks in the same repo and
+//! manages per-resource locks (port/build/db) stored in the frontmatter.
 
 use anyhow::{Result, bail};
 use jaum_core::{Status, Store};
 
-/// Visão de uma "sessão ativa" — derivada do estado (status `wip`), não de PIDs.
+/// View of an "active session" — derived from state (status `wip`), not from PIDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: String,
@@ -22,8 +22,8 @@ impl<'a> Conflict<'a> {
         Self { store }
     }
 
-    /// Pares de tasks em `wip` que compartilham um repo. Sinaliza concorrência
-    /// (apenas alerta — não impede). Determinístico (ordenado por id).
+    /// Pairs of `wip` tasks that share a repo. Flags concurrency (alert only,
+    /// never blocks). Deterministic (ordered by id).
     pub fn detect_overlap(&self) -> Result<Vec<(String, String, String)>> {
         let wip = self.store.list(Some(Status::Wip))?;
         let mut out = Vec::new();
@@ -42,7 +42,7 @@ impl<'a> Conflict<'a> {
         Ok(out)
     }
 
-    /// Tasks em `wip` (proxy de sessão ativa).
+    /// Tasks in `wip` (proxy for an active session).
     pub fn active_sessions(&self) -> Result<Vec<SessionInfo>> {
         Ok(self
             .store
@@ -57,7 +57,7 @@ impl<'a> Conflict<'a> {
             .collect())
     }
 
-    /// Locks atualmente detidos: `(recurso, task que detém)`.
+    /// Currently held locks: `(resource, holding task)`.
     pub fn held_locks(&self) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
         for t in self.store.list(None)? {
@@ -68,11 +68,11 @@ impl<'a> Conflict<'a> {
         Ok(out)
     }
 
-    /// Adquire um lock de recurso para a task. Falha se outra task já o detém.
+    /// Acquires a resource lock for the task. Fails if another task holds it.
     pub fn lock_acquire(&self, id: &str, resource: &str) -> Result<()> {
         for t in self.store.list(None)? {
             if t.id != id && t.locks.iter().any(|l| l == resource) {
-                bail!("recurso `{resource}` já está travado por {}", t.id);
+                bail!("resource `{resource}` is already locked by {}", t.id);
             }
         }
         let mut task = self.store.get(id)?;
@@ -83,7 +83,7 @@ impl<'a> Conflict<'a> {
         Ok(())
     }
 
-    /// Libera um lock de recurso detido pela task.
+    /// Releases a resource lock held by the task.
     pub fn lock_release(&self, id: &str, resource: &str) -> Result<()> {
         let mut task = self.store.get(id)?;
         task.locks.retain(|l| l != resource);

@@ -1,8 +1,8 @@
-//! Protocolo do daemon ⇄ cliente. Mensagens serde sobre um stream (unix socket),
-//! com framing length-prefixed (4 bytes big-endian + payload JSON).
+//! Daemon ⇄ client protocol. Serde messages over a stream (unix socket), with
+//! length-prefixed framing (4-byte big-endian length + JSON payload).
 //!
-//! O daemon é dono do estado e renderiza tudo num `Buffer`; manda só os deltas de
-//! células (`FrameDiff`) — o cliente é render puro.
+//! The daemon owns the state and renders everything into a `Buffer`; it sends only
+//! the cell deltas (`FrameDiff`) — the client is pure render.
 
 use std::io::{self, Read, Write};
 
@@ -11,8 +11,8 @@ use ratatui::style::{Color, Modifier};
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 
-/// Uma célula da tela na posição (x, y). Tudo serializável graças às features
-/// `serde` da ratatui (Color/Modifier).
+/// A screen cell at position (x, y). Fully serializable thanks to ratatui's
+/// `serde` features (Color/Modifier).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireCell {
     pub x: u16,
@@ -24,35 +24,35 @@ pub struct WireCell {
     pub mods: Modifier,
 }
 
-/// Cliente → daemon.
+/// Client → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMsg {
-    /// Uma tecla digitada (encaminhada pro `handle_key` do daemon).
+    /// A key press (forwarded to the daemon's `handle_key`).
     Key(KeyEvent),
-    /// Um evento de mouse (scroll/click) sobre o pane do terminal.
+    /// A mouse event (scroll/click) over the terminal pane.
     Mouse(MouseEvent),
-    /// Tamanho do terminal do cliente (last-writer-wins no daemon).
+    /// The client's terminal size (last-writer-wins in the daemon).
     Resize { cols: u16, rows: u16 },
-    /// O cliente terminou de rodar o `$EDITOR` pedido via `RunEditor`.
+    /// The client finished running the `$EDITOR` requested via `RunEditor`.
     EditorDone,
-    /// Derruba o daemon (encerra sessões e sai).
+    /// Shut the daemon down (stop sessions and exit).
     Shutdown,
 }
 
-/// Daemon → cliente.
+/// Daemon → client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMsg {
-    /// Tela completa (no attach e em cada resize).
+    /// Full screen (on attach and on every resize).
     FrameFull { cols: u16, rows: u16, cells: Vec<WireCell> },
-    /// Só as células que mudaram desde o último frame.
+    /// Only the cells that changed since the last frame.
     FrameDiff(Vec<WireCell>),
-    /// O daemon pede que o cliente desanexe (ex.: o usuário apertou `q`).
+    /// The daemon asks the client to detach (e.g. the user pressed `q`).
     Detach,
-    /// O daemon pede que o cliente rode `$EDITOR` neste caminho (passo interativo).
+    /// The daemon asks the client to run `$EDITOR` on this path (interactive step).
     RunEditor { path: String },
 }
 
-/// Escreve uma mensagem com framing length-prefixed.
+/// Write a message with length-prefixed framing.
 pub fn write_msg<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
     let payload = serde_json::to_vec(msg).map_err(io::Error::other)?;
     let len = u32::try_from(payload.len()).map_err(io::Error::other)?;
@@ -61,7 +61,7 @@ pub fn write_msg<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
     w.flush()
 }
 
-/// Lê uma mensagem (bloqueante). `Ok(None)` em EOF limpo.
+/// Read a message (blocking). `Ok(None)` on clean EOF.
 pub fn read_msg<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf) {
@@ -96,13 +96,13 @@ mod tests {
         let mut cur = std::io::Cursor::new(buf);
         for expected in &msgs {
             let got: ClientMsg = read_msg(&mut cur).unwrap().unwrap();
-            // compara via re-serialização (ClientMsg não deriva PartialEq)
+            // compare via re-serialization (ClientMsg does not derive PartialEq)
             assert_eq!(
                 serde_json::to_string(&got).unwrap(),
                 serde_json::to_string(expected).unwrap()
             );
         }
-        // EOF limpo
+        // clean EOF
         let end: Option<ClientMsg> = read_msg(&mut cur).unwrap();
         assert!(end.is_none());
     }
@@ -124,7 +124,7 @@ mod tests {
         let got: ServerMsg = read_msg(&mut cur).unwrap().unwrap();
         match got {
             ServerMsg::FrameDiff(cells) => assert_eq!(cells, vec![c]),
-            _ => panic!("tipo errado"),
+            _ => panic!("wrong type"),
         }
     }
 }

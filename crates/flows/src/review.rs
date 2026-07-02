@@ -1,9 +1,9 @@
-//! Fase review: a guarda do semântico. Abre uma sessão read-only com contexto
-//! cheio (TODOS os RFCs/ADRs + diff dos PRs + checklist das constraints
-//! `enforce: review`), grava o report linha a linha e decide `is_clean`.
+//! Review phase: the semantic gate. Opens a read-only session with full context
+//! (ALL RFCs/ADRs + PR diffs + checklist of `enforce: review` constraints),
+//! records the report line by line and decides `is_clean`.
 //!
-//! Garantia detectiva (obrigatória): `is_clean` só passa com ZERO findings E
-//! todas as constraints `enforce: review` marcadas `ok` — patch 1, lado semântico.
+//! Detective guarantee (mandatory): `is_clean` only passes with ZERO findings AND
+//! every `enforce: review` constraint marked `ok` — the semantic side.
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,17 +15,17 @@ use jaum_core::{Enforce, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Veredito de uma constraint semântica no review.
+/// Verdict of a semantic constraint in the review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConstraintVerdict {
-    /// Ainda não avaliada — `is_clean` falha enquanto houver pendência.
+    /// Not yet evaluated — `is_clean` fails while any item is pending.
     Pending,
     Ok,
-    Reprovado,
+    Failed,
 }
 
-/// Resultado da checagem de uma constraint `enforce: review`.
+/// Result of checking an `enforce: review` constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConstraintResult {
     pub text: String,
@@ -34,8 +34,8 @@ pub struct ConstraintResult {
     pub note: String,
 }
 
-/// Severidade de um achado. Só `Blocker`/`Major` reprovam o review; `Minor`/`Nit`
-/// são informativos (não seguram o review em SUJO).
+/// Finding severity. Only `Blocker`/`Major` fail the review; `Minor`/`Nit` are
+/// informational (they don't hold the review in DIRTY state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -59,20 +59,20 @@ impl Severity {
     }
 }
 
-/// Default conservador: se o agente omitir, trata como `major` (reprova) para não
-/// esconder problema por esquecimento.
+/// Conservative default: if the agent omits it, treat as `major` (fails) so a
+/// problem isn't hidden by forgetfulness.
 fn default_severity() -> Severity {
     Severity::Major
 }
 
-/// Um achado do review, ancorado em arquivo:linha e (idealmente) num RFC/ADR.
+/// A review finding, anchored at file:line and (ideally) to an RFC/ADR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
     pub message: String,
-    /// RFC/ADR violado, se aplicável.
+    /// Violated RFC/ADR, if applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     #[serde(default = "default_severity")]
@@ -80,12 +80,12 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// Este finding reprova o review?
+    /// Does this finding fail the review?
     pub fn is_blocking(&self) -> bool {
         self.severity.blocks()
     }
 
-    /// Linha "[SEV] arquivo:linha - mensagem [(ref)]".
+    /// Line "[SEV] file:line - message [(ref)]".
     pub fn render(&self) -> String {
         let loc = match self.line {
             Some(l) => format!("{}:{}", self.file, l),
@@ -93,14 +93,14 @@ impl Finding {
         };
         let tag = self.severity.tag();
         match &self.reference {
-            Some(r) => format!("[{tag}] {loc} - {} (viola {r})", self.message),
+            Some(r) => format!("[{tag}] {loc} - {} (violates {r})", self.message),
             None => format!("[{tag}] {loc} - {}", self.message),
         }
     }
 }
 
-/// Report persistido em `.backlog/TASK-NNN.review.md` (frontmatter estruturado +
-/// corpo legível). É o estado de verdade do review.
+/// Report persisted at `.backlog/TASK-NNN.review.md` (structured frontmatter +
+/// readable body). The source of truth for the review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewReport {
     pub task: String,
@@ -108,16 +108,16 @@ pub struct ReviewReport {
     pub findings: Vec<Finding>,
     #[serde(default)]
     pub constraints: Vec<ConstraintResult>,
-    /// Veredito de cada critério de aceite da task (mesmo shape das constraints).
+    /// Verdict for each acceptance criterion of the task (same shape as constraints).
     #[serde(default)]
     pub criteria: Vec<ConstraintResult>,
 }
 
 impl ReviewReport {
-    /// Limpo se NÃO há finding bloqueante (blocker/major), todas as constraints
-    /// `enforce: review` estão `ok` E todos os critérios de aceite foram atendidos
-    /// (`ok`). Findings `minor`/`nit` aparecem mas não reprovam (senão um nitpick
-    /// segura o review em SUJO pra sempre).
+    /// Clean if there is NO blocking finding (blocker/major), every `enforce: review`
+    /// constraint is `ok` AND every acceptance criterion was met (`ok`). `minor`/`nit`
+    /// findings show up but don't fail (otherwise a nitpick would hold the review in
+    /// DIRTY forever).
     pub fn is_clean(&self) -> bool {
         !self.findings.iter().any(|f| f.is_blocking())
             && self
@@ -130,7 +130,7 @@ impl ReviewReport {
                 .all(|c| c.verdict == ConstraintVerdict::Ok)
     }
 
-    /// Nº de itens que ainda reprovam/pendem: constraints + critérios não-`ok`.
+    /// Number of items still failing/pending: constraints + non-`ok` criteria.
     pub fn unmet_count(&self) -> usize {
         self.constraints
             .iter()
@@ -139,22 +139,22 @@ impl ReviewReport {
             .count()
     }
 
-    /// Nº de findings bloqueantes (blocker/major).
+    /// Number of blocking findings (blocker/major).
     pub fn blocking_count(&self) -> usize {
         self.findings.iter().filter(|f| f.is_blocking()).count()
     }
 
-    /// Renderiza o corpo markdown legível (linha a linha).
+    /// Renders the readable markdown body (line by line).
     fn render_body(&self) -> String {
         let mut b = format!("# Review {}\n\n", self.task);
         b.push_str(&format!(
-            "**Resultado:** {}\n\n",
-            if self.is_clean() { "LIMPO" } else { "SUJO" }
+            "**Result:** {}\n\n",
+            if self.is_clean() { "CLEAN" } else { "DIRTY" }
         ));
 
         b.push_str("## Findings\n");
         if self.findings.is_empty() {
-            b.push_str("- (nenhum)\n");
+            b.push_str("- (none)\n");
         } else {
             for f in &self.findings {
                 b.push_str(&format!("- {}\n", f.render()));
@@ -164,30 +164,30 @@ impl ReviewReport {
         b.push_str("\n## Constraints (enforce: review)\n");
         render_checklist(&mut b, &self.constraints);
 
-        b.push_str("\n## Critérios de aceite\n");
+        b.push_str("\n## Acceptance criteria\n");
         render_checklist(&mut b, &self.criteria);
         b
     }
 }
 
-/// Flags read-only: nenhuma escrita. Whitelist de ferramentas de leitura é a
-/// garantia mais forte de que o review não muta nada.
+/// Read-only flags: no writes. A read-tool whitelist is the strongest guarantee
+/// that the review mutates nothing.
 pub fn read_only_flags() -> ExecFlags {
     ExecFlags::new()
         .with_disallowed(["Edit", "Write", "NotebookEdit", "Bash"])
         .with_model(crate::AGENT_MODEL)
 }
 
-/// Orquestrador da fase review.
+/// Review phase orchestrator.
 pub struct Review<'a, E: Executor> {
     store: &'a Store,
     git: &'a Git,
     gh: &'a Gh,
     executor: &'a E,
     docs_dir: PathBuf,
-    /// Mapeamento explícito slug "owner/name" -> caminho local do repo.
+    /// Explicit mapping slug "owner/name" -> local repo path.
     repos: HashMap<String, PathBuf>,
-    /// Boas práticas do projeto (conventions.md).
+    /// Project conventions (conventions.md).
     conventions: String,
 }
 
@@ -216,9 +216,9 @@ impl<'a, E: Executor> Review<'a, E> {
         self.repos.get(repo).cloned()
     }
 
-    /// cwd da sessão de review: o repo linkado da task (primeiro), senão o
-    /// primeiro repo do projeto, senão o docs_dir. Assim o agente abre no código,
-    /// não na home do jaum.
+    /// cwd for the review session: the task's linked repo (first), else the
+    /// project's first repo, else docs_dir. So the agent opens in the code, not in
+    /// the jaum home.
     pub fn review_cwd(&self, id: &str) -> PathBuf {
         if let Ok(task) = self.store.get(id) {
             for link in &task.prs {
@@ -234,7 +234,7 @@ impl<'a, E: Executor> Review<'a, E> {
             .unwrap_or_else(|| self.docs_dir.clone())
     }
 
-    /// Flags read-only + cwd no repo + acesso de leitura a todos os repos.
+    /// Read-only flags + cwd in the repo + read access to all repos.
     fn review_flags(&self, id: &str) -> ExecFlags {
         let mut flags = read_only_flags();
         flags.cwd = Some(self.review_cwd(id));
@@ -247,8 +247,8 @@ impl<'a, E: Executor> Review<'a, E> {
         flags
     }
 
-    /// Checklist obrigatório: cada constraint `enforce: review` vira um item a
-    /// validar, inicialmente `pending`. `is_clean` não passa enquanto pendente.
+    /// Mandatory checklist: each `enforce: review` constraint becomes an item to
+    /// validate, initially `pending`. `is_clean` fails while any is pending.
     pub fn check_semantic_constraints(&self, id: &str) -> Result<Vec<ConstraintResult>> {
         let task = self.store.get(id)?;
         Ok(task
@@ -262,8 +262,8 @@ impl<'a, E: Executor> Review<'a, E> {
             .collect())
     }
 
-    /// Checklist obrigatório dos critérios de aceite da task (do corpo), cada um
-    /// inicialmente `pending`. `is_clean` não passa enquanto algum não for `ok`.
+    /// Mandatory checklist of the task's acceptance criteria (from the body), each
+    /// initially `pending`. `is_clean` fails while any is not `ok`.
     pub fn acceptance_checklist(&self, id: &str) -> Result<Vec<ConstraintResult>> {
         let task = self.store.get(id)?;
         Ok(task
@@ -277,27 +277,27 @@ impl<'a, E: Executor> Review<'a, E> {
             .collect())
     }
 
-    /// Contexto cheio do review: TODOS os RFCs/ADRs do projeto + diff dos PRs da
-    /// task + as constraints `enforce: review` como checklist obrigatório.
+    /// Full review context: ALL project RFCs/ADRs + the task PR diffs + the
+    /// `enforce: review` constraints as a mandatory checklist.
     pub fn build_context(&self, id: &str) -> Result<String> {
         let task = self.store.get(id)?;
         let mut c = String::new();
-        c.push_str(&format!("# Review read-only de {}\n\n", task.id));
-        c.push_str("Você é revisor. NÃO altere nada. Aponte findings como `arquivo:linha — o que viola (RFC/ADR)`.\n\n");
+        c.push_str(&format!("# Read-only review of {}\n\n", task.id));
+        c.push_str("You are the reviewer. Do NOT change anything. Report findings as `file:line — what it violates (RFC/ADR)`.\n\n");
 
-        // 0) objetivo da task (o corpo, onde ficam objetivo e critérios de aceite)
+        // task objective (the body, which holds the objective and acceptance criteria)
         let body = task.body.trim();
         if !body.is_empty() {
-            c.push_str("## O que a task pede\n\n");
+            c.push_str("## What the task asks for\n\n");
             c.push_str(body);
             c.push_str("\n\n");
         }
 
-        // 1) todos os docs do projeto
-        c.push_str("## RFCs/ADRs do projeto\n\n");
+        // all project docs
+        c.push_str("## Project RFCs/ADRs\n\n");
         let docs = collect_docs(&self.docs_dir)?;
         if docs.is_empty() {
-            c.push_str("(nenhum doc encontrado em ");
+            c.push_str("(no docs found in ");
             c.push_str(&self.docs_dir.to_string_lossy());
             c.push_str(")\n\n");
         } else {
@@ -306,13 +306,13 @@ impl<'a, E: Executor> Review<'a, E> {
             }
         }
 
-        // 2) diff dos PRs — prefere o PR do GitHub (via gh); cai no diff local
-        //    quando ainda não há PR aberto.
-        c.push_str("## Diff dos PRs\n\n");
+        // PR diffs — prefer the GitHub PR (via gh); fall back to the local diff
+        // when there's no open PR yet.
+        c.push_str("## PR diffs\n\n");
         for link in &task.prs {
             let repo_dir = self.repo_path(&link.repo);
-            // resolve o número do PR (o salvo, ou descoberto pelo branch via gh,
-            // rodando no diretório do repo).
+            // resolve the PR number (the saved one, or discovered from the branch
+            // via gh, running in the repo directory).
             let pr = if link.pr != 0 {
                 link.pr
             } else {
@@ -330,27 +330,27 @@ impl<'a, E: Executor> Review<'a, E> {
                         c.push_str(&format!("### {} PR #{pr}: {title}\n\n{body}\n\n", link.repo));
                     }
                     let diff = self.gh.pr_diff(dir, pr).unwrap_or_else(|e| {
-                        format!("(não foi possível obter o diff do PR #{pr}: {e})")
+                        format!("(could not get diff for PR #{pr}: {e})")
                     });
                     c.push_str(&format!(
-                        "#### diff do PR #{pr} ({} @ {})\n```diff\n{}\n```\n\n",
+                        "#### diff of PR #{pr} ({} @ {})\n```diff\n{}\n```\n\n",
                         link.repo,
                         link.branch,
                         diff.trim()
                     ));
                 }
                 _ => {
-                    // sem PR ainda: diff local do branch (fallback).
+                    // no PR yet: local branch diff (fallback).
                     let diff = match &repo_dir {
                         Some(repo_path) => {
                             self.git.diff(repo_path, &link.branch).unwrap_or_else(|e| {
-                                format!("(não foi possível obter diff de {}: {e})", link.repo)
+                                format!("(could not get diff for {}: {e})", link.repo)
                             })
                         }
-                        None => format!("(repo {} não mapeado no projeto)", link.repo),
+                        None => format!("(repo {} not mapped in the project)", link.repo),
                     };
                     c.push_str(&format!(
-                        "### {} @ {} (sem PR ainda - diff local)\n```diff\n{}\n```\n\n",
+                        "### {} @ {} (no PR yet - local diff)\n```diff\n{}\n```\n\n",
                         link.repo,
                         link.branch,
                         diff.trim()
@@ -359,10 +359,10 @@ impl<'a, E: Executor> Review<'a, E> {
             }
         }
 
-        // 2.5) onde está o código, para ler além do diff
-        c.push_str("## Working tree dos repos (leitura liberada)\n\n");
+        // where the code lives, to read beyond the diff
+        c.push_str("## Working tree of the repos (read access granted)\n\n");
         if self.repos.is_empty() {
-            c.push_str("(nenhum repo mapeado no projeto)\n\n");
+            c.push_str("(no repos mapped in the project)\n\n");
         } else {
             let mut entries: Vec<_> = self.repos.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -370,42 +370,42 @@ impl<'a, E: Executor> Review<'a, E> {
                 c.push_str(&format!("- {slug}: `{}`\n", path.display()));
             }
             c.push_str(
-                "\nVocê PODE ler esses diretórios com Read/Grep/Glob (acesso liberado) para contexto \
-além do diff: confirmar se arquivos/fixtures citados existem, ver código não alterado e conferir \
-assinaturas. O working tree pode estar no branch base; o DIFF acima é a fonte de verdade do que mudou \
-no PR. NÃO há Bash aqui (review é read-only) — não execute testes nem comandos, apenas leia.\n\n",
+                "\nYou MAY read these directories with Read/Grep/Glob (access granted) for context \
+beyond the diff: confirm that cited files/fixtures exist, see unchanged code and check \
+signatures. The working tree may be on the base branch; the DIFF above is the source of truth for what \
+changed in the PR. There is NO Bash here (review is read-only) — do not run tests or commands, only read.\n\n",
             );
         }
 
-        // 3) convenções do projeto (sempre checadas)
+        // project conventions (always checked)
         let conv = self.conventions.trim();
         if !conv.is_empty() {
-            c.push_str("## Convenções do projeto a respeitar\n\n");
+            c.push_str("## Project conventions to respect\n\n");
             c.push_str(conv);
             c.push_str("\n\n");
         }
 
-        // 4) checklist obrigatório das constraints semânticas
-        c.push_str("## Constraints a validar (enforce: review) — OBRIGATÓRIO\n\n");
+        // mandatory checklist of semantic constraints
+        c.push_str("## Constraints to validate (enforce: review) — MANDATORY\n\n");
         let checklist = self.check_semantic_constraints(id)?;
         if checklist.is_empty() {
-            c.push_str("(nenhuma)\n");
+            c.push_str("(none)\n");
         } else {
             for item in &checklist {
                 c.push_str(&format!("- [ ] {}\n", item.text));
             }
         }
 
-        // 5) checklist obrigatório dos critérios de aceite (do corpo da task)
+        // mandatory checklist of acceptance criteria (from the task body)
         c.push_str(
-            "\n## Critérios de aceite a validar — OBRIGATÓRIO\n\n\
-Confirme, olhando o DIFF, se o que mudou realmente ATENDE cada critério abaixo. \
-Marque `ok` só se o diff cumpre o critério; `reprovado` se não cumpre; `pending` se \
-não dá para saber pelo diff.\n\n",
+            "\n## Acceptance criteria to validate — MANDATORY\n\n\
+Looking at the DIFF, confirm whether what changed actually MEETS each criterion below. \
+Mark `ok` only if the diff satisfies the criterion; `failed` if it doesn't; `pending` if \
+the diff can't tell.\n\n",
         );
         let criteria = self.acceptance_checklist(id)?;
         if criteria.is_empty() {
-            c.push_str("(nenhum)\n");
+            c.push_str("(none)\n");
         } else {
             for item in &criteria {
                 c.push_str(&format!("- [ ] {}\n", item.text));
@@ -414,8 +414,8 @@ não dá para saber pelo diff.\n\n",
         Ok(c)
     }
 
-    /// Abre a sessão de review read-only com o contexto cheio. Retorna a sessão e
-    /// o UUID do claude (`--session-id`), para retomar depois.
+    /// Opens the read-only review session with the full context. Returns the
+    /// session and the claude UUID (`--session-id`), to resume later.
     pub fn start(&self, id: &str) -> Result<(Session, String)> {
         let context = self.build_context(id)?;
         let claude_session_id = uuid::Uuid::new_v4().to_string();
@@ -424,8 +424,8 @@ não dá para saber pelo diff.\n\n",
         Ok((session, claude_session_id))
     }
 
-    /// Retoma uma sessão de review read-only com `--resume`, sem reenviar o
-    /// contexto (o claude recarrega a conversa). `cwd` deve ser o mesmo de origem.
+    /// Resumes a read-only review session with `--resume`, without resending the
+    /// context (claude reloads the conversation). `cwd` must match the origin.
     pub fn resume(&self, id: &str, uuid: &str, cwd: &Path) -> Result<Session> {
         let mut flags = self.review_flags(id);
         flags.cwd = Some(cwd.to_path_buf());
@@ -433,11 +433,11 @@ não dá para saber pelo diff.\n\n",
         self.executor.spawn_interactive("", &flags)
     }
 
-    /// Captura estruturada do review: roda `claude -p` read-only com o contexto
-    /// cheio + schema, transforma a saída em `findings` + veredictos e GRAVA o
-    /// `.review.md`. É o jaum quem garante a estrutura: a lista de constraints é a
-    /// canônica (`enforce: review`); o claude só fornece o veredicto de cada uma.
-    /// `on_line` recebe os logs ao vivo (resumo dos eventos do stream).
+    /// Structured capture of the review: runs `claude -p` read-only with the full
+    /// context + schema, turns the output into `findings` + verdicts and WRITES the
+    /// `.review.md`. jaum guarantees the structure: the constraint list is canonical
+    /// (`enforce: review`); claude only supplies each verdict.
+    /// `on_line` receives the live logs (a summary of the stream events).
     pub fn capture_logged(
         &self,
         id: &str,
@@ -460,7 +460,7 @@ não dá para saber pelo diff.\n\n",
         flags.cwd = Some(self.review_cwd(id));
         flags.extra = extra;
 
-        // reusa o resumo de eventos do ingest para os logs ao vivo.
+        // reuse the ingest event summary for the live logs.
         let mut summarize = |raw: &str| {
             for s in crate::ingest::summarize_event(raw) {
                 on_line(&s);
@@ -472,8 +472,8 @@ não dá para saber pelo diff.\n\n",
 
         let (findings, prop_constraints, prop_criteria) = parse_review_stream(&out)?;
 
-        // as listas de constraints e critérios são canônicas (da task); o claude só
-        // preenche o veredicto. Item não mencionado fica `pending`.
+        // the constraint and criteria lists are canonical (from the task); claude
+        // only fills in the verdict. An unmentioned item stays `pending`.
         let constraints = merge_verdicts(self.check_semantic_constraints(id)?, &prop_constraints);
         let criteria = merge_verdicts(self.acceptance_checklist(id)?, &prop_criteria);
 
@@ -485,61 +485,61 @@ não dá para saber pelo diff.\n\n",
         };
         self.write_report(&report)?;
         on_line(&format!(
-            "review gravado: {} finding(s), {}",
+            "review written: {} finding(s), {}",
             report.findings.len(),
-            if report.is_clean() { "LIMPO" } else { "SUJO" }
+            if report.is_clean() { "CLEAN" } else { "DIRTY" }
         ));
         Ok(report)
     }
 
-    /// Grava o report em `.backlog/TASK-NNN.review.md`.
+    /// Writes the report to `.backlog/TASK-NNN.review.md`.
     pub fn write_report(&self, report: &ReviewReport) -> Result<()> {
         let path = self.store.review_path(&report.task);
         self.store.write_doc(&path, report, &report.render_body())
     }
 
-    /// Carrega o report persistido.
+    /// Loads the persisted report.
     pub fn load_report(&self, id: &str) -> Result<ReviewReport> {
         let path = self.store.review_path(id);
         let (report, _body) = self.store.read_doc::<ReviewReport>(&path)?;
         Ok(report)
     }
 
-    /// `true` só se o report persistido estiver limpo (zero findings E todas as
+    /// `true` only if the persisted report is clean (zero findings AND every
     /// `enforce: review` ok).
     pub fn is_clean(&self, id: &str) -> Result<bool> {
         Ok(self.load_report(id)?.is_clean())
     }
 
-    /// Injeta os findings na sessão de play da mesma task (handoff do sujo).
+    /// Injects the findings into the same task's play session (dirty handoff).
     pub fn handoff(&self, id: &str, session: &mut Session) -> Result<()> {
         let report = self.load_report(id)?;
         session.write_line(&handoff_message(&report))
     }
 }
 
-/// Mensagem de handoff: os findings + constraints reprovadas do review, para
-/// injetar numa sessão de play corrigir. (Função pura, reusada pela TUI.)
+/// Handoff message: the review's findings + failed constraints, to inject into a
+/// play session to fix. (Pure function, reused by the TUI.)
 pub fn handoff_message(report: &ReviewReport) -> String {
-    let mut msg = String::from("Review apontou pendências, corrija:\n");
+    let mut msg = String::from("Review found issues, please fix:\n");
     for f in &report.findings {
         msg.push_str(&format!("- {}\n", f.render()));
     }
     for c in &report.constraints {
-        if c.verdict == ConstraintVerdict::Reprovado {
-            msg.push_str(&format!("- constraint reprovada: {} — {}\n", c.text, c.note));
+        if c.verdict == ConstraintVerdict::Failed {
+            msg.push_str(&format!("- failed constraint: {} — {}\n", c.text, c.note));
         }
     }
     for c in &report.criteria {
         if c.verdict != ConstraintVerdict::Ok {
-            msg.push_str(&format!("- critério não atendido: {} — {}\n", c.text, c.note));
+            msg.push_str(&format!("- unmet criterion: {} — {}\n", c.text, c.note));
         }
     }
     msg
 }
 
-/// Casa a lista canônica (da task) com os veredictos propostos pelo claude,
-/// batendo pelo texto. Item não mencionado permanece como veio (`pending`).
+/// Matches the canonical list (from the task) with the verdicts proposed by claude,
+/// keyed by text. An unmentioned item stays as it came (`pending`).
 fn merge_verdicts(
     canonical: Vec<ConstraintResult>,
     proposed: &[ConstraintResult],
@@ -556,17 +556,17 @@ fn merge_verdicts(
         .collect()
 }
 
-/// Renderiza um checklist de veredictos (constraints ou critérios) no corpo.
+/// Renders a checklist of verdicts (constraints or criteria) in the body.
 fn render_checklist(b: &mut String, items: &[ConstraintResult]) {
     if items.is_empty() {
-        b.push_str("- (nenhum)\n");
+        b.push_str("- (none)\n");
         return;
     }
     for c in items {
         let tag = match c.verdict {
             ConstraintVerdict::Ok => "OK",
-            ConstraintVerdict::Reprovado => "REPROVADO",
-            ConstraintVerdict::Pending => "PENDENTE",
+            ConstraintVerdict::Failed => "REJECTED",
+            ConstraintVerdict::Pending => "PENDING",
         };
         if c.note.is_empty() {
             b.push_str(&format!("- [{tag}] {}\n", c.text));
@@ -576,23 +576,23 @@ fn render_checklist(b: &mut String, items: &[ConstraintResult]) {
     }
 }
 
-/// Instrução anexada ao contexto para a captura estruturada do review.
-const REVIEW_INSTRUCTION: &str = "Revise o diff acima contra os RFCs/ADRs, as convenções e o \
-checklist de constraints. Seja EXAUSTIVO nesta única passada: aponte TODOS os problemas que \
-encontrar de uma vez (não vá aos poucos), de bugs e violações a melhorias. Retorne SÓ pela saída \
-estruturada: `findings` (cada um com `file`, `line` quando souber, `message`, `severity` e \
-`reference` ao RFC/ADR violado quando aplicável), `constraints` (UMA entrada por item do checklist de \
-constraints) e `criteria` (UMA entrada por item do checklist de critérios de aceite), cada uma \
-com `verdict` `ok`/`reprovado`/`pending` e uma `note` curta. \
-Classifique cada finding com `severity`: `blocker` (quebra/incorreto, tem que corrigir), `major` \
-(importante), `minor` (melhoria) ou `nit` (cosmético). Só `blocker` e `major` reprovam o review; \
-`minor`/`nit` são informativos. Repita o texto de cada constraint e de cada critério EXATAMENTE como \
-está no checklist. Para os critérios de aceite, decida olhando o DIFF: `ok` se o que mudou cumpre o \
-critério, `reprovado` se não cumpre, `pending` se o diff não permite decidir. \
-Escreva `message` e `note` de forma CONCISA e direta: uma frase objetiva, sem travessões e sem \
-floreio. Não altere nada; só leia. Seja rigoroso: só marque `ok` se for realmente cumprido.";
+/// Instruction appended to the context for the structured review capture.
+const REVIEW_INSTRUCTION: &str = "Review the diff above against the RFCs/ADRs, the conventions and the \
+constraint checklist. Be EXHAUSTIVE in this single pass: report ALL the problems you \
+find at once (don't go bit by bit), from bugs and violations to improvements. Return ONLY through the \
+structured output: `findings` (each with `file`, `line` when known, `message`, `severity` and \
+`reference` to the violated RFC/ADR when applicable), `constraints` (ONE entry per item of the \
+constraint checklist) and `criteria` (ONE entry per item of the acceptance-criteria checklist), each \
+with a `verdict` of `ok`/`failed`/`pending` and a short `note`. \
+Classify each finding with `severity`: `blocker` (broken/incorrect, must be fixed), `major` \
+(important), `minor` (improvement) or `nit` (cosmetic). Only `blocker` and `major` fail the review; \
+`minor`/`nit` are informational. Repeat the text of each constraint and each criterion EXACTLY as it \
+appears in the checklist. For the acceptance criteria, decide by looking at the DIFF: `ok` if what changed meets \
+the criterion, `failed` if it doesn't, `pending` if the diff doesn't allow a decision. \
+Write `message` and `note` CONCISELY and directly: one objective sentence, no dashes and no \
+fluff. Don't change anything; only read. Be strict: only mark `ok` if it's actually met.";
 
-/// Schema da saída estruturada do review.
+/// Schema of the review's structured output.
 pub fn review_schema() -> Value {
     json!({
         "type": "object",
@@ -622,21 +622,21 @@ pub fn review_schema() -> Value {
                     "required": ["text", "verdict"],
                     "properties": {
                         "text": { "type": "string" },
-                        "verdict": { "type": "string", "enum": ["ok", "reprovado", "pending"] },
+                        "verdict": { "type": "string", "enum": ["ok", "failed", "pending"] },
                         "note": { "type": "string" }
                     }
                 }
             },
             "criteria": {
                 "type": "array",
-                "description": "Um veredito por critério de aceite do checklist. O diff atende o critério?",
+                "description": "One verdict per acceptance criterion in the checklist. Does the diff meet the criterion?",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["text", "verdict"],
                     "properties": {
                         "text": { "type": "string" },
-                        "verdict": { "type": "string", "enum": ["ok", "reprovado", "pending"] },
+                        "verdict": { "type": "string", "enum": ["ok", "failed", "pending"] },
                         "note": { "type": "string" }
                     }
                 }
@@ -645,7 +645,7 @@ pub fn review_schema() -> Value {
     })
 }
 
-/// Extrai `findings` + `constraints` + `criteria` do último evento `result`.
+/// Extracts `findings` + `constraints` + `criteria` from the last `result` event.
 #[allow(clippy::type_complexity)]
 fn parse_review_stream(
     out: &str,
@@ -662,39 +662,39 @@ fn parse_review_stream(
             last = Some(v);
         }
     }
-    let v = last.context("stream-json sem evento `result` final")?;
+    let v = last.context("stream-json missing final `result` event")?;
     if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         bail!(
-            "claude reportou erro: {}",
-            v.get("result").and_then(Value::as_str).unwrap_or("desconhecido")
+            "claude reported an error: {}",
+            v.get("result").and_then(Value::as_str).unwrap_or("unknown")
         );
     }
     let so = v
         .get("structured_output")
-        .context("saída sem `structured_output` (o --json-schema foi aplicado?)")?;
+        .context("output missing `structured_output` (was --json-schema applied?)")?;
     let findings = match so.get("findings") {
-        Some(f) => serde_json::from_value(f.clone()).context("desserializando findings")?,
+        Some(f) => serde_json::from_value(f.clone()).context("deserializing findings")?,
         None => Vec::new(),
     };
     let constraints = match so.get("constraints") {
-        Some(c) => serde_json::from_value(c.clone()).context("desserializando constraints")?,
+        Some(c) => serde_json::from_value(c.clone()).context("deserializing constraints")?,
         None => Vec::new(),
     };
     let criteria = match so.get("criteria") {
-        Some(c) => serde_json::from_value(c.clone()).context("desserializando criteria")?,
+        Some(c) => serde_json::from_value(c.clone()).context("deserializing criteria")?,
         None => Vec::new(),
     };
     Ok((findings, constraints, criteria))
 }
 
-/// Lê os RFCs/ADRs (`RFC-*.md`, `ADR-*.md`) de um diretório, ordenados por nome.
+/// Reads the RFCs/ADRs (`RFC-*.md`, `ADR-*.md`) from a directory, sorted by name.
 fn collect_docs(docs_dir: &Path) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     if !docs_dir.exists() {
         return Ok(out);
     }
     for entry in
-        fs::read_dir(docs_dir).with_context(|| format!("lendo docs em {}", docs_dir.display()))?
+        fs::read_dir(docs_dir).with_context(|| format!("reading docs in {}", docs_dir.display()))?
     {
         let path = entry?.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
