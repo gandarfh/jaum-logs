@@ -5,7 +5,7 @@ DEMO_DIR := /tmp/jaum-demo
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release run list test fmt demo clean install sidecar sidecar-test sidecar-install
+.PHONY: help build release run list test fmt demo demo-setup clean install sidecar sidecar-test sidecar-install
 
 help: ## Lista os alvos disponiveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -29,11 +29,10 @@ test: ## Roda todos os testes do workspace
 fmt: ## Formata o codigo
 	cargo fmt
 
-demo: build ## Monta um sandbox de exemplo (HOME isolado) e abre a TUI nele
-	rm -rf $(DEMO_DIR)
-	mkdir -p $(DEMO_DIR)/home
-	cp -R examples/demo/. $(DEMO_DIR)/
-	cd $(DEMO_DIR) && HOME=$(DEMO_DIR)/home $(CURDIR)/$(BIN) init
+demo-setup: build sidecar ## Monta o sandbox de demo (HOME isolado, sidecar, repo e task prontos para play; requer bun)
+	bash examples/demo/setup.sh $(DEMO_DIR) $(CURDIR)/$(BIN)
+
+demo: demo-setup ## Monta o sandbox de demo e abre a TUI nele
 	cd $(DEMO_DIR) && HOME=$(DEMO_DIR)/home $(CURDIR)/$(BIN)
 
 clean: ## Remove os artefatos de build
