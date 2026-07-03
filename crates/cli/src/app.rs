@@ -1,10 +1,10 @@
 //! Pure TUI state and logic (testable without a terminal). Rendering lives in `tui`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -13,12 +13,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config as GlobalConfig;
 use crate::protocol::{Intent, SessionEvent, SessionEventKind};
+use crate::session_event::{ContentBlock, SessionEvent as ChatEvent, SessionLog};
+use crate::sidecar::{
+    ChatTurn, GuardPattern, PermissionDecision, PermissionTracker, SidecarClient, SidecarEvent,
+    resolve_bundle,
+};
 use jaum_core::{CiStatus, MergeState, PrCi, Repo, Status, Store, Task};
 use jaum_flows::conflict::Conflict;
 use jaum_flows::finish::Finish;
 use jaum_flows::ingest::Ingest;
 use jaum_flows::parallel::{Parallel, ParallelReport};
-use jaum_flows::play::{Play, PlaySession};
+use jaum_flows::play::{GuardSpec, Play, PlayLaunch};
 use jaum_flows::review::{Review, ReviewReport};
 use jaum_flows::setup::{Setup, branch_leaks_id, is_template};
 
@@ -180,7 +185,7 @@ fn from_epoch_ms(ms: u64) -> SystemTime {
 pub struct SessionRecord {
     pub kind: SessionKind,
     pub task: Option<String>,
-    /// claude session UUID (`--session-id`/`--resume`).
+    /// claude session UUID (forced on the first turn; resumed afterwards).
     pub claude_session_id: String,
     /// origin cwd (the play worktree, the review repo, the setup home).
     pub cwd: PathBuf,
@@ -188,11 +193,30 @@ pub struct SessionRecord {
     pub created_ms: u64,
     pub last_activity_ms: u64,
     pub finished: bool,
+    /// A permission request expired unanswered; the session needs attention.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
-/// A session and its metadata, to run many in parallel. When live it has a PTY
-/// (`session`/`rx`) and a vt100 parser fed by a reader thread; when history
-/// (restored from disk and not resumable), `session`/`rx` are `None`.
+/// Chat state of a sidecar-backed session (play). The log is the source of
+/// truth for replay; `rx` exists only while a turn is in flight.
+pub struct ChatState {
+    /// Events of the active turn (None between turns).
+    pub rx: Option<Receiver<SidecarEvent>>,
+    /// request_id of the active turn.
+    pub request_id: Option<String>,
+    /// Monotonic turn counter (builds deterministic request ids).
+    pub turn_seq: u64,
+    /// Messages waiting for the active turn to finish (e.g. handoff).
+    pub queued: VecDeque<String>,
+    /// Append-only event log (`.sessions/<id>.jsonl`).
+    pub log: SessionLog,
+}
+
+/// A session and its metadata, to run many in parallel. PTY sessions
+/// (review/setup) have `session`/`rx` and a vt100 parser fed by a reader
+/// thread; sidecar sessions (play) have `chat` instead; history entries
+/// (restored from disk and not resumable) have neither live handle.
 pub struct SessionEntry {
     pub kind: SessionKind,
     /// Linked task (None for setup).
@@ -200,6 +224,8 @@ pub struct SessionEntry {
     pub session: Option<Session>,
     pub parser: vt100::Parser,
     pub rx: Option<Receiver<Vec<u8>>>,
+    /// Sidecar-backed chat (play sessions).
+    pub chat: Option<ChatState>,
     /// Worktrees to clean up on close (play only).
     pub worktrees: Vec<(String, PathBuf)>,
     /// claude session UUID, to resume after restart.
@@ -209,6 +235,8 @@ pub struct SessionEntry {
     pub created: SystemTime,
     pub last_activity: SystemTime,
     pub finished: bool,
+    /// A permission request expired unanswered (cleared on the next turn).
+    pub blocked: bool,
     /// Monotonic creation sequence. Breaks ties in the activity ordering
     /// (newest on top) when timestamps coincide.
     pub seq: u64,
@@ -262,18 +290,57 @@ impl SessionEntry {
             session: Some(session),
             parser,
             rx,
+            chat: None,
             worktrees,
             claude_session_id,
             cwd,
             created: now,
             last_activity: now,
             finished: false,
+            blocked: false,
             seq: next_session_seq(),
         }
     }
 
-    /// HISTORY entry (no PTY): restored from disk when the session isn't resumable
-    /// (finished, cwd gone, or resume failed).
+    /// Sidecar-backed entry (play): no PTY, events arrive per turn via the
+    /// chat receiver and accumulate in the session log.
+    pub(crate) fn sidecar(
+        kind: SessionKind,
+        task: Option<String>,
+        worktrees: Vec<(String, PathBuf)>,
+        session_id: String,
+        cwd: PathBuf,
+        log: SessionLog,
+    ) -> Self {
+        let mut parser = vt100::Parser::new(40, 120, 2000);
+        parser.screen_mut().set_size(40, 120);
+        let now = SystemTime::now();
+        Self {
+            kind,
+            task,
+            session: None,
+            parser,
+            rx: None,
+            chat: Some(ChatState {
+                rx: None,
+                request_id: None,
+                turn_seq: 0,
+                queued: VecDeque::new(),
+                log,
+            }),
+            worktrees,
+            claude_session_id: session_id,
+            cwd,
+            created: now,
+            last_activity: now,
+            finished: false,
+            blocked: false,
+            seq: next_session_seq(),
+        }
+    }
+
+    /// HISTORY entry (no PTY, no chat): restored from disk when the session
+    /// isn't resumable (finished, cwd gone, or resume failed).
     fn history(rec: &SessionRecord) -> Self {
         let mut parser = vt100::Parser::new(40, 120, 2000);
         parser.screen_mut().set_size(40, 120);
@@ -283,12 +350,14 @@ impl SessionEntry {
             session: None,
             parser,
             rx: None,
+            chat: None,
             worktrees: rec.worktrees.clone(),
             claude_session_id: rec.claude_session_id.clone(),
             cwd: rec.cwd.clone(),
             created: from_epoch_ms(rec.created_ms),
             last_activity: from_epoch_ms(rec.last_activity_ms),
             finished: true,
+            blocked: rec.blocked,
             seq: next_session_seq(),
         }
     }
@@ -304,14 +373,55 @@ impl SessionEntry {
             created_ms: epoch_ms(self.created),
             last_activity_ms: epoch_ms(self.last_activity),
             finished: self.finished,
+            blocked: self.blocked,
         }
     }
 
-    /// Live PTY? False for history (no `session`) AND for sessions whose process
-    /// already exited (e.g. claude quit via Ctrl+C/Ctrl+D) — marked `finished` in
-    /// `drain`. That way play starts a fresh session again.
+    /// Live? PTY sessions: the process is running. Sidecar sessions: not
+    /// finished (they stay resumable between turns, without a process).
     pub fn is_live(&self) -> bool {
-        self.session.is_some() && !self.finished
+        (self.session.is_some() || self.chat.is_some()) && !self.finished
+    }
+
+    /// `true` while a sidecar turn is in flight (a query is running).
+    pub fn turn_active(&self) -> bool {
+        self.chat.as_ref().is_some_and(|c| c.rx.is_some())
+    }
+
+    /// Renders one chat event into the vt100 parser (plain-text view of the
+    /// conversation until the structured chat panel exists).
+    fn render_event(&mut self, event: &ChatEvent) {
+        let text = match event {
+            ChatEvent::TextDelta { text } => text.replace('\n', "\r\n"),
+            ChatEvent::ToolUse { name, input, .. } => {
+                let mut summary = input.to_string();
+                summary.truncate(120);
+                format!("\r\n[tool {name}] {summary}\r\n")
+            }
+            ChatEvent::ToolResult {
+                content, is_error, ..
+            } => {
+                let mut first = content
+                    .first()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.clone(),
+                        ContentBlock::Image { .. } => "[image]".into(),
+                    })
+                    .unwrap_or_default();
+                first.truncate(120);
+                let tag = if *is_error { "result error" } else { "result" };
+                format!("[{tag}] {}\r\n", first.replace('\n', " "))
+            }
+            ChatEvent::Image { .. } => "[image]\r\n".into(),
+            ChatEvent::PermissionRequest { tool_name, .. } => {
+                format!("[permission? {tool_name}]\r\n")
+            }
+            ChatEvent::Done { .. } => "\r\n[turn done]\r\n".into(),
+            ChatEvent::Error { category, message } => {
+                format!("\r\n[error {category}] {message}\r\n")
+            }
+        };
+        self.parser.process(text.as_bytes());
     }
 
     /// Name shown in the list: `play · TASK-001`, `setup`, etc.
@@ -412,6 +522,17 @@ fn expand_tilde(p: &str) -> PathBuf {
 }
 
 const HINT: &str = "jaum";
+
+/// Converts the flow's guard spec into wire guard patterns for the sidecar.
+fn guard_patterns(spec: &GuardSpec) -> Vec<GuardPattern> {
+    spec.guard_patterns
+        .iter()
+        .map(|g| GuardPattern {
+            pattern: g.pattern.clone(),
+            reason: g.reason.clone(),
+        })
+        .collect()
+}
 
 /// Full application state.
 pub struct App {
@@ -516,10 +637,27 @@ pub struct App {
     /// re-review is still pending (new commit whose CI is running or red).
     pub(crate) ci_obs: HashMap<String, Vec<(Repo, PrCi)>>,
 
+    /// Sidecar process (lazy; respawned when it dies).
+    sidecar: Option<SidecarClient>,
+    /// Last health ping: `None` = no ping in flight; `Some` = waiting for the
+    /// pong (a second interval without one kills the hung process).
+    sidecar_pinged: Option<Instant>,
+    last_sidecar_ping: Instant,
+    /// In-flight permission requests waiting for a decision.
+    pub permissions: PermissionTracker,
+    /// When true, permission requests wait for a client decision (denied by
+    /// default after the timeout). While no client can answer (the structured
+    /// chat panel is pending), the daemon routes the request into the log and
+    /// auto-allows: the mechanical guards already ran in the sidecar.
+    pub route_permissions: bool,
+
     /// Binaries used by background jobs (their threads build their own adapters);
     /// tests point these at stubs so no real `claude`/`gh` is ever spawned.
     claude_bin: String,
     gh_bin: String,
+    /// node binary + bundle used to spawn the sidecar (stubbed in tests).
+    node_bin: String,
+    sidecar_bundle: PathBuf,
     /// Global-config access used by the init job; injectable so tests never touch
     /// the user's `~/jaum`.
     load_config: fn() -> Result<GlobalConfig>,
@@ -589,8 +727,18 @@ impl App {
             ci_tx,
             ci_rx,
             ci_obs: HashMap::new(),
+            sidecar: None,
+            sidecar_pinged: None,
+            last_sidecar_ping: Instant::now(),
+            permissions: PermissionTracker::default(),
+            route_permissions: false,
             claude_bin: "claude".into(),
             gh_bin: "gh".into(),
+            node_bin: "node".into(),
+            sidecar_bundle: resolve_bundle(
+                std::env::var("JAUM_SIDECAR_BUNDLE").ok().as_deref(),
+                &crate::config::jaum_home().unwrap_or_default(),
+            ),
             load_config: GlobalConfig::load,
             init_project: crate::config::init_project,
         };
@@ -615,7 +763,27 @@ impl App {
     fn rehydrate_one(&self, rec: SessionRecord) -> SessionEntry {
         // not resumable: already finished, or the cwd (worktree/repo) is gone.
         if rec.finished || !rec.cwd.exists() {
-            return SessionEntry::history(&rec);
+            return self.with_replayed_log(SessionEntry::history(&rec));
+        }
+        // Play is sidecar-backed: no process to relaunch. The entry comes back
+        // resumable (next turn resumes the claude session) with the log replayed.
+        if rec.kind == SessionKind::Play {
+            if rec.task.is_none() {
+                return self.with_replayed_log(SessionEntry::history(&rec));
+            }
+            let log = SessionLog::new(&self.home(), &rec.claude_session_id);
+            let mut e = SessionEntry::sidecar(
+                rec.kind,
+                rec.task.clone(),
+                rec.worktrees.clone(),
+                rec.claude_session_id.clone(),
+                rec.cwd.clone(),
+                log,
+            );
+            e.created = from_epoch_ms(rec.created_ms);
+            e.last_activity = from_epoch_ms(rec.last_activity_ms);
+            e.blocked = rec.blocked;
+            return self.with_replayed_log(e);
         }
         match self.resume_session(&rec) {
             Ok(session) => {
@@ -637,21 +805,20 @@ impl App {
         }
     }
 
-    /// Relaunches claude with `--resume` for the record, per kind.
+    /// Replays the persisted event log into the entry's text view (attach
+    /// replay: whoever comes back sees the conversation so far).
+    fn with_replayed_log(&self, mut e: SessionEntry) -> SessionEntry {
+        for event in SessionLog::new(&self.home(), &e.claude_session_id).replay() {
+            e.render_event(&event);
+        }
+        e
+    }
+
+    /// Relaunches claude with `--resume` for the record, per kind (PTY kinds:
+    /// review and setup migrate to the sidecar in a later phase).
     fn resume_session(&self, rec: &SessionRecord) -> Result<Session> {
         match rec.kind {
-            SessionKind::Play => {
-                let id = rec.task.as_deref().context("play record without task")?;
-                Play::new(
-                    &self.store,
-                    &self.git,
-                    &self.executor,
-                    &self.work_dir,
-                    self.repos.clone(),
-                    self.conventions.clone(),
-                )
-                .resume(id, &rec.claude_session_id, &rec.cwd)
-            }
+            SessionKind::Play => unreachable!("play resumes over the sidecar"),
             SessionKind::Review => {
                 let id = rec.task.as_deref().context("review record without task")?;
                 Review::new(
@@ -1085,35 +1252,287 @@ impl App {
         let result = Play::new(
             &self.store,
             &self.git,
-            &self.executor,
-            &self.work_dir,
             self.repos.clone(),
             self.conventions.clone(),
         )
-        .start(&id);
+        .launch(&id)
+        .and_then(|launch| self.open_play_session(launch));
         match result {
-            Ok(ps) => {
-                let PlaySession {
-                    id,
-                    session,
-                    worktrees,
-                    claude_session_id,
-                    ..
-                } = ps;
-                let cwd = worktrees[0].1.clone();
-                self.open_session(
-                    SessionKind::Play,
-                    Some(id.clone()),
-                    session,
-                    worktrees,
-                    claude_session_id,
-                    cwd,
-                );
-                self.status_msg = format!("play started on {id}");
-            }
+            Ok(()) => self.status_msg = format!("play started on {id}"),
             Err(e) => self.status_msg = format!("play failed: {e}"),
         }
         let _ = self.refresh();
+    }
+
+    // --- sidecar sessions (play) --------------------------------------------
+
+    /// Spawns the sidecar if absent or dead (lazy supervision).
+    fn ensure_sidecar(&mut self) -> Result<&SidecarClient> {
+        let dead = match &mut self.sidecar {
+            Some(client) => !client.is_alive(),
+            None => true,
+        };
+        if dead {
+            self.sidecar = Some(SidecarClient::spawn(&self.node_bin, &self.sidecar_bundle)?);
+        }
+        Ok(self.sidecar.as_ref().expect("just ensured"))
+    }
+
+    /// Sends the launch prompt as the session's first chat turn and registers
+    /// the sidecar-backed entry.
+    fn open_play_session(&mut self, launch: PlayLaunch) -> Result<()> {
+        let log = SessionLog::new(&self.home(), &launch.session_id);
+        let mut entry = SessionEntry::sidecar(
+            SessionKind::Play,
+            Some(launch.id.clone()),
+            launch.worktrees.clone(),
+            launch.session_id.clone(),
+            launch.cwd.clone(),
+            log,
+        );
+        let turn = ChatTurn {
+            request_id: format!("{}#1", launch.session_id),
+            session_id: launch.session_id.clone(),
+            resume: None,
+            cwd: Some(launch.cwd.clone()),
+            model: Some(launch.guards.model.clone()),
+            allowed_tools: Vec::new(),
+            disallowed_tools: launch.guards.disallowed_tools.clone(),
+            system_prompt_append: Some(launch.guards.system_prompt_append.clone()),
+            guard_patterns: guard_patterns(&launch.guards),
+            content: vec![ContentBlock::Text {
+                text: launch.prompt.clone(),
+            }],
+        };
+        let rx = self.ensure_sidecar()?.chat(turn)?;
+        if let Some(chat) = &mut entry.chat {
+            chat.rx = Some(rx);
+            chat.request_id = Some(format!("{}#1", launch.session_id));
+            chat.turn_seq = 1;
+        }
+        let key = entry.claude_session_id.clone();
+        self.sessions.push(entry);
+        self.sort_sessions();
+        let idx = self
+            .sessions
+            .iter()
+            .position(|e| e.claude_session_id == key)
+            .unwrap_or(0);
+        self.focus_session(idx);
+        self.persist_sessions();
+        Ok(())
+    }
+
+    /// Sends a follow-up user turn to a sidecar session, resuming the claude
+    /// conversation. Queues the text when a turn is already in flight.
+    fn send_chat_turn(&mut self, idx: usize, text: String) -> Result<()> {
+        let (task_id, session_id, cwd, seq) = {
+            let e = self
+                .sessions
+                .get_mut(idx)
+                .context("session index out of range")?;
+            let task_id = e.task.clone().context("session without a task")?;
+            if e.turn_active() {
+                let chat = e.chat.as_mut().context("not a sidecar session")?;
+                chat.queued.push_back(text);
+                return Ok(());
+            }
+            let chat = e.chat.as_mut().context("not a sidecar session")?;
+            chat.turn_seq += 1;
+            (
+                task_id,
+                e.claude_session_id.clone(),
+                e.cwd.clone(),
+                chat.turn_seq,
+            )
+        };
+        let spec: GuardSpec = Play::new(
+            &self.store,
+            &self.git,
+            self.repos.clone(),
+            self.conventions.clone(),
+        )
+        .resume_spec(&task_id)?;
+        let request_id = format!("{session_id}#{seq}");
+        let turn = ChatTurn {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            resume: Some(session_id),
+            cwd: Some(cwd),
+            model: Some(spec.model.clone()),
+            allowed_tools: Vec::new(),
+            disallowed_tools: spec.disallowed_tools.clone(),
+            system_prompt_append: Some(spec.system_prompt_append.clone()),
+            guard_patterns: guard_patterns(&spec),
+            content: vec![ContentBlock::Text { text }],
+        };
+        let rx = self.ensure_sidecar()?.chat(turn)?;
+        if let Some(chat) = self.sessions[idx].chat.as_mut() {
+            chat.rx = Some(rx);
+            chat.request_id = Some(request_id);
+        }
+        self.sessions[idx].blocked = false;
+        Ok(())
+    }
+
+    /// Pumps the sidecar events of every session: accumulates the log, feeds
+    /// the text view, updates the claude session id and routes permissions.
+    pub fn drain_sidecar(&mut self) {
+        let route_permissions = self.route_permissions;
+        let mut to_answer: Vec<String> = Vec::new();
+        let mut to_track: Vec<(String, String)> = Vec::new();
+        let mut to_send: Vec<(usize, String)> = Vec::new();
+        let mut to_unregister: Vec<String> = Vec::new();
+        let mut changed = false;
+
+        for idx in 0..self.sessions.len() {
+            let e = &mut self.sessions[idx];
+            // take the receiver so the whole entry stays mutable during the
+            // drain; it goes back unless the turn finished.
+            let Some(rx) = e.chat.as_mut().and_then(|c| c.rx.take()) else {
+                continue;
+            };
+            let mut turn_done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        match &event {
+                            SidecarEvent::Session {
+                                claude_session_id, ..
+                            } if *claude_session_id != e.claude_session_id => {
+                                e.claude_session_id = claude_session_id.clone();
+                                changed = true;
+                            }
+                            SidecarEvent::PermissionRequest { permission_id, .. } => {
+                                if route_permissions {
+                                    to_track
+                                        .push((e.claude_session_id.clone(), permission_id.clone()));
+                                } else {
+                                    to_answer.push(permission_id.clone());
+                                }
+                            }
+                            SidecarEvent::Done { .. } | SidecarEvent::Error { .. } => {
+                                turn_done = true;
+                            }
+                            _ => {}
+                        }
+                        if let Some(se) = event.to_session_event() {
+                            if let Some(chat) = &e.chat {
+                                let _ = chat.log.append(&se);
+                            }
+                            e.render_event(&se);
+                        }
+                        e.last_activity = SystemTime::now();
+                        if turn_done {
+                            break;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        turn_done = true;
+                        break;
+                    }
+                }
+            }
+            let chat = e.chat.as_mut().expect("drained a chat session");
+            if turn_done {
+                if let Some(request_id) = chat.request_id.take() {
+                    to_unregister.push(request_id);
+                }
+                if let Some(queued) = chat.queued.pop_front() {
+                    to_send.push((idx, queued));
+                }
+                changed = true;
+            } else {
+                chat.rx = Some(rx);
+            }
+        }
+
+        if let Some(client) = &self.sidecar {
+            for request_id in to_unregister {
+                client.unregister(&request_id);
+            }
+            for permission_id in to_answer {
+                let _ = client.respond_permission(&permission_id, PermissionDecision::Allow);
+            }
+        }
+        for (session_id, permission_id) in to_track {
+            self.permissions.track(&session_id, &permission_id);
+        }
+        for (idx, text) in to_send {
+            if let Err(e) = self.send_chat_turn(idx, text) {
+                self.status_msg = format!("queued turn failed: {e}");
+            }
+        }
+        if changed {
+            self.sort_sessions();
+            self.persist_sessions();
+        }
+    }
+
+    /// Health check (~30s): pings the sidecar and kills it when the previous
+    /// ping went unanswered (hung process); the next use respawns it.
+    pub fn tick_sidecar_health(&mut self) {
+        let Some(client) = &self.sidecar else {
+            return;
+        };
+        if client.pong_seen() {
+            self.sidecar_pinged = None;
+        }
+        if self.last_sidecar_ping.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.last_sidecar_ping = Instant::now();
+        if self.sidecar_pinged.is_some() {
+            if let Some(mut client) = self.sidecar.take() {
+                client.kill();
+            }
+            self.sidecar_pinged = None;
+            self.status_msg = "sidecar unresponsive; restarting".into();
+            return;
+        }
+        if self.sidecar.as_ref().is_some_and(|c| c.ping().is_ok()) {
+            self.sidecar_pinged = Some(Instant::now());
+        }
+    }
+
+    /// Expires unanswered permission requests: denies by default and marks
+    /// the session blocked so the board surfaces it.
+    pub fn tick_permissions(&mut self) {
+        let expired = self.permissions.expired(Instant::now());
+        if expired.is_empty() {
+            return;
+        }
+        for pending in expired {
+            if let Some(client) = &self.sidecar {
+                let _ = client.respond_permission(
+                    &pending.permission_id,
+                    PermissionDecision::Deny {
+                        message: Some("no decision within the deadline; denied by default".into()),
+                    },
+                );
+            }
+            if let Some(e) = self
+                .sessions
+                .iter_mut()
+                .find(|e| e.claude_session_id == pending.session_id)
+            {
+                e.blocked = true;
+                let event = ChatEvent::Error {
+                    category: "permission_timeout".into(),
+                    message: format!(
+                        "permission {} denied by default after the deadline",
+                        pending.permission_id
+                    ),
+                };
+                if let Some(chat) = &e.chat {
+                    let _ = chat.log.append(&event);
+                }
+                e.render_event(&event);
+                self.status_msg = format!("session blocked: {}", e.name());
+            }
+        }
+        self.persist_sessions();
     }
 
     pub fn review_selected(&mut self) {
@@ -1179,12 +1598,12 @@ impl App {
         };
 
         let msg = jaum_flows::review::handoff_message(&report);
-        if let Some(e) = self.sessions.get_mut(idx) {
-            if let Some(s) = &mut e.session {
-                let _ = s.write_line(&msg);
+        match self.send_chat_turn(idx, msg) {
+            Ok(()) => {
+                self.focus_session(idx);
+                self.status_msg = format!("{id} findings sent to play");
             }
-            self.focus_session(idx);
-            self.status_msg = format!("{id} findings sent to play");
+            Err(e) => self.status_msg = format!("handoff failed: {e}"),
         }
     }
 
@@ -2042,17 +2461,35 @@ impl App {
         }
     }
 
+    /// Aborts a sidecar session's in-flight turn (no-op for PTY sessions).
+    fn abort_chat_turn(&mut self, idx: usize) {
+        let request_id = self
+            .sessions
+            .get_mut(idx)
+            .and_then(|e| e.chat.as_mut())
+            .and_then(|chat| {
+                chat.rx = None;
+                chat.request_id.take()
+            });
+        if let (Some(request_id), Some(client)) = (request_id, &self.sidecar) {
+            let _ = client.abort(&request_id);
+            client.unregister(&request_id);
+        }
+    }
+
     /// Finishes the selected card's session: stops the process and cleans the
     /// worktrees, but KEEPS it in the list as done (✓), session history.
     pub fn finish_selected_session(&mut self) {
         let Some(idx) = self.current_session_idx() else {
             return;
         };
+        self.abort_chat_turn(idx);
         let was_live = self.sessions[idx].is_live();
         if let Some(s) = &mut self.sessions[idx].session {
             let _ = s.kill();
         }
         self.sessions[idx].session = None;
+        self.sessions[idx].chat = None;
         let task = self.sessions[idx].task.clone();
         let worktrees = self.sessions[idx].worktrees.clone();
         self.cleanup_worktrees(&task, &worktrees);
@@ -2073,6 +2510,7 @@ impl App {
         let Some(idx) = self.current_session_idx() else {
             return;
         };
+        self.abort_chat_turn(idx);
         let mut e = self.sessions.remove(idx);
         let was_live = e.is_live();
         if let Some(s) = &mut e.session {
@@ -2099,6 +2537,9 @@ impl App {
     /// boot. Worktree removal only happens on explicit `finish`/`close`.
     pub fn stop_all_sessions(&mut self) {
         self.persist_sessions();
+        for idx in 0..self.sessions.len() {
+            self.abort_chat_turn(idx);
+        }
         for e in &mut self.sessions {
             if let Some(s) = &mut e.session {
                 let _ = s.kill();

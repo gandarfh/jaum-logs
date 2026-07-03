@@ -1,0 +1,9 @@
+{
+  "input": {
+    "command": "cargo test"
+  },
+  "name": "Bash",
+  "request_id": "r#1",
+  "tool_use_id": "toolu_1",
+  "type": "tool_use"
+}

@@ -1,0 +1,20 @@
+{
+  "content": [
+    {
+      "text": "ok",
+      "type": "text"
+    },
+    {
+      "source": {
+        "data": "aWpn",
+        "media_type": "image/png",
+        "type": "base64"
+      },
+      "type": "image"
+    }
+  ],
+  "is_error": false,
+  "request_id": "r#1",
+  "tool_use_id": "toolu_1",
+  "type": "tool_result"
+}

@@ -1,0 +1,11 @@
+{
+  "content": [
+    {
+      "text": "ok",
+      "type": "text"
+    }
+  ],
+  "is_error": false,
+  "tool_use_id": "toolu_1",
+  "type": "tool_result"
+}

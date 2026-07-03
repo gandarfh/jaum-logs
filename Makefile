@@ -5,7 +5,7 @@ DEMO_DIR := /tmp/jaum-demo
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release run list test fmt demo clean install
+.PHONY: help build release run list test fmt demo clean install sidecar sidecar-test sidecar-install
 
 help: ## Lista os alvos disponiveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -41,3 +41,13 @@ clean: ## Remove os artefatos de build
 
 install: release ## Instala o binario jaum em ~/.cargo/bin
 	cargo install --path crates/cli
+
+sidecar: ## Gera o bundle do sidecar (sidecar/dist/jaum-sidecar.mjs)
+	cd sidecar && bun install && bun run build
+
+sidecar-test: ## Roda os testes do sidecar (bun test + typecheck)
+	cd sidecar && bun install && bun run typecheck && bun test
+
+sidecar-install: sidecar ## Instala o bundle em ~/jaum/sidecar/ (usado pelo daemon)
+	mkdir -p ~/jaum/sidecar
+	cp sidecar/dist/jaum-sidecar.mjs ~/jaum/sidecar/jaum-sidecar.mjs

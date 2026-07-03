@@ -30,9 +30,37 @@ jaum-logs/
     core/               # jaum-core: data model + .backlog/ store
       src/{model,store,error}.rs
       tests/store.rs
-    cli/                # jaum: binary (ratatui TUI lands in phase 7)
+    cli/                # jaum: binary (TUI + daemon + sidecar client)
       src/main.rs
+  sidecar/              # TypeScript bridge over @anthropic-ai/claude-agent-sdk
+    src/{index,protocol,chat,guard,content}.ts
 ```
+
+## Sidecar
+
+Play sessions run through a TypeScript sidecar built on the Claude Agent SDK.
+The daemon spawns one node process and talks JSONL over stdio: `chat` sends a
+turn, the sidecar streams `text_delta`/`tool_use`/`tool_result`/`done` back,
+`permission_request`/`permission_response` route tool approvals through the
+daemon (unanswered requests are denied after 120s and the session is marked
+blocked), and `abort` interrupts a running turn. Auth always rides on the
+`claude` CLI login (Claude Max): the sidecar drops `ANTHROPIC_API_KEY` from its
+environment.
+
+Every session appends its events to `~/jaum/<project>/.sessions/<id>.jsonl`;
+the log survives daemon restarts and is replayed (bounded) on attach. There is
+no automatic GC: the finish flow archives the logs of a closed task.
+
+The daemon looks for the bundle at `~/jaum/sidecar/jaum-sidecar.mjs`
+(override with `JAUM_SIDECAR_BUNDLE`). Build and install it with:
+
+```sh
+make sidecar-install   # requires bun; the daemon itself only needs node
+```
+
+The wire protocol is pinned by golden fixtures in
+`crates/cli/tests/fixtures/sidecar/`: the Rust tests generate and roundtrip
+them, and the sidecar's bun tests decode the same files.
 
 ## Guarantees
 
@@ -46,8 +74,9 @@ The tool classifies what is guaranteed as **hard**, **detective**, and
 - **Terminal, not API**: uses only the `claude` CLI, never the Anthropic API.
 - **PR-only**: play opens a PR (`gh pr create`), never merges.
 - **Parallelism across different repos**: one worktree per linked repo.
-- **Constraints `enforce: hook`**: become a PreToolUse hook (regex) that blocks
-  preventively on every call (path, command, migration, merge).
+- **Constraints `enforce: hook`**: become guard patterns (regex) the sidecar
+  applies inside `canUseTool`, blocking preventively on every call (path,
+  command, migration, merge) before any approval is asked.
 
 ### Detective (mandatory, not optional)
 
@@ -110,16 +139,18 @@ on every PR and on push to `main`:
 - **Formatting**: `cargo fmt --check`
 - **Lint**: `cargo clippy --all-targets -- -D warnings`
 - **Build and tests**: `cargo build --all-targets` + `cargo test --workspace`
+- **Sidecar**: `bun run typecheck` + `bun test` + `bun run build` in `sidecar/`
 - **Coverage**: `cargo llvm-cov`, minimum of 95% line coverage. The gate is
   blocking: the job fails below the minimum.
 
 The Makefile only has development targets (build, run, test, fmt, demo,
-install), no CI rules. To run the equivalent of the gates locally:
+install, sidecar), no CI rules. To run the equivalent of the gates locally:
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
+make sidecar-test
 cargo llvm-cov --workspace --summary-only   # requires: cargo install cargo-llvm-cov
 ```
 

@@ -123,6 +123,52 @@ fn stub_claude(dir: &Path, structured: &str) -> String {
     )
 }
 
+/// Points the app's sidecar at the scripted node stub (no real claude).
+fn sidecar_stub(app: &mut App) {
+    app.node_bin = "node".into();
+    app.sidecar_bundle = crate::sidecar::sidecar_tests::stub().to_path_buf();
+}
+
+/// Registers a sidecar-backed play entry without sending any turn.
+fn open_sidecar_play(app: &mut App, task: &str, session_id: &str, cwd: &Path) -> usize {
+    let log = SessionLog::new(&app.home(), session_id);
+    app.sessions.push(SessionEntry::sidecar(
+        SessionKind::Play,
+        Some(task.into()),
+        Vec::new(),
+        session_id.into(),
+        cwd.to_path_buf(),
+        log,
+    ));
+    app.sessions.len() - 1
+}
+
+/// Pumps sidecar events and permission deadlines until `pred` holds (10s cap).
+fn drain_until(app: &mut App, pred: impl Fn(&App) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        app.drain_sidecar();
+        app.tick_permissions();
+        if pred(app) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// Task whose objective carries a trigger word for the sidecar stub script.
+fn write_task_with_objective(backlog: &Path, id: &str, branch: &str, objective: &str) {
+    fs::create_dir_all(backlog).unwrap();
+    fs::write(
+        backlog.join(format!("{id}.md")),
+        format!(
+            "---\nid: {id}\ntype: impl\nstatus: backlog\nprs:\n  - repo: org/x\n    pr: 0\n    branch: {branch}\n---\n\n## Objective\n{objective}\n"
+        ),
+    )
+    .unwrap();
+}
+
 fn git(args: &[&str], cwd: &Path) {
     let st = Command::new("git")
         .args(args)
@@ -184,6 +230,7 @@ fn record(kind: SessionKind, task: Option<&str>, uuid: &str, cwd: &Path) -> Sess
         created_ms: 1_700_000_000_000,
         last_activity_ms: 1_700_000_001_000,
         finished: false,
+        blocked: false,
     }
 }
 
@@ -1015,7 +1062,7 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
         )],
     };
     let mut app = App::new(cfg, 0).unwrap();
-    app.executor = ClaudeExecutor::with_bin("cat");
+    sidecar_stub(&mut app);
     app.gh = Gh::with_bin("false");
 
     app.play_selected();
@@ -1026,9 +1073,38 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
     );
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.sessions[0].kind, SessionKind::Play);
+    assert!(
+        app.sessions[0].turn_active(),
+        "initial prompt is a chat turn"
+    );
     let wt = repo.with_file_name("repo.worktrees").join("feat-nice-work");
     assert!(wt.exists());
     assert_eq!(app.tasks[0].status, Status::Wip);
+
+    // the whole first turn flows through the stub into the session log
+    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::TextDelta { text } if text.contains("Objective"))),
+        "prompt not echoed into the log: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ToolUse { name, .. } if name == "Bash"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ToolResult { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::Done { usage: Some(_) }))
+    );
 
     app.close_selected_session();
     assert!(app.sessions.is_empty());
@@ -1117,15 +1193,10 @@ fn handoff_guards_missing_task_review_and_clean_report() {
 fn handoff_sends_findings_to_existing_play_session() {
     let dir = TmpDir::new("handoff-live");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
+    sidecar_stub(&mut app);
     write_dirty_review(&dir, "TASK-001");
     app.refresh().unwrap();
-    open_cat(
-        &mut app,
-        SessionKind::Play,
-        Some("TASK-001"),
-        "u-h",
-        dir.path(),
-    );
+    open_sidecar_play(&mut app, "TASK-001", "u-h", dir.path());
     app.handoff_selected();
     assert!(
         app.status_msg.contains("findings sent"),
@@ -1133,6 +1204,13 @@ fn handoff_sends_findings_to_existing_play_session() {
         app.status_msg
     );
     assert_eq!(app.board_focus, BoardFocus::Chat);
+    // the handoff turn resumes the claude session and completes over the stub
+    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
+    let text = app.sessions[0].parser.screen().contents();
+    assert!(
+        text.contains("Review found issues"),
+        "handoff text not echoed: {text}"
+    );
     app.stop_all_sessions();
 }
 
@@ -1153,7 +1231,7 @@ fn handoff_opens_play_when_none_is_live() {
         )],
     };
     let mut app = App::new(cfg, 0).unwrap();
-    app.executor = ClaudeExecutor::with_bin("cat");
+    sidecar_stub(&mut app);
     app.gh = Gh::with_bin("false");
     write_dirty_review(&dir, "TASK-001");
     app.refresh().unwrap();
@@ -1165,6 +1243,13 @@ fn handoff_opens_play_when_none_is_live() {
         app.status_msg
     );
     assert_eq!(app.sessions.len(), 1);
+    // the initial prompt is still in flight, so the handoff waits in the queue
+    assert_eq!(app.sessions[0].chat.as_ref().unwrap().queued.len(), 1);
+    // once the first turn finishes, the queued handoff goes out and completes
+    assert!(drain_until(&mut app, |a| {
+        let chat = a.sessions[0].chat.as_ref().unwrap();
+        chat.queued.is_empty() && !a.sessions[0].turn_active() && chat.turn_seq == 2
+    }));
     app.close_selected_session();
 }
 
@@ -2242,4 +2327,267 @@ fn cleanup_worktrees_ignores_sessions_without_task() {
         &Some("TASK-404".into()),
         &[("org/x".into(), dir.path().to_path_buf())],
     );
+}
+
+// --- sidecar sessions (play over the node stub) -----------------------------
+
+#[test]
+fn play_permission_request_is_auto_allowed_while_no_client_answers() {
+    let dir = TmpDir::new("perm-allow");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task_with_objective(&backlog, "TASK-001", "feat/perm-allow", "ask-permission");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    sidecar_stub(&mut app);
+    app.gh = Gh::with_bin("false");
+
+    app.play_selected();
+    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
+
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::PermissionRequest { tool_name, .. } if tool_name == "Write")),
+        "permission request not routed into the log: {events:?}"
+    );
+    // the stub reflects the decision in the done stop_reason: auto-allowed
+    assert!(!app.sessions[0].blocked);
+    assert_eq!(app.permissions.pending_count(), 0);
+    app.close_selected_session();
+}
+
+#[test]
+fn unanswered_permission_expires_denies_and_blocks_the_session() {
+    let dir = TmpDir::new("perm-deny");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task_with_objective(&backlog, "TASK-001", "feat/perm-deny", "ask-permission");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    sidecar_stub(&mut app);
+    app.gh = Gh::with_bin("false");
+    // route to clients (none exists) with an immediate deadline
+    app.route_permissions = true;
+    app.permissions = crate::sidecar::PermissionTracker::new(Duration::ZERO);
+
+    app.play_selected();
+    assert!(drain_until(&mut app, |a| a.sessions[0].blocked));
+
+    assert!(
+        app.status_msg.contains("session blocked"),
+        "{}",
+        app.status_msg
+    );
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, ChatEvent::Error { category, .. } if category == "permission_timeout")
+        ),
+        "timeout not logged: {events:?}"
+    );
+    // the deny reached the sidecar: the turn finished with the deny verdict
+    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::Done { .. })),
+        "deny did not close the turn: {events:?}"
+    );
+    // the persisted record carries the flag across restarts
+    let recs = app.load_session_records();
+    assert!(recs.iter().any(|r| r.blocked));
+    app.close_selected_session();
+}
+
+#[test]
+fn close_aborts_a_hanging_turn() {
+    let dir = TmpDir::new("abort-hang");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task_with_objective(&backlog, "TASK-001", "feat/abort-hang", "hang");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo.clone(),
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    sidecar_stub(&mut app);
+    app.gh = Gh::with_bin("false");
+
+    app.play_selected();
+    // the stub never finishes this turn on its own
+    let session_id = app.sessions[0].claude_session_id.clone();
+    let log_file = app
+        .home()
+        .join(".sessions")
+        .join(format!("{session_id}.jsonl"));
+    assert!(drain_until(&mut app, |_| log_file.exists()));
+    assert!(app.sessions[0].turn_active());
+
+    let wt = repo
+        .with_file_name("repo.worktrees")
+        .join("feat-abort-hang");
+    app.close_selected_session();
+    assert!(app.sessions.is_empty());
+    assert!(!wt.exists(), "worktree not cleaned after aborting");
+}
+
+#[test]
+fn rehydrated_play_session_replays_the_log() {
+    let dir = TmpDir::new("replay");
+    let work = dir.path().join(".jaum");
+    fs::create_dir_all(&work).unwrap();
+    let mut rec = record(SessionKind::Play, Some("TASK-001"), "s-replay", dir.path());
+    rec.blocked = true;
+    fs::write(
+        work.join("sessions.json"),
+        serde_json::to_string(&vec![rec]).unwrap(),
+    )
+    .unwrap();
+
+    // pre-existing event log for that session id under the project home
+    let home = dir.path().to_path_buf();
+    let log = SessionLog::new(&home, "s-replay");
+    log.append(&ChatEvent::TextDelta {
+        text: "hello from the past".into(),
+    })
+    .unwrap();
+    log.append(&ChatEvent::ToolUse {
+        tool_use_id: "tu".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command": "ls"}),
+    })
+    .unwrap();
+    log.append(&ChatEvent::Done { usage: None }).unwrap();
+
+    let app = app_with(&dir, &[("TASK-001", "wip")]);
+    assert_eq!(app.sessions.len(), 1);
+    let e = &app.sessions[0];
+    assert!(e.is_live(), "sidecar sessions come back resumable");
+    assert!(!e.turn_active(), "no turn is in flight after a restart");
+    assert!(e.blocked, "blocked flag survives the restart");
+    let text = e.parser.screen().contents();
+    assert!(
+        text.contains("hello from the past"),
+        "log not replayed: {text}"
+    );
+    assert!(
+        text.contains("[tool Bash]"),
+        "tool event not rendered: {text}"
+    );
+}
+
+#[test]
+fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
+    let dir = TmpDir::new("spawn-fail");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task(&backlog, "TASK-001", "backlog", "feat/no-sidecar");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    app.node_bin = "/nonexistent-node-jaum-test".into();
+    app.gh = Gh::with_bin("false");
+
+    app.play_selected();
+    assert!(app.status_msg.contains("play failed"), "{}", app.status_msg);
+    assert!(app.sessions.is_empty());
+}
+
+#[test]
+fn ensure_sidecar_respawns_a_dead_process() {
+    let dir = TmpDir::new("respawn");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+    app.ensure_sidecar().unwrap();
+    app.sidecar.as_mut().unwrap().kill();
+    assert!(!app.sidecar.as_mut().unwrap().is_alive());
+    app.ensure_sidecar().unwrap();
+    assert!(app.sidecar.as_mut().unwrap().is_alive());
+}
+
+#[test]
+fn sidecar_health_pings_and_restarts_a_hung_process() {
+    let dir = TmpDir::new("health");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+
+    // no sidecar yet: a tick is a no-op
+    app.tick_sidecar_health();
+    app.ensure_sidecar().unwrap();
+
+    // within the interval: nothing pinged yet
+    app.tick_sidecar_health();
+    assert!(app.sidecar_pinged.is_none());
+
+    // force the interval: the tick pings and awaits the pong
+    app.last_sidecar_ping = Instant::now() - Duration::from_secs(60);
+    app.tick_sidecar_health();
+    assert!(app.sidecar_pinged.is_some());
+
+    // the stub answers; the next tick clears the in-flight ping
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.sidecar_pinged.is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        app.tick_sidecar_health();
+    }
+    assert!(app.sidecar_pinged.is_none(), "pong never cleared the ping");
+
+    // a ping that never comes back kills the process for a lazy respawn
+    app.sidecar_pinged = Some(Instant::now());
+    app.last_sidecar_ping = Instant::now() - Duration::from_secs(60);
+    app.tick_sidecar_health();
+    assert!(app.sidecar.is_none());
+    assert!(app.status_msg.contains("sidecar unresponsive"));
+}
+
+#[test]
+fn permission_timeout_without_sidecar_still_blocks_the_session() {
+    let dir = TmpDir::new("perm-nosidecar");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    app.permissions = crate::sidecar::PermissionTracker::new(Duration::ZERO);
+    open_sidecar_play(&mut app, "TASK-001", "s-noside", dir.path());
+    app.permissions.track("s-noside", "perm-1");
+    app.tick_permissions();
+    assert!(app.sessions[0].blocked);
+}
+
+#[test]
+fn send_chat_turn_rejects_non_sidecar_sessions() {
+    let dir = TmpDir::new("turn-pty");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    open_cat(&mut app, SessionKind::Setup, None, "u-pty", dir.path());
+    let err = app.send_chat_turn(0, "hi".into()).unwrap_err();
+    assert!(err.to_string().contains("session without a task"));
+    app.stop_all_sessions();
 }

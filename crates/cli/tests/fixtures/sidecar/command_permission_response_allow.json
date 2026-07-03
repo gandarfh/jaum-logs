@@ -1,0 +1,7 @@
+{
+  "decision": {
+    "behavior": "allow"
+  },
+  "permission_id": "perm_1",
+  "type": "permission_response"
+}

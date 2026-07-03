@@ -40,6 +40,20 @@ jobs:
       - run: cargo build --all-targets
       - run: cargo test --workspace
 
+  sidecar:
+    name: Sidecar (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

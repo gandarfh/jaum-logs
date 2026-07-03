@@ -6,8 +6,8 @@ use jaum_core::Status;
 
 // The app/config modules are private to the binary; we re-exercise the pure logic
 // by recompiling them as part of the test crate. (app.rs references
-// `crate::config`, `crate::protocol` and `crate::snapshot`, so those must be
-// declared here too.)
+// `crate::config`, `crate::protocol`, `crate::snapshot`, `crate::session_event`
+// and `crate::sidecar`, so those must be declared here too.)
 #[path = "../src/app.rs"]
 #[allow(dead_code)]
 mod app;
@@ -20,6 +20,12 @@ mod protocol;
 #[path = "../src/snapshot.rs"]
 #[allow(dead_code)]
 mod snapshot;
+#[path = "../src/session_event.rs"]
+#[allow(dead_code)]
+mod session_event;
+#[path = "../src/sidecar.rs"]
+#[allow(dead_code)]
+mod sidecar;
 
 use app::{App, STATUS_ORDER, Tab, sort_for_board};
 
@@ -430,7 +436,7 @@ fn verdict_card_appears_only_for_task_with_review() {
 
 #[test]
 fn handoff_selected_sends_findings_to_play() {
-    use app::SessionKind;
+    use app::{SessionEntry, SessionKind};
     let dir = TmpDir::new("handoff");
     let mut a = app_with(&dir, &[("TASK-001", "review")]);
     // write a DIRTY review (1 finding + 1 failed constraint)
@@ -440,20 +446,30 @@ fn handoff_selected_sends_findings_to_play() {
     )
     .unwrap();
     a.refresh().unwrap();
-    // there's already a live play session for the task
-    a.open_session(
+    // a live play session with a turn in flight: the handoff queues behind it
+    let log = session_event::SessionLog::new(&dir.0, "uuid-h");
+    let mut entry = SessionEntry::sidecar(
         SessionKind::Play,
         Some("TASK-001".into()),
-        cat_session(),
         Vec::new(),
         "uuid-h".into(),
         dir.0.clone(),
+        log,
     );
+    let (_tx, rx) = std::sync::mpsc::channel();
+    {
+        let chat = entry.chat.as_mut().unwrap();
+        chat.rx = Some(rx);
+        chat.request_id = Some("uuid-h#1".into());
+        chat.turn_seq = 1;
+    }
+    a.sessions.push(entry);
 
     a.handoff_selected();
     assert_eq!(a.tab, Tab::Board);
     assert_eq!(a.board_focus, app::BoardFocus::Chat);
     assert!(a.status_msg.contains("sent"), "msg: {}", a.status_msg);
+    assert_eq!(a.sessions[0].chat.as_ref().unwrap().queued.len(), 1);
 }
 
 #[test]
@@ -533,6 +549,7 @@ fn session_record_roundtrip_serde() {
         created_ms: 1_700_000_000_000,
         last_activity_ms: 1_700_000_005_000,
         finished: false,
+        blocked: false,
     };
     let json = serde_json::to_string(&rec).unwrap();
     // kind serializes in lowercase
@@ -564,6 +581,7 @@ fn rehydrate_brings_finished_and_missing_cwd_as_history() {
             created_ms: 1_700_000_000_000,
             last_activity_ms: 1_700_000_001_000,
             finished: true,
+            blocked: false,
         },
         SessionRecord {
             kind: SessionKind::Play,
@@ -574,6 +592,7 @@ fn rehydrate_brings_finished_and_missing_cwd_as_history() {
             created_ms: 1_700_000_002_000,
             last_activity_ms: 1_700_000_003_000,
             finished: false,
+            blocked: false,
         },
     ];
     fs::write(

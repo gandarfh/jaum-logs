@@ -1,0 +1,55 @@
+// Mechanical guardrails evaluated inside canUseTool, before any human
+// approval: merge is always blocked, and each task constraint arrives as a
+// regex from the daemon. This replaces the PreToolUse hook of the PTY flow.
+
+import type { GuardPattern } from "./protocol.js";
+
+// Always blocked, independent of task constraints: merging is a manual user
+// command, never the agent's.
+const MERGE_RE = /git\s+merge|gh\s+pr\s+merge/i;
+
+// Input fields that carry the target a pattern is matched against (command
+// for Bash, paths for file tools), mirroring the old hook's extraction.
+const TARGET_FIELDS = ["command", "file_path", "path", "notebook_path"];
+
+export function guardTarget(input: Record<string, unknown>): string {
+  for (const field of TARGET_FIELDS) {
+    const value = input[field];
+    if (typeof value === "string" && value !== "") {
+      return value;
+    }
+  }
+  return "";
+}
+
+export type GuardVerdict = { blocked: false } | { blocked: true; reason: string };
+
+export function checkGuards(
+  toolName: string,
+  input: Record<string, unknown>,
+  patterns: GuardPattern[],
+  log: (msg: string) => void = () => {},
+): GuardVerdict {
+  const target = guardTarget(input);
+  if (toolName === "Bash" && MERGE_RE.test(target)) {
+    return {
+      blocked: true,
+      reason: "merge blocked by the tool (PR-only; merge is your command)",
+    };
+  }
+  for (const { pattern, reason } of patterns) {
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern, "i");
+    } catch {
+      // An uncompilable pattern is skipped, matching the old hook's failure
+      // mode (a bad grep -E regex never matched, it did not block everything).
+      log(`skipping invalid guard pattern: ${pattern}`);
+      continue;
+    }
+    if (target !== "" && re.test(target)) {
+      return { blocked: true, reason: `constraint (enforce: hook): ${reason}` };
+    }
+  }
+  return { blocked: false };
+}

@@ -1,0 +1,8 @@
+{
+  "permission_id": "perm_1",
+  "tool_input": {
+    "file_path": "/tmp/x"
+  },
+  "tool_name": "Write",
+  "type": "permission_request"
+}
