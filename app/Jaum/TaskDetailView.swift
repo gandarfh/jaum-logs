@@ -81,21 +81,26 @@ struct TaskDetailView: View {
     }
 
     private var tabPicker: some View {
-        Picker("Aba", selection: $session.selectedTab) {
-            Text("Detalhe").tag(SessionModel.DetailTab.detail)
+        HStack(spacing: 2) {
+            SessionTabButton(
+                title: "Detalhe",
+                isLive: false,
+                isSelected: session.selectedTab == .detail
+            ) {
+                session.selectedTab = .detail
+            }
             ForEach(task.sessions) { taskSession in
-                HStack(spacing: 5) {
-                    Text(taskSession.kind.displayName)
-                    if taskSession.isLive {
-                        StatusDot(status: .wip, size: 7)
-                    }
+                SessionTabButton(
+                    title: taskSession.kind.displayName,
+                    isLive: taskSession.isLive,
+                    isSelected: session.selectedTab == .session(taskSession.id)
+                ) {
+                    session.selectedTab = .session(taskSession.id)
                 }
-                .tag(SessionModel.DetailTab.session(taskSession.id))
             }
         }
-        .pickerStyle(.segmented)
-        .fixedSize()
-        .labelsHidden()
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 9).strokeBorder(.separator))
     }
 
     @ViewBuilder
@@ -114,6 +119,36 @@ struct TaskDetailView: View {
                 DetailTabView(task: task)
             }
         }
+    }
+}
+
+/// One tab of the session tab strip, styled like the mock's segmented strip
+/// (the system segmented Picker cannot render the live dot inside a segment).
+struct SessionTabButton: View {
+    let title: String
+    let isLive: Bool
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                if isLive {
+                    StatusDot(status: .wip, size: 7)
+                }
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? .primary : .secondary)
     }
 }
 

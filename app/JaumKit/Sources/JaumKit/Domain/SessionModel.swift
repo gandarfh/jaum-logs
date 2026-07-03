@@ -34,6 +34,7 @@ public final class SessionModel {
 
     private let backend: any SessionBackend
     private var consumeTask: Task<Void, Never>?
+    private var lastDispatch: Task<Void, Never>?
 
     public init(backend: any SessionBackend) {
         self.backend = backend
@@ -110,9 +111,13 @@ public final class SessionModel {
         dispatch(.denyPermission(id: pending.id))
     }
 
+    /// Commands are chained so they reach the backend in the order the user
+    /// issued them, even though each send is asynchronous.
     private func dispatch(_ command: SessionCommand) {
         let backend = self.backend
-        Task {
+        let previous = lastDispatch
+        lastDispatch = Task {
+            await previous?.value
             await backend.send(command)
         }
     }

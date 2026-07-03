@@ -103,6 +103,19 @@ struct TerminalModelTests {
         #expect(model.lastError != nil)
     }
 
+    @Test func reattachAfterDisconnectWorks() async throws {
+        let transport = FakeTransport()
+        let model = TerminalModel(transport: transport)
+        await model.attach(cols: 3, rows: 1)
+        try transport.push(.detach)
+        #expect(await waitUntil { model.connection == .disconnected })
+
+        await model.attach(cols: 3, rows: 1)
+        #expect(model.connection == .connected)
+        try transport.push(.frameFull(cols: 3, rows: 1, cells: [WireCell(x: 0, y: 0, sym: "z")]))
+        #expect(await waitUntil { model.grid.textRows() == ["z  "] })
+    }
+
     @Test func detachClosesTransportAndSecondAttachIsIgnored() async throws {
         let transport = FakeTransport()
         let model = TerminalModel(transport: transport)

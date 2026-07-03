@@ -114,4 +114,15 @@ struct DaemonClientTests {
             _ = try await client.attach(cols: 1, rows: 1)
         }
     }
+
+    @Test func secondAttachWithoutDetachIsRejected() async throws {
+        let transport = FakeTransport()
+        let client = DaemonClient(transport: transport)
+        _ = try await client.attach(cols: 1, rows: 1)
+        await #expect(throws: DaemonClient.ClientError.self) {
+            _ = try await client.attach(cols: 1, rows: 1)
+        }
+        await client.detach()
+        _ = try await client.attach(cols: 2, rows: 2)
+    }
 }

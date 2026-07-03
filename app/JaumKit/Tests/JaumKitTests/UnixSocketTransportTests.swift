@@ -53,6 +53,41 @@ struct UnixSocketTransportTests {
         }
     }
 
+    @Test func sendWithoutConnectThrows() async {
+        let transport = UnixSocketTransport(path: "/tmp/jaumkit-test-missing.sock")
+        await #expect(throws: UnixSocketTransport.TransportError.self) {
+            try await transport.send(Data([1]))
+        }
+    }
+
+    /// A failed connect must not poison the transport: after the daemon comes
+    /// up on the same path, the next connect() succeeds with a fresh
+    /// NWConnection (a cancelled one cannot be restarted).
+    @Test func reconnectAfterFailureWorks() async throws {
+        let path = "/tmp/jaumkit-test-\(getpid())-reconnect.sock"
+        let transport = UnixSocketTransport(path: path)
+        await #expect(throws: (any Error).self) {
+            _ = try await transport.connect()
+        }
+
+        let server = try UnixSocketServer(path: path)
+        defer { server.shutdown() }
+        server.acceptOnce { fd in
+            guard let payload = UnixSocketServer.readFrame(from: fd) else { return }
+            UnixSocketServer.write(Data([0, 0, 0, UInt8(payload.count)]) + payload, to: fd)
+        }
+
+        let incoming = try await transport.connect()
+        try await transport.send(try WireFraming.encode(ClientMessage.shutdown))
+        var chunks = Data()
+        for try await chunk in incoming {
+            chunks.append(chunk)
+            if chunks.count >= 4 { break }
+        }
+        #expect(!chunks.isEmpty)
+        await transport.close()
+    }
+
     @Test func defaultSocketPathLivesInTheJaumHome() {
         let path = defaultDaemonSocketPath()
         #expect(path.hasSuffix("/jaum/daemon.sock"))

@@ -8,16 +8,33 @@
 
 /* Begin PBXBuildFile section */
 		4A1000102E5F0010000000AA /* JaumKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4A1000202E5F0020000000AA /* JaumKit */; };
+		4A2000502E5F1050000000BB /* JaumKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4A2000602E5F1060000000BB /* JaumKit */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		4A2000802E5F1080000000BB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4A1000C02E5F00C0000000AA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4A1000802E5F0080000000AA;
+			remoteInfo = Jaum;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		4A1000302E5F0030000000AA /* Jaum.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Jaum.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4A2000202E5F1020000000BB /* JaumTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JaumTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4A1000402E5F0040000000AA /* Jaum */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Jaum;
+			sourceTree = "<group>";
+		};
+		4A2000302E5F1030000000BB /* JaumTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = JaumTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -31,6 +48,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		4A2000402E5F1040000000BB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4A2000502E5F1050000000BB /* JaumKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -38,6 +63,7 @@
 			isa = PBXGroup;
 			children = (
 				4A1000402E5F0040000000AA /* Jaum */,
+				4A2000302E5F1030000000BB /* JaumTests */,
 				4A1000702E5F0070000000AA /* Products */,
 			);
 			sourceTree = "<group>";
@@ -46,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				4A1000302E5F0030000000AA /* Jaum.app */,
+				4A2000202E5F1020000000BB /* JaumTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -76,7 +103,38 @@
 			productReference = 4A1000302E5F0030000000AA /* Jaum.app */;
 			productType = "com.apple.product-type.application";
 		};
+		4A2000A02E5F10A0000000BB /* JaumTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4A2000D02E5F10D0000000BB /* Build configuration list for PBXNativeTarget "JaumTests" */;
+			buildPhases = (
+				4A2000702E5F1070000000BB /* Sources */,
+				4A2000402E5F1040000000BB /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4A2000902E5F1090000000BB /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				4A2000302E5F1030000000BB /* JaumTests */,
+			);
+			name = JaumTests;
+			packageProductDependencies = (
+				4A2000602E5F1060000000BB /* JaumKit */,
+			);
+			productName = JaumTests;
+			productReference = 4A2000202E5F1020000000BB /* JaumTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXTargetDependency section */
+		4A2000902E5F1090000000BB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4A1000802E5F0080000000AA /* Jaum */;
+			targetProxy = 4A2000802E5F1080000000BB /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXProject section */
 		4A1000C02E5F00C0000000AA /* Project object */ = {
@@ -88,6 +146,10 @@
 				TargetAttributes = {
 					4A1000802E5F0080000000AA = {
 						CreatedOnToolsVersion = 16.0;
+					};
+					4A2000A02E5F10A0000000BB = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = 4A1000802E5F0080000000AA;
 					};
 				};
 			};
@@ -109,6 +171,7 @@
 			projectRoot = "";
 			targets = (
 				4A1000802E5F0080000000AA /* Jaum */,
+				4A2000A02E5F10A0000000BB /* JaumTests */,
 			);
 		};
 /* End PBXProject section */
@@ -125,6 +188,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		4A1000A02E5F00A0000000AA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4A2000702E5F1070000000BB /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -232,6 +302,38 @@
 			};
 			name = Release;
 		};
+		4A2000B02E5F10B0000000BB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jaum.JaumTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Jaum.app/Contents/MacOS/Jaum";
+			};
+			name = Debug;
+		};
+		4A2000C02E5F10C0000000BB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jaum.JaumTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Jaum.app/Contents/MacOS/Jaum";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -253,6 +355,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		4A2000D02E5F10D0000000BB /* Build configuration list for PBXNativeTarget "JaumTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4A2000B02E5F10B0000000BB /* Debug */,
+				4A2000C02E5F10C0000000BB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -264,6 +375,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		4A1000202E5F0020000000AA /* JaumKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = JaumKit;
+		};
+		4A2000602E5F1060000000BB /* JaumKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = JaumKit;
 		};

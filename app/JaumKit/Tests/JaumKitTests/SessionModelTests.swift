@@ -182,10 +182,10 @@ struct SessionModelTests {
         #expect(model.pendingPermission == nil)
     }
 
-    @Test func latencySamplesFeedTheAverageAndAreCapped() async {
+    @Test func latencySamplesFeedTheAverageAndAreCapped() async throws {
         let model = await startedModel()
         #expect(model.latencySamples.count == 7)
-        let average = try! #require(model.averageLatency)
+        let average = try #require(model.averageLatency)
         #expect(average > 20 && average < 30)
 
         for _ in 0..<70 {
@@ -210,6 +210,22 @@ struct SessionModelTests {
         let model = await startedModel()
         model.stop()
         #expect(model.connection == .disconnected)
+    }
+
+    @Test func commandsReachTheBackendInOrder() async {
+        let model = await startedModel()
+        let before = playMessages(model).count
+        for index in 1...4 {
+            model.sendText("mensagem \(index)", taskID: "jaum-42", sessionID: "jaum-42-play")
+        }
+        #expect(await waitUntil { self.playMessages(model).count == before + 8 })
+        let userTexts = playMessages(model).suffix(8)
+            .filter { $0.role == .user }
+            .compactMap { message -> String? in
+                if case .markdown(let text) = message.blocks.first { return text }
+                return nil
+            }
+        #expect(userTexts == ["mensagem 1", "mensagem 2", "mensagem 3", "mensagem 4"])
     }
 
     @Test func taskDerivedFieldsForTheList() async {

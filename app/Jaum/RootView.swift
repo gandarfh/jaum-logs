@@ -26,6 +26,7 @@ struct RootView: View {
     @Bindable var session: SessionModel
     @Bindable var terminal: TerminalModel
     @State private var mode: AppMode = .tasks
+    @State private var permissionPrompt: PermissionRequest?
 
     var body: some View {
         Group {
@@ -48,38 +49,74 @@ struct RootView: View {
                 .labelStyle(.titleAndIcon)
             }
             ToolbarItem(placement: .primaryAction) {
-                ConnectionPill(
-                    state: session.connection,
-                    averageLatency: session.averageLatency,
-                    samples: session.latencySamples
+                Button {
+                    reconnectIfNeeded()
+                } label: {
+                    ConnectionPill(
+                        state: terminal.connection,
+                        averageLatency: terminal.connection == .connected
+                            ? session.averageLatency : nil,
+                        samples: session.latencySamples
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(
+                    terminal.connection == .disconnected
+                        ? "Clique para conectar ao daemon" : "Conexão com o daemon"
                 )
             }
         }
-        .alert(item: permissionBinding) { request in
-            Alert(
-                title: Text("Permitir \(request.toolName)?"),
-                message: Text(request.request),
-                primaryButton: .default(Text("Aprovar")) {
-                    session.approvePendingPermission()
-                },
-                secondaryButton: .cancel(Text("Negar")) {
-                    session.denyPendingPermission()
-                }
-            )
+        .onChange(of: session.pendingPermission) { _, newValue in
+            permissionPrompt = newValue
+        }
+        .onAppear {
+            permissionPrompt = session.pendingPermission
+        }
+        .alert(
+            "Permitir \(permissionPrompt?.toolName ?? "ferramenta")?",
+            isPresented: permissionPresented,
+            presenting: permissionPrompt
+        ) { _ in
+            Button("Aprovar") {
+                decidePermission(approved: true)
+            }
+            Button("Negar", role: .cancel) {
+                decidePermission(approved: false)
+            }
+        } message: { request in
+            Text(request.request)
         }
         .sheet(item: $terminal.editorRequest) { request in
             EditorSheet(terminal: terminal, request: request)
         }
     }
 
-    /// The alert dismisses itself by writing nil; the decision buttons answer
-    /// the daemon, so plain dismissal (Esc) counts as denial.
-    private var permissionBinding: Binding<PermissionRequest?> {
+    func reconnectIfNeeded() {
+        guard terminal.connection == .disconnected else { return }
+        let terminal = self.terminal
+        Task {
+            await terminal.attach()
+        }
+    }
+
+    /// Exactly one decision per prompt: the buttons carry it, and Esc lands
+    /// on the cancel button (deny).
+    func decidePermission(approved: Bool) {
+        if approved {
+            session.approvePendingPermission()
+        } else {
+            session.denyPendingPermission()
+        }
+    }
+
+    /// Presentation-only binding: dismissal never dispatches a decision.
+    /// External resolution closes the alert via onChange.
+    var permissionPresented: Binding<Bool> {
         Binding(
-            get: { session.pendingPermission },
-            set: { newValue in
-                if newValue == nil, session.pendingPermission != nil {
-                    session.denyPendingPermission()
+            get: { permissionPrompt != nil },
+            set: { presented in
+                if !presented {
+                    permissionPrompt = nil
                 }
             }
         )

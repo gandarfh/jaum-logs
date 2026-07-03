@@ -117,34 +117,43 @@ struct SessionChatView: View {
         .padding(10)
     }
 
-    private func sendDraft() {
+    func sendDraft() {
         session.sendText(draft, taskID: task.id, sessionID: taskSession.id)
         draft = ""
     }
 
-    private func attachImage(_ result: Result<URL, any Error>) {
+    func attachImage(_ result: Result<URL, any Error>) {
         switch result {
         case .success(let url):
+            Task {
+                do {
+                    let data = try await Self.readFile(at: url)
+                    session.sendImage(
+                        data: data,
+                        filename: url.lastPathComponent,
+                        taskID: task.id,
+                        sessionID: taskSession.id
+                    )
+                } catch {
+                    attachmentError = error.localizedDescription
+                }
+            }
+        case .failure(let error):
+            attachmentError = error.localizedDescription
+        }
+    }
+
+    /// Reads off the main actor so a large image never blocks the UI.
+    static func readFile(at url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
             let secured = url.startAccessingSecurityScopedResource()
             defer {
                 if secured {
                     url.stopAccessingSecurityScopedResource()
                 }
             }
-            do {
-                let data = try Data(contentsOf: url)
-                session.sendImage(
-                    data: data,
-                    filename: url.lastPathComponent,
-                    taskID: task.id,
-                    sessionID: taskSession.id
-                )
-            } catch {
-                attachmentError = error.localizedDescription
-            }
-        case .failure(let error):
-            attachmentError = error.localizedDescription
-        }
+            return try Data(contentsOf: url)
+        }.value
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Synchronization
 
 /// Byte-level transport to the daemon. Abstracted so the client and the
 /// view-models can be tested against an in-memory implementation.
@@ -17,18 +18,28 @@ public func defaultDaemonSocketPath() -> String {
     return home + "/jaum/daemon.sock"
 }
 
-/// Unix domain socket transport backed by Network.framework.
-public final class UnixSocketTransport: WireTransport {
+/// Unix domain socket transport backed by Network.framework. Each `connect()`
+/// starts a fresh `NWConnection` (a cancelled connection cannot be restarted),
+/// so the transport survives failures and supports reconnection.
+public final class UnixSocketTransport: WireTransport, Sendable {
+    public enum TransportError: Error {
+        case notConnected
+    }
+
     private let path: String
-    private let connection: NWConnection
+    private let current = Mutex<NWConnection?>(nil)
 
     public init(path: String = defaultDaemonSocketPath()) {
         self.path = path
-        self.connection = NWConnection(to: .unix(path: path), using: .tcp)
     }
 
     public func connect() async throws -> AsyncThrowingStream<Data, any Error> {
-        let connection = self.connection
+        let connection = NWConnection(to: .unix(path: path), using: .tcp)
+        current.withLock { existing in
+            existing?.cancel()
+            existing = connection
+        }
+
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             let resumed = ResumeGuard()
             connection.stateUpdateHandler = { state in
@@ -70,7 +81,9 @@ public final class UnixSocketTransport: WireTransport {
     }
 
     public func send(_ data: Data) async throws {
-        let connection = self.connection
+        guard let connection = current.withLock({ $0 }) else {
+            throw TransportError.notConnected
+        }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             connection.send(
                 content: data,
@@ -85,7 +98,12 @@ public final class UnixSocketTransport: WireTransport {
     }
 
     public func close() async {
-        connection.cancel()
+        let connection = current.withLock { existing -> NWConnection? in
+            let previous = existing
+            existing = nil
+            return previous
+        }
+        connection?.cancel()
     }
 }
 

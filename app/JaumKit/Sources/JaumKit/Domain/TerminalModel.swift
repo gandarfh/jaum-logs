@@ -87,12 +87,24 @@ public final class TerminalModel {
             let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
             editorRequest = EditorRequest(path: path, content: content)
         case .message(.detach):
-            connection = .disconnected
+            handleStreamEnd(reason: nil)
         case .message(let frame):
             grid.apply(frame)
         case .disconnected(let reason):
-            connection = .disconnected
-            lastError = reason
+            handleStreamEnd(reason: reason)
+        }
+    }
+
+    /// Releases the dead connection so a later `attach()` can start over
+    /// (the transport builds a fresh connection per connect).
+    private func handleStreamEnd(reason: String?) {
+        connection = .disconnected
+        lastError = reason
+        consumeTask?.cancel()
+        consumeTask = nil
+        let client = self.client
+        Task {
+            await client.detach()
         }
     }
 }

@@ -8,6 +8,10 @@ public actor DaemonClient {
         case disconnected(reason: String?)
     }
 
+    public enum ClientError: Error {
+        case alreadyAttached
+    }
+
     private let transport: any WireTransport
     private var decoder = WireFrameDecoder()
     private var receiveTask: Task<Void, Never>?
@@ -17,7 +21,12 @@ public actor DaemonClient {
     }
 
     /// Connects, announces the terminal size and returns the event stream.
+    /// Call `detach()` before attaching again.
     public func attach(cols: UInt16, rows: UInt16) async throws -> AsyncStream<Event> {
+        guard receiveTask == nil else {
+            throw ClientError.alreadyAttached
+        }
+        decoder = WireFrameDecoder()
         let incoming = try await transport.connect()
         try await send(.resize(cols: cols, rows: rows))
         let (stream, continuation) = AsyncStream.makeStream(of: Event.self)

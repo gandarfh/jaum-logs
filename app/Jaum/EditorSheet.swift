@@ -6,8 +6,15 @@ import SwiftUI
 struct EditorSheet: View {
     @Bindable var terminal: TerminalModel
     let request: EditorRequest
-    @State private var content: String = ""
-    @State private var saveError: String?
+    @State var content: String
+    @State var saveError: String?
+
+    init(terminal: TerminalModel, request: EditorRequest, saveError: String? = nil) {
+        self.terminal = terminal
+        self.request = request
+        _content = State(initialValue: request.content)
+        _saveError = State(initialValue: saveError)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,20 +34,12 @@ struct EditorSheet: View {
                         .lineLimit(1)
                 }
                 Button("Cancelar") {
-                    Task {
-                        await terminal.cancelEditing()
-                    }
+                    Task { await cancel() }
                 }
                 .buttonStyle(GhostButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 Button("Salvar", systemImage: "checkmark") {
-                    Task {
-                        do {
-                            try await terminal.finishEditing(content: content)
-                        } catch {
-                            saveError = error.localizedDescription
-                        }
-                    }
+                    Task { await save() }
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
@@ -55,12 +54,21 @@ struct EditorSheet: View {
                 .padding(8)
                 .frame(minWidth: 560, minHeight: 340)
         }
-        .onAppear {
-            content = request.content
+    }
+
+    func save() async {
+        do {
+            try await terminal.finishEditing(content: content)
+        } catch {
+            saveError = error.localizedDescription
         }
     }
 
-    private var fileName: String {
+    func cancel() async {
+        await terminal.cancelEditing()
+    }
+
+    var fileName: String {
         (request.path as NSString).lastPathComponent
     }
 }
