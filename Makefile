@@ -5,7 +5,7 @@ DEMO_DIR := /tmp/jaum-demo
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release run list test fmt demo clean install
+.PHONY: help build release run list test fmt demo clean install app app-test
 
 help: ## Lista os alvos disponiveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -35,6 +35,14 @@ demo: build ## Monta um sandbox de exemplo (HOME isolado) e abre a TUI nele
 	cp -R examples/demo/. $(DEMO_DIR)/
 	cd $(DEMO_DIR) && HOME=$(DEMO_DIR)/home $(CURDIR)/$(BIN) init
 	cd $(DEMO_DIR) && HOME=$(DEMO_DIR)/home $(CURDIR)/$(BIN)
+
+app: ## Compila e abre o app macOS (debug)
+	xcodebuild -project app/Jaum.xcodeproj -scheme Jaum -destination 'platform=macOS' \
+		-derivedDataPath target/xcode -quiet build
+	open target/xcode/Build/Products/Debug/Jaum.app
+
+app-test: ## Roda os testes do package Swift compartilhado
+	cd app/JaumKit && swift test
 
 clean: ## Remove os artefatos de build
 	cargo clean
