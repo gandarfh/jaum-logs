@@ -12,78 +12,140 @@ struct SessionModelTests {
         return model
     }
 
-    @Test func startLoadsBoardChatAndPermission() async {
+    @Test func startLoadsProjectsTasksDocsAndPermission() async {
         let model = await startedModel()
         #expect(model.connection == .connected)
-        #expect(model.tasks.count == 5)
-        #expect(model.messages.count == 2)
+        #expect(model.projects.count == 2)
+        #expect(model.selectedProjectID == "jaum-logs")
+        #expect(model.tasks.count == 6)
+        #expect(model.docs.count == 2)
         #expect(model.pendingPermission?.toolName == "git push")
     }
 
     @Test func startTwiceDoesNotDuplicateTheStream() async {
         let model = await startedModel()
+        let count = model.tasks.count
         model.start()
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(model.messages.count == 2)
+        #expect(model.tasks.count == count)
     }
 
-    @Test func columnsFollowTheStatusOrderAndKeepEmptyOnes() async {
+    @Test func sectionsFollowStatusOrderAndOmitEmptyGroups() async {
         let model = await startedModel()
-        #expect(model.columns.map(\.status) == TaskStatus.allCases)
-        let bySlug = Dictionary(
-            uniqueKeysWithValues: model.columns.map { ($0.status, $0.tasks.map(\.id)) })
-        #expect(bySlug[.wip] == ["board-nativo"])
-        #expect(bySlug[.merged] == ["socket-client"])
+        #expect(model.sections.map(\.status) == [.wip, .review, .ready, .backlog, .merged])
+        #expect(model.sections.first?.tasks.map(\.id) == ["jaum-42", "jaum-39"])
     }
 
-    @Test func taskSelectionResolvesTheItem() async {
+    @Test func statusFilterNarrowsTheSections() async {
         let model = await startedModel()
-        model.selectedTaskID = "chat-estruturado"
+        model.statusFilter = .review
+        #expect(model.sections.map(\.status) == [.review])
+        #expect(model.sections.first?.tasks.map(\.id) == ["jaum-31"])
+        model.statusFilter = nil
+        #expect(model.sections.count == 5)
+    }
+
+    @Test func taskCountsFeedTheSidebar() async {
+        let model = await startedModel()
+        #expect(model.taskCount(for: .wip) == 2)
+        #expect(model.taskCount(for: .review) == 1)
+        #expect(model.taskCount(for: .merged) == 1)
+    }
+
+    @Test func selectingATaskResetsTheTabToDetail() async {
+        let model = await startedModel()
+        model.selectedTaskID = "jaum-42"
+        model.selectedTab = .session("jaum-42-play")
+        model.selectedTaskID = "jaum-31"
+        #expect(model.selectedTab == .detail)
         #expect(model.selectedTask?.status == .review)
-        model.selectedTaskID = "nope"
-        #expect(model.selectedTask == nil)
+        model.selectedTaskID = "jaum-31"
+        model.selectedTab = .session("jaum-31-review")
+        #expect(model.selectedTab == .session("jaum-31-review"))
     }
 
-    @Test func sendTextAppendsUserAndAssistantMessages() async {
+    @Test func sessionLookupResolvesTabs() async {
         let model = await startedModel()
-        model.sendText("  bora revisar o board  ")
-        #expect(await waitUntil { model.messages.count == 4 })
-        guard case .markdown(let text) = model.messages[2].blocks.first else {
-            Issue.record("expected markdown block")
-            return
-        }
-        #expect(text == "bora revisar o board")
-        #expect(model.messages[2].role == .user)
-        #expect(model.messages[3].role == .assistant)
+        let task = model.tasks.first { $0.id == "jaum-31" }!
+        #expect(model.session("jaum-31-review", of: task)?.kind == .review)
+        #expect(model.session("nope", of: task) == nil)
+    }
+
+    @Test func sendTextAppendsToTheAddressedSession() async {
+        let model = await startedModel()
+        let before = playMessages(model).count
+        model.sendText("  bora revisar  ", taskID: "jaum-42", sessionID: "jaum-42-play")
+        #expect(await waitUntil { self.playMessages(model).count == before + 2 })
+        let messages = playMessages(model)
+        #expect(messages[before].role == .user)
+        #expect(messages[before].blocks == [.markdown("bora revisar")])
+        #expect(messages[before + 1].role == .assistant)
     }
 
     @Test func blankTextIsIgnored() async {
         let model = await startedModel()
-        model.sendText("   \n  ")
+        let before = playMessages(model).count
+        model.sendText("   \n ", taskID: "jaum-42", sessionID: "jaum-42-play")
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(model.messages.count == 2)
+        #expect(playMessages(model).count == before)
     }
 
     @Test func sendImageAppendsAnImageBlock() async {
         let model = await startedModel()
-        model.sendImage(data: Data([1, 2, 3]), filename: "captura.png")
-        #expect(await waitUntil { model.messages.count == 3 })
-        #expect(model.messages[2].blocks.contains(.image(Data([1, 2, 3]))))
+        let before = playMessages(model).count
+        model.sendImage(
+            data: Data([1, 2, 3]),
+            filename: "captura.png",
+            taskID: "jaum-42",
+            sessionID: "jaum-42-play"
+        )
+        #expect(await waitUntil { self.playMessages(model).count == before + 1 })
+        #expect(playMessages(model).last?.blocks.contains(.image(Data([1, 2, 3]))) == true)
     }
 
     @Test func emptyImageIsIgnored() async {
         let model = await startedModel()
-        model.sendImage(data: Data(), filename: "vazio.png")
+        let before = playMessages(model).count
+        model.sendImage(
+            data: Data(), filename: "vazio.png", taskID: "jaum-42", sessionID: "jaum-42-play")
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(model.messages.count == 2)
+        #expect(playMessages(model).count == before)
+    }
+
+    @Test func chatToUnknownTaskOrSessionIsDropped() async {
+        let model = await startedModel()
+        model.apply(
+            .chat(
+                taskID: "nope",
+                sessionID: "x",
+                message: ChatMessage(
+                    id: "m", role: .user, blocks: [], timestamp: Date(timeIntervalSince1970: 0))
+            ))
+        model.apply(
+            .chat(
+                taskID: "jaum-42",
+                sessionID: "nope",
+                message: ChatMessage(
+                    id: "m", role: .user, blocks: [], timestamp: Date(timeIntervalSince1970: 0))
+            ))
+        #expect(playMessages(model).allSatisfy { $0.id != "m" })
+    }
+
+    @Test func chatWithKnownIDReplacesTheMessage() async {
+        let model = await startedModel()
+        var updated = playMessages(model)[0]
+        updated.blocks = [.markdown("editado")]
+        model.apply(.chat(taskID: "jaum-42", sessionID: "jaum-42-play", message: updated))
+        #expect(playMessages(model)[0].blocks == [.markdown("editado")])
     }
 
     @Test func approvingResolvesThePermissionAndLogsAToolCard() async {
         let model = await startedModel()
+        let before = playMessages(model).count
         model.approvePendingPermission()
         #expect(await waitUntil { model.pendingPermission == nil })
-        #expect(await waitUntil { model.messages.count == 3 })
-        guard case .tool(let tool) = model.messages[2].blocks.first else {
+        #expect(await waitUntil { self.playMessages(model).count == before + 1 })
+        guard case .tool(let tool) = playMessages(model).last?.blocks.first else {
             Issue.record("expected tool block")
             return
         }
@@ -94,50 +156,21 @@ struct SessionModelTests {
         let model = await startedModel()
         model.denyPendingPermission()
         #expect(await waitUntil { model.pendingPermission == nil })
-        #expect(await waitUntil { model.messages.count == 3 })
-        guard case .tool(let tool) = model.messages[2].blocks.first else {
-            Issue.record("expected tool block")
-            return
-        }
-        #expect(tool.state == .failed)
+        #expect(
+            await waitUntil {
+                if case .tool(let tool)? = self.playMessages(model).last?.blocks.first {
+                    return tool.state == .failed
+                }
+                return false
+            })
     }
 
     @Test func decisionsWithoutAPendingPermissionAreNoOps() async {
         let model = SessionModel(backend: PreviewBackend())
         model.approvePendingPermission()
         model.denyPendingPermission()
-        model.sendText("")
-        #expect(model.messages.isEmpty)
-    }
-
-    @Test func stopDisconnects() async {
-        let model = await startedModel()
-        model.stop()
-        #expect(model.connection == .disconnected)
-    }
-
-    @Test func chatUpdatedReplacesOrAppends() async {
-        let model = SessionModel(backend: PreviewBackend())
-        let original = ChatMessage(
-            id: "m1",
-            role: .assistant,
-            blocks: [.markdown("antes")],
-            timestamp: Date(timeIntervalSince1970: 0)
-        )
-        model.apply(.chat(original))
-        var updated = original
-        updated.blocks = [.markdown("depois")]
-        model.apply(.chatUpdated(updated))
-        #expect(model.messages == [updated])
-
-        let fresh = ChatMessage(
-            id: "m2",
-            role: .system,
-            blocks: [.markdown("novo")],
-            timestamp: Date(timeIntervalSince1970: 1)
-        )
-        model.apply(.chatUpdated(fresh))
-        #expect(model.messages.count == 2)
+        model.sendText("", taskID: "t", sessionID: "s")
+        #expect(model.tasks.isEmpty)
     }
 
     @Test func permissionResolvedForAnotherRequestKeepsThePending() async {
@@ -149,13 +182,65 @@ struct SessionModelTests {
         #expect(model.pendingPermission == nil)
     }
 
+    @Test func latencySamplesFeedTheAverageAndAreCapped() async {
+        let model = await startedModel()
+        #expect(model.latencySamples.count == 7)
+        let average = try! #require(model.averageLatency)
+        #expect(average > 20 && average < 30)
+
+        for _ in 0..<70 {
+            model.apply(.latency(milliseconds: 10))
+        }
+        #expect(model.latencySamples.count == 60)
+
+        let empty = SessionModel(backend: PreviewBackend())
+        #expect(empty.averageLatency == nil)
+    }
+
+    @Test func selectedDocFallsBackToTheFirst() async {
+        let model = await startedModel()
+        #expect(model.selectedDoc?.name == "conventions.md")
+        model.selectedDocID = "arquitetura.md"
+        #expect(model.selectedDoc?.name == "arquitetura.md")
+        model.selectedDocID = "nope.md"
+        #expect(model.selectedDoc?.name == "conventions.md")
+    }
+
+    @Test func stopDisconnects() async {
+        let model = await startedModel()
+        model.stop()
+        #expect(model.connection == .disconnected)
+    }
+
+    @Test func taskDerivedFieldsForTheList() async {
+        let model = await startedModel()
+        let wip = model.tasks.first { $0.id == "jaum-42" }!
+        #expect(wip.hasLiveSession)
+        #expect(wip.doneCriteriaCount == 2)
+        let review = model.tasks.first { $0.id == "jaum-31" }!
+        #expect(review.findingsCount == 2)
+        #expect(!review.hasLiveSession)
+    }
+
     @Test func displayNamesAreExposedForTheUI() {
-        #expect(TaskStatus.wip.displayName == "Em curso")
+        #expect(TaskStatus.wip.displayName == "Em progresso")
+        #expect(TaskStatus.review.displayName == "Review")
+        #expect(TaskStatus.ready.displayName == "Pronto")
+        #expect(TaskStatus.backlog.displayName == "Backlog")
+        #expect(TaskStatus.merged.displayName == "Merged")
         #expect(TaskKind.spike.displayName == "Spike")
         #expect(TaskKind.implementation.displayName == "Implementação")
+        #expect(SessionKind.play.displayName == "Play")
+        #expect(SessionKind.review.displayName == "Review")
         #expect(ConnectionState.connecting.displayName == "Conectando")
         #expect(ConnectionState.connected.displayName == "Conectado")
         #expect(ConnectionState.disconnected.displayName == "Desconectado")
-        #expect(TaskStatus.allCases.map(\.id) == ["backlog", "ready", "wip", "review", "merged"])
+        #expect(TaskStatus.allCases.map(\.id) == ["wip", "review", "ready", "backlog", "merged"])
+    }
+
+    private func playMessages(_ model: SessionModel) -> [ChatMessage] {
+        model.tasks.first { $0.id == "jaum-42" }?
+            .sessions.first { $0.id == "jaum-42-play" }?
+            .messages ?? []
     }
 }

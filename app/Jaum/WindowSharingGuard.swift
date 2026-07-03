@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Marks the hosting window as non-shareable (`sharingType = .none`), so it
-/// stays invisible to screen capture and screen sharing (Meet, Zoom, etc).
+/// Applies the validated invisibility setup to the hosting window:
+/// `sharingType = .none` plus the window level and collection behavior that
+/// keep it out of legacy screen capture (Meet shared from Chrome).
+/// Known limit: native ScreenCaptureKit capture (macOS 15+) ignores this.
 struct WindowSharingGuard: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = ProtectedView()
@@ -21,7 +23,11 @@ struct WindowSharingGuard: NSViewRepresentable {
         }
 
         func applyProtection() {
-            window?.sharingType = .none
+            guard let window else { return }
+            window.sharingType = .none
+            window.level = NSWindow.Level(
+                rawValue: Int(CGWindowLevelForKey(.assistiveTechHighWindow)))
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         }
     }
 }

@@ -12,6 +12,7 @@ struct JaumApp: App {
                 .background(WindowSharingGuard())
                 .task {
                     session.start()
+                    await terminal.attach()
                 }
         }
     }

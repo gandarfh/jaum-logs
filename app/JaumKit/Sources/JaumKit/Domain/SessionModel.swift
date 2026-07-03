@@ -1,16 +1,36 @@
 import Foundation
 import Observation
 
-/// View-model for one session: board, chat, permission prompt and connection
-/// state. Consumes a `SessionBackend` event stream and exposes user intents.
+/// View-model for the daemon connection: projects, task list grouped by
+/// status, per-task session tabs, docs, permission prompt and connection
+/// telemetry. Consumes a `SessionBackend` event stream and exposes intents.
 @MainActor
 @Observable
 public final class SessionModel {
+    /// The detail pane tab: the task's own detail or one of its sessions.
+    public enum DetailTab: Hashable, Sendable {
+        case detail
+        case session(String)
+    }
+
+    public private(set) var projects: [ProjectItem] = []
     public private(set) var tasks: [TaskItem] = []
-    public private(set) var messages: [ChatMessage] = []
+    public private(set) var docs: [DocItem] = []
     public private(set) var pendingPermission: PermissionRequest?
     public private(set) var connection: ConnectionState = .disconnected
-    public var selectedTaskID: TaskItem.ID?
+    public private(set) var latencySamples: [Double] = []
+
+    public var selectedProjectID: ProjectItem.ID?
+    public var statusFilter: TaskStatus?
+    public var selectedTaskID: TaskItem.ID? {
+        didSet {
+            if oldValue != selectedTaskID {
+                selectedTab = .detail
+            }
+        }
+    }
+    public var selectedTab: DetailTab = .detail
+    public var selectedDocID: DocItem.ID?
 
     private let backend: any SessionBackend
     private var consumeTask: Task<Void, Never>?
@@ -19,16 +39,36 @@ public final class SessionModel {
         self.backend = backend
     }
 
-    /// Board columns in a fixed status order, empty columns included so the
-    /// layout is stable.
-    public var columns: [BoardColumn] {
-        TaskStatus.allCases.map { status in
-            BoardColumn(status: status, tasks: tasks.filter { $0.status == status })
+    /// Task list sections in the fixed status order, honoring the sidebar
+    /// status filter; empty groups are omitted like in the approved mock.
+    public var sections: [TaskListSection] {
+        TaskStatus.allCases.compactMap { status in
+            if let filter = statusFilter, filter != status { return nil }
+            let grouped = tasks.filter { $0.status == status }
+            return grouped.isEmpty ? nil : TaskListSection(status: status, tasks: grouped)
         }
+    }
+
+    public func taskCount(for status: TaskStatus) -> Int {
+        tasks.filter { $0.status == status }.count
     }
 
     public var selectedTask: TaskItem? {
         tasks.first { $0.id == selectedTaskID }
+    }
+
+    public var selectedDoc: DocItem? {
+        docs.first { $0.id == selectedDocID } ?? docs.first
+    }
+
+    /// Average latency in milliseconds over the recent samples.
+    public var averageLatency: Double? {
+        guard !latencySamples.isEmpty else { return nil }
+        return latencySamples.reduce(0, +) / Double(latencySamples.count)
+    }
+
+    public func session(_ id: String, of task: TaskItem) -> TaskSession? {
+        task.sessions.first { $0.id == id }
     }
 
     public func start() {
@@ -49,15 +89,15 @@ public final class SessionModel {
         connection = .disconnected
     }
 
-    public func sendText(_ text: String) {
+    public func sendText(_ text: String, taskID: String, sessionID: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        dispatch(.sendText(trimmed))
+        dispatch(.sendText(taskID: taskID, sessionID: sessionID, text: trimmed))
     }
 
-    public func sendImage(data: Data, filename: String) {
+    public func sendImage(data: Data, filename: String, taskID: String, sessionID: String) {
         guard !data.isEmpty else { return }
-        dispatch(.sendImage(data: data, filename: filename))
+        dispatch(.sendImage(taskID: taskID, sessionID: sessionID, data: data, filename: filename))
     }
 
     public func approvePendingPermission() {
@@ -79,16 +119,17 @@ public final class SessionModel {
 
     func apply(_ event: SessionEvent) {
         switch event {
-        case .board(let tasks):
-            self.tasks = tasks
-        case .chat(let message):
-            messages.append(message)
-        case .chatUpdated(let message):
-            if let index = messages.firstIndex(where: { $0.id == message.id }) {
-                messages[index] = message
-            } else {
-                messages.append(message)
+        case .projects(let projects):
+            self.projects = projects
+            if selectedProjectID == nil {
+                selectedProjectID = projects.first?.id
             }
+        case .tasks(let tasks):
+            self.tasks = tasks
+        case .docs(let docs):
+            self.docs = docs
+        case .chat(let taskID, let sessionID, let message):
+            appendChat(taskID: taskID, sessionID: sessionID, message: message)
         case .permissionRequested(let request):
             pendingPermission = request
         case .permissionResolved(let id, _):
@@ -97,6 +138,25 @@ public final class SessionModel {
             }
         case .connection(let state):
             connection = state
+        case .latency(let milliseconds):
+            latencySamples.append(milliseconds)
+            if latencySamples.count > 60 {
+                latencySamples.removeFirst(latencySamples.count - 60)
+            }
         }
+    }
+
+    private func appendChat(taskID: String, sessionID: String, message: ChatMessage) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        guard
+            let sessionIndex = tasks[taskIndex].sessions.firstIndex(where: { $0.id == sessionID })
+        else { return }
+        var session = tasks[taskIndex].sessions[sessionIndex]
+        if let existing = session.messages.firstIndex(where: { $0.id == message.id }) {
+            session.messages[existing] = message
+        } else {
+            session.messages.append(message)
+        }
+        tasks[taskIndex].sessions[sessionIndex] = session
     }
 }

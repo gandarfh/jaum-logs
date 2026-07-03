@@ -1,26 +1,23 @@
 import JaumKit
 import SwiftUI
 
-enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
-    case board
-    case chat
-    case terminal
+enum AppMode: String, CaseIterable, Identifiable {
+    case tasks
+    case docs
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .board: "Board"
-        case .chat: "Chat da sessão"
-        case .terminal: "Terminal"
+        case .tasks: "Tasks"
+        case .docs: "Docs"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .board: "square.grid.3x1.below.line.grid.1x2"
-        case .chat: "bubble.left.and.bubble.right"
-        case .terminal: "terminal"
+        case .tasks: "list.bullet"
+        case .docs: "doc.text"
         }
     }
 }
@@ -28,32 +25,36 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
 struct RootView: View {
     @Bindable var session: SessionModel
     @Bindable var terminal: TerminalModel
-    @State private var sidebarSelection: SidebarItem? = .board
+    @State private var mode: AppMode = .tasks
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(session: session, selection: $sidebarSelection)
-        } content: {
-            switch sidebarSelection ?? .board {
-            case .board:
-                BoardView(session: session)
-            case .chat:
-                ChatView(session: session)
-            case .terminal:
-                TerminalMirrorView(terminal: terminal)
+        Group {
+            switch mode {
+            case .tasks:
+                TasksSplitView(session: session)
+            case .docs:
+                DocsSplitView(session: session)
             }
-        } detail: {
-            if let task = session.selectedTask {
-                TaskDetailView(task: task)
-            } else {
-                ContentUnavailableView(
-                    "Nenhuma task selecionada",
-                    systemImage: "sidebar.right",
-                    description: Text("Escolha uma task no board para ver os detalhes.")
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Picker("Modo", selection: $mode) {
+                    ForEach(AppMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage)
+                            .tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelStyle(.titleAndIcon)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                ConnectionPill(
+                    state: session.connection,
+                    averageLatency: session.averageLatency,
+                    samples: session.latencySamples
                 )
             }
         }
-        .navigationTitle("Jaum")
         .alert(item: permissionBinding) { request in
             Alert(
                 title: Text("Permitir \(request.toolName)?"),
@@ -85,53 +86,135 @@ struct RootView: View {
     }
 }
 
-struct SidebarView: View {
+/// Approved task layout: sidebar (projects and status filters), task list
+/// grouped by status, detail pane with the task's session tabs.
+struct TasksSplitView: View {
     @Bindable var session: SessionModel
-    @Binding var selection: SidebarItem?
 
     var body: some View {
-        List(selection: $selection) {
-            Section("Projeto") {
-                ForEach(SidebarItem.allCases) { item in
-                    Label(item.title, systemImage: item.systemImage)
-                        .tag(item)
-                }
-            }
-            Section("Andamento") {
-                ForEach(session.columns) { column in
-                    HStack {
-                        Text(column.status.displayName)
-                        Spacer()
-                        Text("\(column.tasks.count)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                }
+        NavigationSplitView {
+            SidebarView(session: session)
+                .navigationSplitViewColumnWidth(min: 170, ideal: 210)
+        } content: {
+            TaskListView(session: session)
+                .navigationSplitViewColumnWidth(min: 250, ideal: 296)
+        } detail: {
+            if let task = session.selectedTask {
+                TaskDetailView(session: session, task: task)
+            } else {
+                ContentUnavailableView(
+                    "Nenhuma task selecionada",
+                    systemImage: "sidebar.right",
+                    description: Text("Escolha uma task na lista para ver o detalhe.")
+                )
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            ConnectionBadge(state: session.connection)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-        }
-        .navigationSplitViewColumnWidth(min: 180, ideal: 220)
     }
 }
 
-struct ConnectionBadge: View {
-    let state: ConnectionState
+struct SidebarView: View {
+    @Bindable var session: SessionModel
 
     var body: some View {
-        Label(state.displayName, systemImage: "circle.fill")
-            .font(.footnote)
-            .foregroundStyle(color)
-    }
-
-    private var color: Color {
-        switch state {
-        case .connected: .green
-        case .connecting: .orange
-        case .disconnected: .gray
+        List(selection: $session.selectedProjectID) {
+            Section("Projetos") {
+                ForEach(session.projects) { project in
+                    HStack {
+                        Label(project.name, systemImage: "folder")
+                        Spacer()
+                        Text("\(project.taskCount)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .tag(project.id)
+                }
+            }
+            Section("Status") {
+                ForEach(TaskStatus.allCases) { status in
+                    Button {
+                        session.statusFilter = session.statusFilter == status ? nil : status
+                    } label: {
+                        HStack(spacing: 9) {
+                            StatusDot(status: status)
+                            Text(status.displayName)
+                            Spacer()
+                            Text("\(session.taskCount(for: status))")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(
+                        session.statusFilter == status
+                            ? Color.primary.opacity(0.08) : Color.clear
+                    )
+                }
+            }
         }
+        .listStyle(.sidebar)
+    }
+}
+
+/// Docs screen: document list in the sidebar, rendered markdown on the right.
+struct DocsSplitView: View {
+    @Bindable var session: SessionModel
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $session.selectedDocID) {
+                Section("Documentos") {
+                    ForEach(session.docs) { doc in
+                        Label(doc.name, systemImage: "doc.text")
+                            .tag(doc.id)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 170, ideal: 210)
+        } detail: {
+            if let doc = session.selectedDoc {
+                DocView(doc: doc)
+            } else {
+                ContentUnavailableView("Sem documentos", systemImage: "doc.text")
+            }
+        }
+    }
+}
+
+struct DocView: View {
+    let doc: DocItem
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(doc.name)
+                    .font(.title3.weight(.bold))
+                if !doc.subtitle.isEmpty {
+                    Text(doc.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                    .padding(.vertical, 6)
+                ForEach(Array(doc.content.split(separator: "\n\n").enumerated()), id: \.offset) {
+                    _, paragraph in
+                    let block = String(paragraph)
+                    if block.hasPrefix("## ") {
+                        Text(block.dropFirst(3))
+                            .font(.headline)
+                            .padding(.top, 8)
+                    } else {
+                        MarkdownText(block)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(22)
+        }
+        .navigationTitle(doc.name)
     }
 }
