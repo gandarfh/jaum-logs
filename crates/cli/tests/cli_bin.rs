@@ -417,9 +417,25 @@ fn attach_runs_full_client_session_over_pty() {
     let mut stdin = child.stdin.take().unwrap();
 
     // accept until the real client shows up (attach() probes with a bare connect
-    // and drops it; on such dead sockets setsockopt can fail — skip them)
+    // and drops it; on such dead sockets setsockopt can fail — skip them).
+    // Bounded: if the client dies before connecting, fail instead of hanging.
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
     let (mut conn, mut reader) = loop {
-        let (conn, _) = listener.accept().unwrap();
+        let conn = match listener.accept() {
+            Ok((conn, _)) => conn,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("client never connected to the fake daemon");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        };
+        // the accepted socket may inherit non-blocking from the listener
+        conn.set_nonblocking(false).unwrap();
         if conn
             .set_read_timeout(Some(Duration::from_secs(15)))
             .is_err()
