@@ -1,0 +1,10 @@
+{
+  "Key": {
+    "code": {
+      "Char": "p"
+    },
+    "kind": "Press",
+    "modifiers": "CONTROL",
+    "state": ""
+  }
+}

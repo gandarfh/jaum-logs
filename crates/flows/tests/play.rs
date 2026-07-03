@@ -352,6 +352,150 @@ fn start_injects_session_id_and_resume_resumes_without_prompt() {
     assert!(flags.cwd.is_some(), "resume keeps the worktree cwd");
 }
 
+const FIXTURE_BARE: &str = r#"---
+id: TASK-002
+type: impl
+status: ready
+---
+
+## Objective
+Just do it.
+"#;
+
+fn bare_task() -> Task {
+    let dir = TmpDir::new("bare");
+    let store = Store::new(&dir.0);
+    fs::write(dir.0.join("TASK-002.md"), FIXTURE_BARE).unwrap();
+    store.get("TASK-002").unwrap()
+}
+
+#[test]
+fn build_prompt_without_refs_or_constraints_skips_sections() {
+    let p = build_prompt(&bare_task(), "");
+    assert!(p.contains("Just do it."));
+    assert!(!p.contains("## Context"), "no refs -> no context section");
+    let t = reinjection_text(&bare_task(), "");
+    assert!(!t.contains("Mechanically blocked"));
+    assert!(!t.contains("Your responsibility"));
+    assert!(t.contains("do NOT merge")); // fixed reminder always present
+}
+
+#[test]
+fn start_rejects_task_without_linked_prs() {
+    let root = TmpDir::new("noprs");
+    let backlog = root.0.join(".backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(backlog.join("TASK-002.md"), FIXTURE_BARE).unwrap();
+
+    let store = Store::new(&backlog);
+    let git = Git::new();
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        std::collections::HashMap::new(),
+        String::new(),
+    );
+
+    let err = match play.start("TASK-002") {
+        Ok(_) => panic!("should reject a task without prs"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("no repo/branch linked"));
+}
+
+#[test]
+fn reinject_pushes_constraints_into_the_session() {
+    use std::io::Read as _;
+    let root = TmpDir::new("reinject");
+    let backlog = root.0.join(".backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
+    let repos_root = root.0.join("repos");
+    git_init(&repos_root.join("repo"));
+
+    let store = Store::new(&backlog);
+    let git = Git::new();
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let repos =
+        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        repos,
+        String::new(),
+    );
+
+    let mut ps = play.start("TASK-001").unwrap();
+    let mut reader = ps.session.reader().unwrap();
+
+    play.reinject(&mut ps).unwrap();
+    ps.session.write_input(&[0x04]).unwrap(); // EOF
+
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf).unwrap();
+    assert!(
+        buf.contains("do not run migration"),
+        "reinject did not inject the constraints:\n{buf}"
+    );
+    play.stop(&mut ps).unwrap();
+}
+
+#[test]
+fn stop_skips_worktree_whose_link_was_removed() {
+    let root = TmpDir::new("stopgone");
+    let backlog = root.0.join(".backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
+    let repos_root = root.0.join("repos");
+    git_init(&repos_root.join("repo"));
+
+    let store = Store::new(&backlog);
+    let git = Git::new();
+    let rec = Rec {
+        calls: RefCell::new(Vec::new()),
+    };
+    let repos =
+        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
+    let play = Play::new(
+        &store,
+        &git,
+        &rec,
+        root.0.join(".jaum"),
+        repos,
+        String::new(),
+    );
+
+    let mut ps = play.start("TASK-001").unwrap();
+    // the task loses its prs link before stop: nothing to remove for that repo
+    let unlinked = FIXTURE.replace("status: ready", "status: wip");
+    let unlinked = unlinked
+        .lines()
+        .filter(|l| {
+            !(l.starts_with("prs:")
+                || l.contains("repo: myorg/repo")
+                || l.contains("pr: 0")
+                || l.contains("branch: feat/task-001"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(backlog.join("TASK-001.md"), unlinked).unwrap();
+
+    play.stop(&mut ps).unwrap();
+    assert!(
+        ps.worktrees[0].1.exists(),
+        "worktree stays when the link is gone"
+    );
+}
+
 #[test]
 fn start_rejects_spike() {
     let root = TmpDir::new("spike");

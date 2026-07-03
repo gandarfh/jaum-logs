@@ -142,6 +142,73 @@ fn run_tolerates_failing_gh_as_not_created() {
 }
 
 #[test]
+fn run_treats_unmapped_repo_as_not_created() {
+    let dir = TmpDir::new("unmapped");
+    let store = store_with(
+        &dir,
+        "TASK-005",
+        "review",
+        "  - repo: org/unmapped\n    pr: 7\n    branch: feat/a\n",
+    );
+    let gh = Gh::with_bin(fake_gh(&dir));
+    let finish = Finish::new(&store, &gh, repos(&dir)); // org/unmapped absent
+
+    let agg = finish.run("TASK-005").unwrap();
+    assert_eq!(agg, MergeState::NotCreated);
+    assert_eq!(store.get("TASK-005").unwrap().status, Status::Review);
+}
+
+#[test]
+fn run_without_prs_is_not_created() {
+    let dir = TmpDir::new("noprs");
+    let backlog = dir.0.join(".backlog");
+    fs::create_dir_all(&backlog).unwrap();
+    fs::write(
+        backlog.join("TASK-006.md"),
+        "---\nid: TASK-006\ntype: impl\nstatus: review\n---\n\n## Objective\nx\n",
+    )
+    .unwrap();
+    let store = Store::new(&backlog);
+    let gh = Gh::with_bin(fake_gh(&dir));
+    let finish = Finish::new(&store, &gh, repos(&dir));
+
+    assert_eq!(finish.run("TASK-006").unwrap(), MergeState::NotCreated);
+}
+
+#[test]
+fn run_aggregates_closed_pr_as_closed() {
+    let dir = TmpDir::new("closed");
+    let store = store_with(
+        &dir,
+        "TASK-007",
+        "review",
+        "  - repo: org/x\n    pr: 9\n    branch: feat/a\n",
+    );
+    let gh = Gh::with_bin(fake_gh(&dir));
+    let finish = Finish::new(&store, &gh, repos(&dir));
+
+    assert_eq!(finish.run("TASK-007").unwrap(), MergeState::Closed);
+    assert_eq!(store.get("TASK-007").unwrap().status, Status::Review);
+}
+
+#[test]
+fn run_aggregates_unrecognized_gh_state_as_unknown() {
+    let dir = TmpDir::new("unknown");
+    // pr 8 hits the fake gh fallback ("WEIRD") -> MergeState::Unknown
+    let store = store_with(
+        &dir,
+        "TASK-008",
+        "review",
+        "  - repo: org/x\n    pr: 8\n    branch: feat/a\n",
+    );
+    let gh = Gh::with_bin(fake_gh(&dir));
+    let finish = Finish::new(&store, &gh, repos(&dir));
+
+    assert_eq!(finish.run("TASK-008").unwrap(), MergeState::Unknown);
+    assert_eq!(store.get("TASK-008").unwrap().status, Status::Review);
+}
+
+#[test]
 fn merge_state_only_reads_does_not_change_status() {
     let dir = TmpDir::new("readonly");
     let store = store_with(

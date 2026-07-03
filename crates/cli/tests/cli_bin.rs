@@ -1,0 +1,524 @@
+//! End-to-end tests spawning the real `jaum` binary. Every process gets an
+//! isolated HOME (so `~/jaum` never touches the user's), and anything that
+//! reaches the TUI runs in its own session (setsid) so it can never grab the
+//! developer's terminal: without a controlling tty the client fails fast.
+
+use std::fs;
+use std::io::{BufReader, Read, Write as _};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+#[path = "../src/config.rs"]
+#[allow(dead_code)]
+mod config;
+#[path = "../src/protocol.rs"]
+#[allow(dead_code)]
+mod protocol;
+
+use config::{Config, Project};
+use protocol::{ClientMsg, write_msg};
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn jaum_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_jaum")
+}
+
+/// Isolated HOME for one test; removed on drop.
+struct Home(PathBuf);
+
+impl Home {
+    fn new(tag: &str) -> Self {
+        let mut p = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        p.push(format!("jaum-bin-{tag}-{}-{n}", std::process::id()));
+        fs::create_dir_all(p.join("jaum")).unwrap();
+        Home(p)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn sock(&self) -> PathBuf {
+        self.0.join("jaum/daemon.sock")
+    }
+
+    /// Registers a project with a small backlog and returns its root.
+    fn with_project(&self) -> PathBuf {
+        let root = self.0.join("proj");
+        let backlog = self.0.join("jaum/proj/backlog");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&backlog).unwrap();
+        fs::create_dir_all(self.0.join("jaum/proj/docs")).unwrap();
+        fs::write(
+            backlog.join("TASK-001.md"),
+            "---\nid: TASK-001\ntype: impl\nstatus: backlog\n---\n\n## Objective\nx\n",
+        )
+        .unwrap();
+        let cfg = Config {
+            projects: vec![Project {
+                name: "proj".into(),
+                root: root.clone(),
+                backlog,
+                docs: self.0.join("jaum/proj/docs"),
+                work_dir: self.0.join("jaum/proj/work"),
+                repos: Vec::new(),
+            }],
+        };
+        cfg.save_to(&self.0.join("jaum/config.toml")).unwrap();
+        root
+    }
+
+    fn jaum(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(jaum_bin());
+        cmd.args(args)
+            .env("HOME", self.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    /// Best-effort daemon shutdown so a failing test never leaks a process.
+    fn stop_daemon(&self) {
+        if let Ok(mut s) = UnixStream::connect(self.sock()) {
+            let _ = write_msg(&mut s, &ClientMsg::Shutdown);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.sock().exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        self.stop_daemon();
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs in a fresh session: no controlling terminal, so any code path that
+/// needs a real tty fails instead of touching the terminal running the tests.
+fn run_detached(mut cmd: Command) -> Output {
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    wait_with_timeout(cmd.spawn().unwrap(), Duration::from_secs(30))
+}
+
+fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match child.try_wait().unwrap() {
+            Some(_) => return child.wait_with_output().unwrap(),
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let _ = child.kill();
+    panic!("process did not exit within {timeout:?}");
+}
+
+fn stdout_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn wait_for_socket(sock: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if UnixStream::connect(sock).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+// --- init --------------------------------------------------------------------
+
+#[test]
+fn init_detects_repos_and_registers_project() {
+    let home = Home::new("init");
+    let root = home.path().join("widget");
+    fs::create_dir_all(root.join(".git")).unwrap();
+
+    let out = home.jaum(&["init"]).current_dir(&root).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("project 'widget' registered"));
+    assert!(text.contains("repo: widget ->"), "stdout: {text}");
+    assert!(home.path().join("jaum/config.toml").exists());
+    assert!(home.path().join("jaum/widget/conventions.md").exists());
+}
+
+#[test]
+fn init_reports_when_no_repo_is_detected() {
+    let home = Home::new("init-empty");
+    let root = home.path().join("bare");
+    fs::create_dir_all(&root).unwrap();
+
+    let out = home.jaum(&["init"]).current_dir(&root).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("(none detected"));
+}
+
+// --- list --------------------------------------------------------------------
+
+#[test]
+fn list_requires_a_registered_project() {
+    let home = Home::new("list-empty");
+    let out = home.jaum(&["list"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("no project registered"));
+}
+
+#[test]
+fn list_prints_backlog_from_project_cwd_and_elsewhere() {
+    let home = Home::new("list");
+    let root = home.with_project();
+
+    // from the project root (cwd match)
+    let out = home.jaum(&["list"]).current_dir(&root).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("TASK-001"));
+
+    // from an unrelated cwd (falls back to the first project)
+    let elsewhere = home.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let out = home
+        .jaum(&["list"])
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("TASK-001"));
+}
+
+// --- shutdown / daemon -------------------------------------------------------
+
+#[test]
+fn shutdown_without_daemon_says_so() {
+    let home = Home::new("shutdown-none");
+    let out = home.jaum(&["shutdown"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("no daemon running"));
+}
+
+#[test]
+fn daemon_serves_until_shutdown() {
+    let home = Home::new("daemon");
+    home.with_project();
+
+    let child = home.jaum(&["--daemon", "0"]).spawn().unwrap();
+    assert!(wait_for_socket(&home.sock()), "daemon never bound");
+
+    let out = home.jaum(&["shutdown"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("daemon stopped"));
+
+    let out = wait_with_timeout(child, Duration::from_secs(10));
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert!(!home.sock().exists());
+}
+
+#[test]
+fn daemon_rejects_invalid_project_index() {
+    let home = Home::new("daemon-bad-idx");
+    home.with_project();
+    let out = home.jaum(&["--daemon", "7"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("invalid project index"));
+}
+
+// --- attach ------------------------------------------------------------------
+
+#[test]
+fn attach_spawns_daemon_then_fails_without_tty() {
+    let home = Home::new("attach");
+    home.with_project();
+
+    let out = run_detached(home.jaum(&[]));
+    assert!(!out.status.success(), "attach must fail with no tty");
+    // the daemon it spawned must survive the failed client
+    assert!(
+        UnixStream::connect(home.sock()).is_ok(),
+        "daemon should be running; stderr: {}",
+        stderr_of(&out)
+    );
+
+    let out = home.jaum(&["shutdown"]).output().unwrap();
+    assert!(stdout_of(&out).contains("daemon stopped"));
+}
+
+#[test]
+fn attach_reports_daemon_that_never_comes_up() {
+    let home = Home::new("attach-dead");
+    home.with_project();
+    // a directory at the socket path: the spawned daemon cannot bind and dies
+    fs::create_dir_all(home.sock()).unwrap();
+
+    let out = run_detached(home.jaum(&[]));
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("did not come up"),
+        "stderr: {}",
+        stderr_of(&out)
+    );
+    fs::remove_dir_all(home.sock()).unwrap();
+}
+
+#[test]
+fn restart_replaces_running_daemon() {
+    let home = Home::new("restart");
+    home.with_project();
+
+    let old = home.jaum(&["--daemon", "0"]).spawn().unwrap();
+    assert!(wait_for_socket(&home.sock()), "daemon never bound");
+
+    // restart: stops the old daemon, spawns a new one, then the client attach
+    // fails (no tty) — the fresh daemon must stay up.
+    let out = run_detached(home.jaum(&["restart"]));
+    assert!(!out.status.success(), "attach must fail with no tty");
+    let old_out = wait_with_timeout(old, Duration::from_secs(10));
+    assert!(old_out.status.success(), "old daemon should exit cleanly");
+    assert!(
+        wait_for_socket(&home.sock()),
+        "new daemon should be running; stderr: {}",
+        stderr_of(&out)
+    );
+
+    let out = home.jaum(&["shutdown"]).output().unwrap();
+    assert!(stdout_of(&out).contains("daemon stopped"));
+}
+
+// --- local -------------------------------------------------------------------
+
+#[test]
+fn local_tui_fails_without_tty() {
+    let home = Home::new("local");
+    home.with_project();
+    let out = run_detached(home.jaum(&["--local"]));
+    assert!(!out.status.success());
+}
+
+// --- ingest ------------------------------------------------------------------
+
+/// A stand-in `claude` that answers the structured-scan envelope.
+fn stub_claude(dir: &Path) -> PathBuf {
+    let bin_dir = dir.join("stub-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let path = bin_dir.join("claude");
+    let envelope = concat!(
+        "{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\",",
+        "\"structured_output\":{\"tasks\":[{\"title\":\"Stub task\",",
+        "\"type\":\"impl\",\"rfcs\":[\"RFC-0001\"],\"adrs\":[],",
+        "\"objetivo\":\"Do the thing\",\"criterio\":[\"done\"]}],\"docs\":[]}}"
+    );
+    fs::write(&path, format!("#!/bin/sh\necho '{envelope}'\n")).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    bin_dir
+}
+
+#[test]
+fn ingest_creates_stubs_via_stubbed_claude() {
+    let home = Home::new("ingest");
+    let root = home.with_project();
+    let bin_dir = stub_claude(home.path());
+    let path_env = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = home
+        .jaum(&["ingest"])
+        .current_dir(&root)
+        .env("PATH", path_env)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("ingest: 1 stub(s) created"), "stdout: {text}");
+    assert!(text.contains("RFC-0001"), "stdout: {text}");
+}
+
+// --- full client session over a pty ------------------------------------------
+
+/// Drives a complete attach: a fake daemon on the socket sends frames, requests
+/// the editor and finally detaches, while the client runs on a real pty
+/// allocated by `script(1)`.
+#[test]
+fn attach_runs_full_client_session_over_pty() {
+    use protocol::{ServerMsg, read_msg};
+    use std::os::unix::net::UnixListener;
+
+    let home = Home::new("pty");
+    home.with_project();
+    let marker = home.path().join("editor-ran");
+    let editor = home.path().join("stub-editor");
+    fs::write(
+        &editor,
+        format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display()),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&editor).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&editor, perms).unwrap();
+
+    // fake daemon: bound before the client starts so attach() skips the spawn.
+    let listener = UnixListener::bind(home.sock()).unwrap();
+
+    let mut child = {
+        let mut cmd = Command::new("/usr/bin/script");
+        if cfg!(target_os = "linux") {
+            // util-linux: the command goes through -c, the typescript file is
+            // positional; -e forwards the child's exit status like BSD does.
+            cmd.arg("-qe").arg("-c").arg(jaum_bin()).arg("/dev/null");
+        } else {
+            // BSD/macOS: typescript file first, then the command argv.
+            cmd.arg("-q").arg("/dev/null").arg(jaum_bin());
+        }
+        cmd.env("HOME", home.path())
+            .env("TERM", "xterm-256color")
+            .env("EDITOR", &editor)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().unwrap()
+    };
+
+    // drain the pty output so the client never blocks on a full pipe
+    let mut child_stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = child_stdout.read_to_end(&mut sink);
+    });
+    let mut stdin = child.stdin.take().unwrap();
+
+    // accept until the real client shows up (attach() probes with a bare connect
+    // and drops it; on such dead sockets setsockopt can fail — skip them).
+    // Bounded: if the client dies before connecting, fail instead of hanging.
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut conn, mut reader) = loop {
+        let conn = match listener.accept() {
+            Ok((conn, _)) => conn,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("client never connected to the fake daemon");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => panic!("accept failed: {e}"),
+        };
+        // the accepted socket may inherit non-blocking from the listener
+        conn.set_nonblocking(false).unwrap();
+        if conn
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .is_err()
+        {
+            continue;
+        }
+        let mut reader = BufReader::new(conn.try_clone().unwrap());
+        match read_msg::<_, ClientMsg>(&mut reader) {
+            Ok(Some(ClientMsg::Resize { .. })) => break (conn, reader),
+            _ => continue, // is_running probe: connect + drop
+        }
+    };
+
+    // full frame so the client paints something real
+    let cells = vec![protocol::WireCell {
+        x: 0,
+        y: 0,
+        sym: "j".into(),
+        fg: ratatui::style::Color::Reset,
+        bg: ratatui::style::Color::Reset,
+        underline: ratatui::style::Color::Reset,
+        mods: ratatui::style::Modifier::empty(),
+    }];
+    write_msg(
+        &mut conn,
+        &ServerMsg::FrameFull {
+            cols: 4,
+            rows: 2,
+            cells: cells.clone(),
+        },
+    )
+    .unwrap();
+
+    // editor round-trip: client suspends, runs $EDITOR, answers Done + Resize
+    write_msg(
+        &mut conn,
+        &ServerMsg::RunEditor {
+            path: "/tmp/jaum-pty-conv.md".into(),
+        },
+    )
+    .unwrap();
+    let mut got_editor_done = false;
+    let mut got_resize_back = false;
+    for _ in 0..10 {
+        match read_msg::<_, ClientMsg>(&mut reader).unwrap() {
+            Some(ClientMsg::EditorDone) => got_editor_done = true,
+            Some(ClientMsg::Resize { .. }) => {
+                got_resize_back = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_editor_done, "client never reported EditorDone");
+    assert!(got_resize_back, "client never resent its size");
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().trim(),
+        "/tmp/jaum-pty-conv.md",
+        "stub editor should have received the path"
+    );
+
+    // keystroke through the pty reaches the daemon as a Key message
+    stdin.write_all(b"x").unwrap();
+    stdin.flush().unwrap();
+    let mut got_key = false;
+    for _ in 0..10 {
+        match read_msg::<_, ClientMsg>(&mut reader).unwrap() {
+            Some(ClientMsg::Key(k)) => {
+                assert!(matches!(k.code, crossterm::event::KeyCode::Char('x')));
+                got_key = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_key, "keystroke never arrived");
+
+    // a diff keeps the redraw path warm, then detach ends the session
+    write_msg(&mut conn, &ServerMsg::FrameDiff(cells)).unwrap();
+    write_msg(&mut conn, &ServerMsg::Detach).unwrap();
+
+    let out = wait_with_timeout(child, Duration::from_secs(15));
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+}

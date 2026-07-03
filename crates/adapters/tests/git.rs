@@ -143,3 +143,104 @@ fn diff_on_branch_without_changes_is_empty() {
     let diff = g.diff(&repo, "feat/nothing").unwrap();
     assert!(diff.trim().is_empty());
 }
+
+#[test]
+fn default_uses_the_real_git_binary_name() {
+    let dir = TmpDir::new("default");
+    let repo = init_repo(&dir);
+    let g = Git::default();
+    g.branch_create(&repo, "feat/via-default").unwrap();
+}
+
+#[test]
+fn missing_binary_errors_with_context() {
+    let dir = TmpDir::new("nobin");
+    let g = Git::with_bin("/does/not/exist/git");
+    let err = g.branch_create(&dir.0, "feat/x").unwrap_err();
+    assert!(err.to_string().contains("rev-parse"));
+}
+
+#[test]
+fn diff_uses_origin_head_as_base_when_present() {
+    let dir = TmpDir::new("origin-head");
+    let repo = init_repo(&dir);
+    // simulate a clone: origin/main exists and origin/HEAD points at it
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    let g = Git::new();
+    let wt = g.worktree_add(&repo, "feat/from-origin").unwrap();
+    fs::write(wt.join("new.txt"), "hello\n").unwrap();
+    git(&wt, &["config", "user.email", "t@test.dev"]);
+    git(&wt, &["config", "user.name", "Test"]);
+    git(&wt, &["add", "-A"]);
+    git(&wt, &["commit", "-qm", "add file"]);
+
+    let diff = g.diff(&repo, "feat/from-origin").unwrap();
+    assert!(diff.contains("new.txt"));
+}
+
+#[test]
+fn diff_accepts_origin_head_outside_origin_namespace() {
+    let dir = TmpDir::new("odd-head");
+    let repo = init_repo(&dir);
+    // origin/HEAD pointing at a non-origin remote: used verbatim as the base
+    git(&repo, &["update-ref", "refs/remotes/upstream/dev", "main"]);
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/upstream/dev",
+        ],
+    );
+    let g = Git::new();
+    g.branch_create(&repo, "feat/odd").unwrap();
+    let diff = g.diff(&repo, "feat/odd").unwrap();
+    assert!(diff.trim().is_empty());
+}
+
+#[test]
+fn default_branch_falls_back_to_master() {
+    let dir = TmpDir::new("master");
+    let repo = dir.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "master", "-q"]);
+    git(&repo, &["config", "user.email", "t@test.dev"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("README.md"), "one\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+
+    let g = Git::new();
+    g.branch_create(&repo, "feat/m").unwrap();
+    let diff = g.diff(&repo, "feat/m").unwrap();
+    assert!(diff.trim().is_empty());
+}
+
+#[test]
+fn diff_fails_when_no_default_branch_is_detectable() {
+    let dir = TmpDir::new("nodefault");
+    let repo = dir.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "trunk", "-q"]);
+    git(&repo, &["config", "user.email", "t@test.dev"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    fs::write(repo.join("README.md"), "one\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+
+    let g = Git::new();
+    let err = g.diff(&repo, "trunk").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("could not detect the default branch"),
+        "unexpected error: {err}"
+    );
+}
