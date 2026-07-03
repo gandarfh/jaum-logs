@@ -56,45 +56,47 @@ struct ChatAndRootTests {
             ))
     }
 
-    @Test func sendDraftForwardsToTheSession() async {
+    @Test func sendDraftForwardsTheComposerText() async {
         let session = await startedSession()
-        let view = chatView(session)
+        let task = sampleTask(session, "jaum-42")
+        let view = SessionChatView(
+            session: session,
+            task: task,
+            taskSession: task.sessions[0],
+            draft: "mensagem do composer"
+        )
+        let before = task.sessions[0].messages.count
         view.sendDraft()
-        let before = sampleTask(session, "jaum-42").sessions[0].messages.count
-        session.sendText("mensagem direta", taskID: "jaum-42", sessionID: "jaum-42-play")
         #expect(
             await waitUntil {
                 sampleTask(session, "jaum-42").sessions[0].messages.count == before + 2
             })
+        let sent = sampleTask(session, "jaum-42").sessions[0].messages[before]
+        #expect(sent.role == .user)
+        #expect(sent.blocks == [.markdown("mensagem do composer")])
     }
 
-    @Test func attachImageReadsTheFileAndSendsIt() async throws {
+    @Test func sendDraftWithBlankComposerIsANoOp() async {
         let session = await startedSession()
         let view = chatView(session)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("jaum-tests-\(getpid()).png")
-        try Data([9, 9, 9]).write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
-
         let before = sampleTask(session, "jaum-42").sessions[0].messages.count
-        view.attachImage(.success(url))
+        view.sendDraft()
+        session.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
         #expect(
             await waitUntil {
-                sampleTask(session, "jaum-42").sessions[0].messages.count == before + 1
+                sampleTask(session, "jaum-42").sessions[0].messages.count >= before + 2
             })
-
-        view.attachImage(.failure(CocoaError(.fileReadNoSuchFile)))
-        view.attachImage(.success(url.appendingPathExtension("missing")))
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(sampleTask(session, "jaum-42").sessions[0].messages.count == before + 2)
     }
 
-    @Test func readFileLoadsBytesOffTheMainActor() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("jaum-readfile-\(getpid()).bin")
-        try Data([1, 2, 3, 4]).write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
-        let data = try await SessionChatView.readFile(at: url)
-        #expect(data == Data([1, 2, 3, 4]))
+    @Test func chatRendersTheAttachmentErrorAlert() async {
+        let session = await startedSession()
+        session.attachImage(
+            .failure(CocoaError(.fileReadNoSuchFile)), taskID: "jaum-42",
+            sessionID: "jaum-42-play")
+        #expect(await waitUntil { session.attachmentError != nil })
+        renderInWindow(chatView(session))
+        session.clearAttachmentError()
     }
 
     @Test func rootViewRendersTasksMode() async {

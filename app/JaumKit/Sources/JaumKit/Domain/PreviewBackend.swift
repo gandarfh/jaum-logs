@@ -4,29 +4,49 @@ import Foundation
 /// Drives the UI (previews and manual testing) and the view-model tests
 /// deterministically until the daemon speaks domain events over the socket.
 public actor PreviewBackend: SessionBackend {
-    private var continuations: [AsyncStream<SessionEvent>.Continuation] = []
+    private var continuations: [UUID: AsyncStream<SessionEvent>.Continuation] = [:]
     private var counter = 0
     private var pendingPermissions: [String: ToolCall] = [:]
+    private var resolvedPermissions: Set<String> = []
     private var permissionSession: (taskID: String, sessionID: String)?
 
     public init() {}
 
     public func events() -> AsyncStream<SessionEvent> {
         let (stream, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
-        continuations.append(continuation)
+        let id = UUID()
+        continuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task {
+                await self?.forget(id)
+            }
+        }
         for event in Self.initialEvents {
+            if case .permissionRequested(let request) = event {
+                // A permission already answered in this process must not be
+                // re-prompted to a late subscriber.
+                guard !resolvedPermissions.contains(request.id) else { continue }
+                if pendingPermissions[request.id] == nil {
+                    pendingPermissions[request.id] = ToolCall(
+                        id: request.id,
+                        name: request.toolName,
+                        summary: request.request,
+                        state: .running
+                    )
+                    permissionSession = ("jaum-42", "jaum-42-play")
+                }
+            }
             continuation.yield(event)
         }
-        if case .permissionRequested(let request) = Self.initialEvents.last {
-            pendingPermissions[request.id] = ToolCall(
-                id: request.id,
-                name: request.toolName,
-                summary: request.request,
-                state: .running
-            )
-            permissionSession = ("jaum-42", "jaum-42-play")
-        }
         return stream
+    }
+
+    private func forget(_ id: UUID) {
+        continuations.removeValue(forKey: id)
+    }
+
+    var subscriberCount: Int {
+        continuations.count
     }
 
     public func send(_ command: SessionCommand) async {
@@ -72,6 +92,7 @@ public actor PreviewBackend: SessionBackend {
 
     private func resolvePermission(id: String, approved: Bool) {
         guard var tool = pendingPermissions.removeValue(forKey: id) else { return }
+        resolvedPermissions.insert(id)
         tool.state = approved ? .succeeded : .failed
         broadcast(.permissionResolved(id: id, approved: approved))
         if let target = permissionSession {
@@ -89,7 +110,7 @@ public actor PreviewBackend: SessionBackend {
     }
 
     private func broadcast(_ event: SessionEvent) {
-        for continuation in continuations {
+        for continuation in continuations.values {
             continuation.yield(event)
         }
     }

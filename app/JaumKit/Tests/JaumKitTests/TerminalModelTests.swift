@@ -65,6 +65,29 @@ struct TerminalModelTests {
         #expect(model.editorRequest?.content == "")
     }
 
+    /// A file that exists but cannot be read must not open an empty editor
+    /// (saving would wipe it); the daemon gets EditorDone so it moves on.
+    @Test func runEditorOnUnreadableFileRefusesToOpen() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jaumkit-unreadable-\(getpid())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("secreto.md")
+        try "conteudo".write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+
+        let transport = FakeTransport()
+        let model = TerminalModel(transport: transport)
+        await model.attach()
+        try transport.push(.runEditor(path: file.path))
+        #expect(await waitUntil { model.lastError != nil })
+        #expect(model.editorRequest == nil)
+        #expect(try transport.sentMessages().last == .editorDone)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        #expect(try String(contentsOf: file, encoding: .utf8) == "conteudo")
+    }
+
     @Test func cancelEditingAnswersTheDaemonWithoutWriting() async throws {
         let transport = FakeTransport()
         let model = TerminalModel(transport: transport)

@@ -19,6 +19,7 @@ public final class SessionModel {
     public private(set) var pendingPermission: PermissionRequest?
     public private(set) var connection: ConnectionState = .disconnected
     public private(set) var latencySamples: [Double] = []
+    public private(set) var attachmentError: String?
 
     public var selectedProjectID: ProjectItem.ID?
     public var statusFilter: TaskStatus?
@@ -99,6 +100,45 @@ public final class SessionModel {
     public func sendImage(data: Data, filename: String, taskID: String, sessionID: String) {
         guard !data.isEmpty else { return }
         dispatch(.sendImage(taskID: taskID, sessionID: sessionID, data: data, filename: filename))
+    }
+
+    /// Handles a file-picker result: reads the image off the main actor and
+    /// sends it, or surfaces the failure for the UI to show.
+    public func attachImage(_ result: Result<URL, any Error>, taskID: String, sessionID: String) {
+        switch result {
+        case .success(let url):
+            Task {
+                do {
+                    let data = try await Self.readFile(at: url)
+                    sendImage(
+                        data: data,
+                        filename: url.lastPathComponent,
+                        taskID: taskID,
+                        sessionID: sessionID
+                    )
+                } catch {
+                    attachmentError = error.localizedDescription
+                }
+            }
+        case .failure(let error):
+            attachmentError = error.localizedDescription
+        }
+    }
+
+    public func clearAttachmentError() {
+        attachmentError = nil
+    }
+
+    private nonisolated static func readFile(at url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            let secured = url.startAccessingSecurityScopedResource()
+            defer {
+                if secured {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            return try Data(contentsOf: url)
+        }.value
     }
 
     public func approvePendingPermission() {

@@ -13,10 +13,15 @@ on:
       - "crates/cli/tests/fixtures/protocol/**"
       - ".github/workflows/swift.yml"
 
+concurrency:
+  group: swift-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package:
     name: Shared package tests
     runs-on: macos-15
+    timeout-minutes: 30
     env:
       COVERAGE_MIN: "95"
     defaults:
@@ -46,6 +51,7 @@ jobs:
   app:
     name: macOS app tests
     runs-on: macos-15
+    timeout-minutes: 30
     env:
       COVERAGE_MIN: "95"
     defaults:

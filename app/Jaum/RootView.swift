@@ -27,6 +27,7 @@ struct RootView: View {
     @Bindable var terminal: TerminalModel
     @State private var mode: AppMode = .tasks
     @State private var permissionPrompt: PermissionRequest?
+    @State private var permissionDecided = false
 
     var body: some View {
         Group {
@@ -68,6 +69,9 @@ struct RootView: View {
         }
         .onChange(of: session.pendingPermission) { _, newValue in
             permissionPrompt = newValue
+            if newValue != nil {
+                permissionDecided = false
+            }
         }
         .onAppear {
             permissionPrompt = session.pendingPermission
@@ -102,6 +106,7 @@ struct RootView: View {
     /// Exactly one decision per prompt: the buttons carry it, and Esc lands
     /// on the cancel button (deny).
     func decidePermission(approved: Bool) {
+        permissionDecided = true
         if approved {
             session.approvePendingPermission()
         } else {
@@ -110,13 +115,20 @@ struct RootView: View {
     }
 
     /// Presentation-only binding: dismissal never dispatches a decision.
-    /// External resolution closes the alert via onChange.
+    /// External resolution closes the alert via onChange. A dismissal that
+    /// carried no decision (scene teardown) re-presents shortly after, so a
+    /// pending request can never be orphaned behind a closed alert.
     var permissionPresented: Binding<Bool> {
         Binding(
             get: { permissionPrompt != nil },
             set: { presented in
-                if !presented {
-                    permissionPrompt = nil
+                guard !presented else { return }
+                permissionPrompt = nil
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    if !permissionDecided, let pending = session.pendingPermission {
+                        permissionPrompt = pending
+                    }
                 }
             }
         )

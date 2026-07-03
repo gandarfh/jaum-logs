@@ -36,6 +36,9 @@ public final class TerminalModel {
         guard consumeTask == nil else { return }
         connection = .connecting
         do {
+            // A previous stream may still be tearing down asynchronously;
+            // detaching first makes manual reconnection deterministic.
+            await client.detach()
             let events = try await client.attach(cols: cols, rows: rows)
             connection = .connected
             lastError = nil
@@ -67,10 +70,13 @@ public final class TerminalModel {
     }
 
     /// Saves the embedded editor buffer back to disk and tells the daemon the
-    /// interactive step finished.
+    /// interactive step finished. I/O runs off the main actor.
     public func finishEditing(content: String) async throws {
         guard let request = editorRequest else { return }
-        try content.write(toFile: request.path, atomically: true, encoding: .utf8)
+        let path = request.path
+        try await Task.detached(priority: .userInitiated) {
+            try content.write(toFile: path, atomically: true, encoding: .utf8)
+        }.value
         editorRequest = nil
         await send(.editorDone)
     }
@@ -84,8 +90,9 @@ public final class TerminalModel {
     func apply(_ event: DaemonClient.Event) {
         switch event {
         case .message(.runEditor(let path)):
-            let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-            editorRequest = EditorRequest(path: path, content: content)
+            Task {
+                await openEditor(path: path)
+            }
         case .message(.detach):
             handleStreamEnd(reason: nil)
         case .message(let frame):
@@ -93,6 +100,27 @@ public final class TerminalModel {
         case .disconnected(let reason):
             handleStreamEnd(reason: reason)
         }
+    }
+
+    /// A missing file opens an empty buffer (the daemon may be creating it);
+    /// a file that exists but cannot be read must NOT open an editor, or
+    /// saving would overwrite it with emptiness. The daemon is answered with
+    /// EditorDone so the flow is not left hanging.
+    private func openEditor(path: String) async {
+        do {
+            let content = try await Self.readIfExists(path)
+            editorRequest = EditorRequest(path: path, content: content ?? "")
+        } catch {
+            lastError = "Não deu para ler \(path): \(error.localizedDescription)"
+            await send(.editorDone)
+        }
+    }
+
+    private nonisolated static func readIfExists(_ path: String) async throws -> String? {
+        try await Task.detached(priority: .userInitiated) {
+            guard FileManager.default.fileExists(atPath: path) else { return nil }
+            return try String(contentsOfFile: path, encoding: .utf8)
+        }.value
     }
 
     /// Releases the dead connection so a later `attach()` can start over

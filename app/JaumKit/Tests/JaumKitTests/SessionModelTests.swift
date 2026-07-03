@@ -22,12 +22,16 @@ struct SessionModelTests {
         #expect(model.pendingPermission?.toolName == "git push")
     }
 
+    /// A duplicated stream would double every echo; probing with a real
+    /// message makes the check deterministic (commands are ordered, so the
+    /// probe's echoes arrive after any duplicate's).
     @Test func startTwiceDoesNotDuplicateTheStream() async {
         let model = await startedModel()
-        let count = model.tasks.count
         model.start()
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(model.tasks.count == count)
+        let before = playMessages(model).count
+        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        _ = await waitUntil { self.playMessages(model).count >= before + 2 }
+        #expect(playMessages(model).count == before + 2)
     }
 
     @Test func sectionsFollowStatusOrderAndOmitEmptyGroups() async {
@@ -82,12 +86,21 @@ struct SessionModelTests {
         #expect(messages[before + 1].role == .assistant)
     }
 
+    /// The blank send must produce nothing; the probe that follows it is
+    /// ordered after, so if the blank had gone through the first new user
+    /// message would be the blank, not the probe.
     @Test func blankTextIsIgnored() async {
         let model = await startedModel()
         let before = playMessages(model).count
         model.sendText("   \n ", taskID: "jaum-42", sessionID: "jaum-42-play")
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(playMessages(model).count == before)
+        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        _ = await waitUntil { self.playMessages(model).count >= before + 2 }
+        #expect(playMessages(model).count == before + 2)
+        guard case .markdown(let text) = playMessages(model)[before].blocks.first else {
+            Issue.record("expected markdown block")
+            return
+        }
+        #expect(text == "sonda")
     }
 
     @Test func sendImageAppendsAnImageBlock() async {
@@ -103,13 +116,44 @@ struct SessionModelTests {
         #expect(playMessages(model).last?.blocks.contains(.image(Data([1, 2, 3]))) == true)
     }
 
+    @Test func attachImageReadsAndSendsTheFile() async throws {
+        let model = await startedModel()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jaumkit-attach-\(getpid()).png")
+        try Data([9, 9, 9]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let before = playMessages(model).count
+        model.attachImage(.success(url), taskID: "jaum-42", sessionID: "jaum-42-play")
+        #expect(await waitUntil { self.playMessages(model).count == before + 1 })
+        #expect(playMessages(model).last?.blocks.contains(.image(Data([9, 9, 9]))) == true)
+        #expect(model.attachmentError == nil)
+    }
+
+    @Test func attachImageFailuresSurfaceTheError() async {
+        let model = await startedModel()
+        model.attachImage(
+            .failure(CocoaError(.fileReadNoSuchFile)), taskID: "jaum-42",
+            sessionID: "jaum-42-play")
+        #expect(model.attachmentError != nil)
+        model.clearAttachmentError()
+        #expect(model.attachmentError == nil)
+
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jaumkit-attach-\(getpid())-missing.png")
+        model.attachImage(.success(missing), taskID: "jaum-42", sessionID: "jaum-42-play")
+        #expect(await waitUntil { model.attachmentError != nil })
+    }
+
     @Test func emptyImageIsIgnored() async {
         let model = await startedModel()
         let before = playMessages(model).count
         model.sendImage(
             data: Data(), filename: "vazio.png", taskID: "jaum-42", sessionID: "jaum-42-play")
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(playMessages(model).count == before)
+        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        _ = await waitUntil { self.playMessages(model).count >= before + 2 }
+        #expect(playMessages(model).count == before + 2)
+        #expect(playMessages(model)[before].blocks == [.markdown("sonda")])
     }
 
     @Test func chatToUnknownTaskOrSessionIsDropped() async {
@@ -210,6 +254,34 @@ struct SessionModelTests {
         let model = await startedModel()
         model.stop()
         #expect(model.connection == .disconnected)
+    }
+
+    @Test func stoppedSubscribersAreForgottenByTheBackend() async {
+        let backend = PreviewBackend()
+        let model = SessionModel(backend: backend)
+        model.start()
+        _ = await waitUntil { !model.tasks.isEmpty }
+        model.stop()
+        var count = await backend.subscriberCount
+        for _ in 0..<200 where count != 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+            count = await backend.subscriberCount
+        }
+        #expect(count == 0)
+    }
+
+    @Test func resolvedPermissionIsNotRepromptedToLateSubscribers() async {
+        let backend = PreviewBackend()
+        let first = SessionModel(backend: backend)
+        first.start()
+        _ = await waitUntil { first.pendingPermission != nil }
+        first.approvePendingPermission()
+        _ = await waitUntil { first.pendingPermission == nil }
+
+        let second = SessionModel(backend: backend)
+        second.start()
+        _ = await waitUntil { !second.tasks.isEmpty }
+        #expect(second.pendingPermission == nil)
     }
 
     @Test func commandsReachTheBackendInOrder() async {

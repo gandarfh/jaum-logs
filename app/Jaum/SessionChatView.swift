@@ -9,9 +9,15 @@ struct SessionChatView: View {
     let task: TaskItem
     let taskSession: TaskSession
 
-    @State private var draft = ""
+    @State var draft: String
     @State private var showingImagePicker = false
-    @State private var attachmentError: String?
+
+    init(session: SessionModel, task: TaskItem, taskSession: TaskSession, draft: String = "") {
+        self.session = session
+        self.task = task
+        self.taskSession = taskSession
+        _draft = State(initialValue: draft)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,18 +57,18 @@ struct SessionChatView: View {
             isPresented: $showingImagePicker,
             allowedContentTypes: [.png, .jpeg, .gif, .heic]
         ) { result in
-            attachImage(result)
+            session.attachImage(result, taskID: task.id, sessionID: taskSession.id)
         }
         .alert(
             "Não deu para anexar a imagem",
             isPresented: Binding(
-                get: { attachmentError != nil },
-                set: { if !$0 { attachmentError = nil } }
+                get: { session.attachmentError != nil },
+                set: { if !$0 { session.clearAttachmentError() } }
             )
         ) {
             Button("Entendi", role: .cancel) {}
         } message: {
-            Text(attachmentError ?? "")
+            Text(session.attachmentError ?? "")
         }
     }
 
@@ -120,40 +126,6 @@ struct SessionChatView: View {
     func sendDraft() {
         session.sendText(draft, taskID: task.id, sessionID: taskSession.id)
         draft = ""
-    }
-
-    func attachImage(_ result: Result<URL, any Error>) {
-        switch result {
-        case .success(let url):
-            Task {
-                do {
-                    let data = try await Self.readFile(at: url)
-                    session.sendImage(
-                        data: data,
-                        filename: url.lastPathComponent,
-                        taskID: task.id,
-                        sessionID: taskSession.id
-                    )
-                } catch {
-                    attachmentError = error.localizedDescription
-                }
-            }
-        case .failure(let error):
-            attachmentError = error.localizedDescription
-        }
-    }
-
-    /// Reads off the main actor so a large image never blocks the UI.
-    static func readFile(at url: URL) async throws -> Data {
-        try await Task.detached(priority: .userInitiated) {
-            let secured = url.startAccessingSecurityScopedResource()
-            defer {
-                if secured {
-                    url.stopAccessingSecurityScopedResource()
-                }
-            }
-            return try Data(contentsOf: url)
-        }.value
     }
 }
 
