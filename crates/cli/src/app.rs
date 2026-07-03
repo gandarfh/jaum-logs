@@ -748,7 +748,7 @@ impl App {
             node_bin: "node".into(),
             sidecar_bundle: resolve_bundle(
                 std::env::var("JAUM_SIDECAR_BUNDLE").ok().as_deref(),
-                &crate::config::jaum_home().unwrap_or_default(),
+                &crate::config::jaum_home().context("locating the sidecar bundle")?,
             ),
             load_config: GlobalConfig::load,
             init_project: crate::config::init_project,
@@ -1315,7 +1315,12 @@ impl App {
             None => true,
         };
         if dead {
-            self.sidecar = Some(SidecarClient::spawn(&self.node_bin, &self.sidecar_bundle)?);
+            let diag = self.home().join(".sessions").join("sidecar.log");
+            self.sidecar = Some(SidecarClient::spawn(
+                &self.node_bin,
+                &self.sidecar_bundle,
+                Some(diag),
+            )?);
         }
         Ok(self.sidecar.as_ref().expect("just ensured"))
     }
@@ -2543,7 +2548,13 @@ impl App {
     }
 
     /// Aborts a sidecar session's in-flight turn (no-op for PTY sessions).
+    /// Pending permission requests of the session are dropped (their deadline
+    /// must not fire on a finished session) and the log gets a closing event,
+    /// so a replay never shows the turn as still running.
     fn abort_chat_turn(&mut self, idx: usize) {
+        let Some(session_id) = self.sessions.get(idx).map(|e| e.claude_session_id.clone()) else {
+            return;
+        };
         let request_id = self
             .sessions
             .get_mut(idx)
@@ -2552,6 +2563,27 @@ impl App {
                 chat.rx = None;
                 chat.request_id.take()
             });
+        let dropped = self.permissions.clear_session(&session_id);
+        if let Some(e) = self.sessions.get_mut(idx) {
+            for pending in &dropped {
+                let event = SessionEvent::PermissionDecision {
+                    permission_id: pending.permission_id.clone(),
+                    behavior: "deny".into(),
+                    message: Some("turn aborted".into()),
+                };
+                if let Some(chat) = &e.chat {
+                    let _ = chat.log.append(&event);
+                }
+                e.render_event(&event);
+            }
+            if request_id.is_some() {
+                let event = SessionEvent::Done { usage: None };
+                if let Some(chat) = &e.chat {
+                    let _ = chat.log.append(&event);
+                }
+                e.render_event(&event);
+            }
+        }
         if let (Some(request_id), Some(client)) = (request_id, &self.sidecar) {
             let _ = client.abort(&request_id);
             client.unregister(&request_id);

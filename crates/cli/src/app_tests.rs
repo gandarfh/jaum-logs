@@ -2465,6 +2465,52 @@ fn close_aborts_a_hanging_turn() {
 }
 
 #[test]
+fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
+    let dir = TmpDir::new("abort-perm");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task_with_objective(&backlog, "TASK-001", "feat/abort-perm", "ask-permission");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    sidecar_stub(&mut app);
+    app.gh = Gh::with_bin("false");
+    // routed mode with the default (long) deadline: nothing expires by itself
+    app.route_permissions = true;
+
+    app.play_selected();
+    assert!(drain_until(&mut app, |a| a.permissions.pending_count() == 1));
+
+    app.abort_chat_turn(0);
+    assert_eq!(app.permissions.pending_count(), 0);
+    assert!(!app.sessions[0].turn_active());
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PermissionDecision { behavior, message: Some(m), .. }
+                if behavior == "deny" && m == "turn aborted"
+        )),
+        "dropped permission not resolved in the log: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SessionEvent::Done { .. })),
+        "aborted turn not closed in the log: {events:?}"
+    );
+    // no deadline is left behind to block the session later
+    app.tick_permissions();
+    assert!(!app.sessions[0].blocked);
+    app.close_selected_session();
+}
+
+#[test]
 fn rehydrated_play_session_replays_the_log() {
     let dir = TmpDir::new("replay");
     let work = dir.path().join(".jaum");

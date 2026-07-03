@@ -33,7 +33,7 @@ jaum-logs/
     cli/                # jaum: binary (TUI + daemon + sidecar client)
       src/main.rs
   sidecar/              # TypeScript bridge over @anthropic-ai/claude-agent-sdk
-    src/{index,protocol,chat,guard,content}.ts
+    src/{index,main,protocol,chat,guard,content}.ts
 ```
 
 ## Sidecar
@@ -42,10 +42,17 @@ Play sessions run through a TypeScript sidecar built on the Claude Agent SDK.
 The daemon spawns one node process and talks JSONL over stdio: `chat` sends a
 turn, the sidecar streams `text_delta`/`tool_use`/`tool_result`/`done` back,
 `permission_request`/`permission_response` route tool approvals through the
-daemon (unanswered requests are denied after 120s and the session is marked
-blocked), and `abort` interrupts a running turn. Auth always rides on the
+daemon, and `abort` interrupts a running turn. Auth always rides on the
 `claude` CLI login (Claude Max): the sidecar drops `ANTHROPIC_API_KEY` from its
 environment.
+
+Permission requests are currently logged and auto-allowed by the daemon: the
+mechanical guards (no-merge, `enforce: hook` constraints) already ran inside
+the sidecar before the request was ever routed, and no client surface can
+answer a prompt yet. The interactive flow (wait for a decision, deny after
+120s and mark the session blocked) is implemented and tested behind the
+`route_permissions` switch, and turns on once the structured chat panel can
+present the prompt.
 
 Every session appends its events to `~/jaum/<project>/.sessions/<id>.jsonl`;
 the log survives daemon restarts and is replayed (bounded) on attach. There is

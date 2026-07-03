@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
+import { delimiter, join } from "node:path";
 import { computeHmac } from "../src/protocol.js";
-import { runSidecar } from "../src/main.js";
+import { resolveClaudeCli, runSidecar } from "../src/main.js";
 import type { QueryFn, SdkMessageLike } from "../src/chat.js";
 
 function fakeQuery(script: SdkMessageLike[]): QueryFn {
@@ -130,5 +131,33 @@ describe("runSidecar", () => {
     const loop = startLoop();
     loop.input.end();
     await loop.closed;
+  });
+});
+
+describe("resolveClaudeCli", () => {
+  test("the env override wins and blank overrides are ignored", () => {
+    const exists = () => true;
+    expect(
+      resolveClaudeCli({ CLAUDE_CLI_PATH: "/opt/claude", PATH: "/bin" }, exists),
+    ).toBe("/opt/claude");
+    expect(resolveClaudeCli({ CLAUDE_CLI_PATH: "  ", PATH: "/bin" }, exists)).toBe(
+      join("/bin", "claude"),
+    );
+  });
+
+  test("scans PATH in order and skips empty entries", () => {
+    const hit = join("/usr/local/bin", "claude");
+    const exists = (p: string) => p === hit;
+    const path = ["", "/bin", "/usr/local/bin", "/other"].join(delimiter);
+    expect(resolveClaudeCli({ PATH: path }, exists)).toBe(hit);
+  });
+
+  test("returns undefined when nothing matches or PATH is unset", () => {
+    expect(resolveClaudeCli({ PATH: "/bin" }, () => false)).toBeUndefined();
+    expect(resolveClaudeCli({}, () => true)).toBeUndefined();
+    // default existence probe: a path that cannot exist yields undefined
+    expect(
+      resolveClaudeCli({ PATH: "/nonexistent-jaum-test-dir" }),
+    ).toBeUndefined();
   });
 });

@@ -69,6 +69,10 @@ jobs:
             exit 1
           fi
       - run: bun run build
+      # The bundle ships as a single .mjs run by plain node: it must load the
+      # real SDK import graph and answer the protocol outside bun.
+      - name: Smoke-check the bundle under node
+        run: printf '{"type":"ping"}\n' | node dist/jaum-sidecar.mjs | grep -q '"type":"pong"'
 
   coverage:
     name: Coverage

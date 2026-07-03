@@ -130,7 +130,21 @@ impl SessionLog {
         let new = SessionLog::new(home, new_id);
         if self.path.exists() {
             let _ = fs::create_dir_all(&new.dir);
-            let _ = fs::rename(&self.path, &new.path);
+            if new.path.exists() {
+                // Never clobber an existing log for the target id: its events
+                // predate this run's, so the migrated lines go after them.
+                let appended = fs::read(&self.path).and_then(|bytes| {
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&new.path)
+                        .and_then(|mut f| f.write_all(&bytes))
+                });
+                if appended.is_ok() {
+                    let _ = fs::remove_file(&self.path);
+                }
+            } else {
+                let _ = fs::rename(&self.path, &new.path);
+            }
         }
         new
     }
@@ -155,10 +169,13 @@ impl SessionLog {
         if len > max_bytes && file.seek(SeekFrom::Start(len - max_bytes)).is_ok() {
             skip_first = true;
         }
-        let mut raw = String::new();
-        if file.read_to_string(&mut raw).is_err() {
+        let mut raw = Vec::new();
+        if file.read_to_end(&mut raw).is_err() {
             return Vec::new();
         }
+        // Lossy decoding: an invalid UTF-8 region (torn write, disk noise)
+        // corrupts only its own line, never the whole replay.
+        let raw = String::from_utf8_lossy(&raw);
         let mut events: Vec<SessionEvent> = raw
             .lines()
             .skip(usize::from(skip_first))

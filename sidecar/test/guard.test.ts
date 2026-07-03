@@ -13,6 +13,8 @@ describe("merge guard", () => {
     "git --work-tree /x -c user.name=x merge main",
     "gh --repo owner/name pr merge 42",
     "gh pr --repo owner/name merge 42",
+    "gh api -X PUT repos/owner/name/pulls/42/merge",
+    "gh api graphql -f query='mutation { mergePullRequest(input: {}) }'",
   ])("blocks %p", (command) => {
     const v = checkGuards("Bash", { command }, []);
     expect(v.blocked).toBe(true);
@@ -32,6 +34,11 @@ describe("merge guard", () => {
     ).toBe(false);
     expect(
       checkGuards("Bash", { command: "git branch -d merge-helper" }, [])
+        .blocked,
+    ).toBe(false);
+    // gh api reads that do not touch merge endpoints stay allowed
+    expect(
+      checkGuards("Bash", { command: "gh api repos/owner/name/pulls/42" }, [])
         .blocked,
     ).toBe(false);
     // The merge regex only applies to Bash commands, not file paths.

@@ -213,6 +213,61 @@ describe("handleChat event mapping", () => {
     ]);
   });
 
+  test("error result text is categorized, not always internal", async () => {
+    const { sent, sidecar } = harness([
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        errors: ["rate limit exceeded, retry later"],
+        stop_reason: null,
+      },
+    ]);
+    await sidecar.handleChat(chatCommand());
+    expect(sent[0]).toMatchObject({ type: "error", category: "rate_limit" });
+  });
+
+  test("assistant text blocks are a fallback when no deltas arrive", async () => {
+    const { sent, sidecar } = harness([
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "text", text: "full text, no stream" }] },
+      },
+      RESULT,
+    ]);
+    await sidecar.handleChat(chatCommand());
+    expect(sent).toEqual([
+      {
+        type: "text_delta",
+        request_id: "req-1",
+        text: "full text, no stream",
+      },
+      expect.objectContaining({ type: "done" }),
+    ]);
+  });
+
+  test("assistant text is not duplicated when deltas were streamed", async () => {
+    const { sent, sidecar } = harness([
+      {
+        type: "stream_event",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "streamed" },
+        },
+      },
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "text", text: "streamed" }] },
+      },
+      RESULT,
+    ]);
+    await sidecar.handleChat(chatCommand());
+    const deltas = sent.filter((e) => e.type === "text_delta");
+    expect(deltas).toHaveLength(1);
+  });
+
   test("a thrown query error is categorized and still closes the turn", async () => {
     const { sent, sidecar } = harness([], { fail: "fetch failed" });
     await sidecar.handleChat(chatCommand());

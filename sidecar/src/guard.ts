@@ -1,6 +1,6 @@
 // Mechanical guardrails evaluated inside canUseTool, before any human
 // approval: merge is always blocked, and each task constraint arrives as a
-// regex from the daemon. This replaces the PreToolUse hook of the PTY flow.
+// regex from the daemon.
 
 import type { GuardPattern } from "./protocol.js";
 
@@ -8,17 +8,20 @@ import type { GuardPattern } from "./protocol.js";
 // command, never the agent's. Flags between the binary and the subcommand
 // (git -C <path> merge, git --no-pager merge, gh --repo x pr merge) must not
 // slip through, but merge as a plain argument (git commit -m "merge notes")
-// must not trip it.
+// must not trip it. REST and GraphQL merges through `gh api` are blocked
+// too, erring on the side of denying reads of merge endpoints.
 const GIT_FLAGS = String.raw`(?:\s+-{1,2}[^-\s]\S*(?:\s+[^-\s]\S*)?)*`;
 const MERGE_RE = new RegExp(
-  String.raw`\bgit${GIT_FLAGS}\s+merge\b` +
-    "|" +
+  [
+    String.raw`\bgit${GIT_FLAGS}\s+merge\b`,
     String.raw`\bgh${GIT_FLAGS}\s+pr${GIT_FLAGS}\s+merge\b`,
+    String.raw`\bgh\b[^|;&]*\bapi\b[^|;&]*(?:\bmerge\b|\bmergePullRequest\b)`,
+  ].join("|"),
   "i",
 );
 
-// Input fields that carry the target a pattern is matched against (command
-// for Bash, paths for file tools), mirroring the old hook's extraction.
+// Input fields that carry the target a pattern is matched against: command
+// for Bash, paths for the file tools.
 const TARGET_FIELDS = ["command", "file_path", "path", "notebook_path"];
 
 export function guardTarget(input: Record<string, unknown>): string {
@@ -51,8 +54,8 @@ export function checkGuards(
     try {
       re = new RegExp(pattern, "i");
     } catch {
-      // An uncompilable pattern is skipped, matching the old hook's failure
-      // mode (a bad grep -E regex never matched, it did not block everything).
+      // Fail-open on an uncompilable pattern: blocking every tool over one
+      // bad constraint regex would brick the session instead of one rule.
       log(`skipping invalid guard pattern: ${pattern}`);
       continue;
     }

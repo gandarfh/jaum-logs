@@ -246,11 +246,59 @@ fn append_reports_an_unwritable_sessions_dir() {
 }
 
 #[test]
-fn tail_returns_empty_on_undecodable_bytes() {
+fn tail_survives_invalid_utf8_regions() {
     let tmp = TmpDir::new();
     let log = SessionLog::new(&tmp.0, "binary");
-    log.append(&SessionEvent::Done { usage: None }).unwrap();
+    log.append(&SessionEvent::TextDelta { text: "ok".into() })
+        .unwrap();
     let path = log_file(&tmp.0, "binary");
-    fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
-    assert_eq!(log.replay(), Vec::new());
+    // A torn write injects raw bytes between two valid lines: only that line
+    // is lost, never the replay around it.
+    let mut raw = fs::read(&path).unwrap();
+    raw.extend_from_slice(&[0xff, 0xfe, 0x00, 0x01]);
+    raw.push(b'\n');
+    fs::write(&path, raw).unwrap();
+    log.append(&SessionEvent::Done { usage: None }).unwrap();
+    assert_eq!(
+        log.replay(),
+        vec![
+            SessionEvent::TextDelta { text: "ok".into() },
+            SessionEvent::Done { usage: None },
+        ]
+    );
+}
+
+#[test]
+fn migrate_moves_the_log_to_the_new_id() {
+    let tmp = TmpDir::new();
+    let log = SessionLog::new(&tmp.0, "requested");
+    log.append(&SessionEvent::TextDelta { text: "one".into() })
+        .unwrap();
+    let migrated = log.migrate(&tmp.0, "reported");
+    assert!(!log_file(&tmp.0, "requested").exists());
+    assert_eq!(
+        migrated.replay(),
+        vec![SessionEvent::TextDelta { text: "one".into() }]
+    );
+}
+
+#[test]
+fn migrate_appends_after_an_existing_target_log() {
+    let tmp = TmpDir::new();
+    let existing = SessionLog::new(&tmp.0, "reported");
+    existing
+        .append(&SessionEvent::TextDelta { text: "old".into() })
+        .unwrap();
+    let log = SessionLog::new(&tmp.0, "requested");
+    log.append(&SessionEvent::TextDelta { text: "new".into() })
+        .unwrap();
+    let migrated = log.migrate(&tmp.0, "reported");
+    assert!(!log_file(&tmp.0, "requested").exists());
+    assert_eq!(
+        migrated.replay(),
+        vec![
+            SessionEvent::TextDelta { text: "old".into() },
+            SessionEvent::TextDelta { text: "new".into() },
+        ]
+    );
 }

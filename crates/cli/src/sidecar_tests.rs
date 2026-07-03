@@ -45,7 +45,10 @@ rl.on('line', (line) => {
   if (cmd.type !== 'chat') return;
   const rid = cmd.request_id;
   const text = cmd.content.map((b) => (b.type === 'text' ? b.text : '')).join(' ');
-  if (text.includes('garbage-first')) process.stdout.write('this is not json\n');
+  if (text.includes('garbage-first')) {
+    process.stdout.write('this is not json\n');
+    process.stderr.write('stderr-noise\n');
+  }
   send({ type: 'session', request_id: rid, claude_session_id: cmd.resume ?? cmd.session_id });
   if (text.includes('env-check')) {
     const vars = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'SIDECAR_HMAC_SECRET'];
@@ -87,7 +90,7 @@ fn turn(request_id: &str, text: &str) -> ChatTurn {
 }
 
 fn spawn_stub() -> SidecarClient {
-    SidecarClient::spawn("node", stub()).expect("node stub spawns")
+    SidecarClient::spawn("node", stub(), None).expect("node stub spawns")
 }
 
 const RECV: Duration = Duration::from_secs(10);
@@ -327,6 +330,25 @@ fn tracker_expires_only_past_deadline() {
 }
 
 #[test]
+fn clear_session_drops_only_that_sessions_requests() {
+    let mut tracker = PermissionTracker::new(Duration::from_secs(3600));
+    tracker.track("sess-a", "perm-a1");
+    tracker.track("sess-b", "perm-b");
+    tracker.track("sess-a", "perm-a2");
+    let dropped = tracker.clear_session("sess-a");
+    assert_eq!(
+        dropped
+            .iter()
+            .map(|p| p.permission_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["perm-a1", "perm-a2"]
+    );
+    assert_eq!(tracker.pending_count(), 1);
+    assert!(tracker.clear_session("sess-missing").is_empty());
+    assert_eq!(tracker.pending_count(), 1);
+}
+
+#[test]
 fn default_timeout_is_two_minutes() {
     assert_eq!(PERMISSION_TIMEOUT, Duration::from_secs(120));
 }
@@ -531,6 +553,32 @@ fn malformed_sidecar_output_is_skipped() {
     let events = collect_until_done(&rx);
     assert!(matches!(events.first(), Some(SidecarEvent::Session { .. })));
     assert!(matches!(events.last(), Some(SidecarEvent::Done { .. })));
+}
+
+#[test]
+fn diagnostics_land_in_the_diag_file_not_on_stderr() {
+    let dir = std::env::temp_dir().join(format!("jaum-sidecar-diag-{}", std::process::id()));
+    let diag = dir.join("logs").join("sidecar.log");
+    let _ = fs::remove_file(&diag);
+    let client = SidecarClient::spawn("node", stub(), Some(diag.clone())).unwrap();
+    let rx = client.chat(turn("req-g2", "garbage-first")).unwrap();
+    let _ = collect_until_done(&rx);
+    // the reader threads write asynchronously; poll within a bounded window.
+    let deadline = std::time::Instant::now() + RECV;
+    loop {
+        let content = fs::read_to_string(&diag).unwrap_or_default();
+        if content.contains("dropping malformed event: this is not json")
+            && content.contains("stderr-noise")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "diagnostics never reached {}: {content:?}",
+            diag.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

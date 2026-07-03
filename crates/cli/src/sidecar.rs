@@ -224,6 +224,17 @@ impl PermissionTracker {
         expired
     }
 
+    /// Removes and returns every pending request of one session. Called when
+    /// its turn is aborted: a leftover deadline would later mark the already
+    /// finished session as blocked.
+    pub fn clear_session(&mut self, session_id: &str) -> Vec<PendingPermission> {
+        let (dropped, pending) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|p| p.session_id == session_id);
+        self.pending = pending;
+        dropped
+    }
+
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -241,6 +252,23 @@ pub fn resolve_bundle(env_override: Option<&str>, jaum_home: &Path) -> PathBuf {
 
 type Router = Arc<Mutex<HashMap<String, Sender<SidecarEvent>>>>;
 
+/// Appends one diagnostic line (sidecar stderr, malformed events) to a file.
+/// The TUI owns the terminal in raw alternate-screen mode, so writing these
+/// to the daemon's stderr would corrupt the rendered screen.
+fn append_diag(path: Option<&Path>, line: &str) {
+    let Some(path) = path else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 /// The spawned sidecar process and its JSONL plumbing. Dropping it kills the
 /// process (sessions survive: the log and the claude session id are on disk).
 pub struct SidecarClient {
@@ -253,7 +281,9 @@ pub struct SidecarClient {
 impl SidecarClient {
     /// Spawns `node <bundle>` and starts the reader threads. The Anthropic
     /// key variables are dropped so auth always rides on the claude CLI login.
-    pub fn spawn(node_bin: &str, bundle: &Path) -> Result<Self> {
+    /// Out-of-band diagnostics go to `diag` (never to stderr: the TUI owns
+    /// the terminal); `None` discards them.
+    pub fn spawn(node_bin: &str, bundle: &Path, diag: Option<PathBuf>) -> Result<Self> {
         let mut child = Command::new(node_bin)
             .arg(bundle)
             .env_remove("ANTHROPIC_API_KEY")
@@ -275,13 +305,17 @@ impl SidecarClient {
         let (pong_tx, pongs) = channel::<()>();
 
         let reader_router = router.clone();
+        let stdout_diag = diag.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 let Ok(event) = serde_json::from_str::<SidecarEvent>(&line) else {
                     // A malformed line is the sidecar's bug, never a reason
                     // to kill every session sharing the process.
-                    eprintln!("[sidecar] dropping malformed event: {line}");
+                    append_diag(
+                        stdout_diag.as_deref(),
+                        &format!("dropping malformed event: {line}"),
+                    );
                     continue;
                 };
                 match event.request_id() {
@@ -305,7 +339,7 @@ impl SidecarClient {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                eprintln!("[sidecar] {line}");
+                append_diag(diag.as_deref(), &line);
             }
         });
 

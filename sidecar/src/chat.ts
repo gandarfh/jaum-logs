@@ -109,8 +109,8 @@ export function createSidecar(deps: SidecarDeps) {
     const options: Record<string, unknown> = {
       permissionMode: "default",
       includePartialMessages: true,
-      // Hard guarantee kept from the old settings.json: no AI attribution
-      // trailer on commits, independent of the system prompt.
+      // Hard guarantee, independent of the system prompt: no AI attribution
+      // trailer on commits.
       settings: { includeCoAuthoredBy: false },
       systemPrompt: {
         type: "preset",
@@ -195,6 +195,7 @@ export function createSidecar(deps: SidecarDeps) {
     // messages, and their tool_results must not be re-emitted.
     const seenToolUses = new Set<string>();
     let doneSent = false;
+    let deltaSeen = false;
 
     try {
       const q = queryFn({
@@ -222,6 +223,7 @@ export function createSidecar(deps: SidecarDeps) {
               msg.event.delta?.type === "text_delta" &&
               typeof msg.event.delta.text === "string"
             ) {
+              deltaSeen = true;
               send({
                 type: "text_delta",
                 request_id,
@@ -251,6 +253,19 @@ export function createSidecar(deps: SidecarDeps) {
                   name: block["name"],
                   input: (block["input"] ?? {}) as Record<string, unknown>,
                 });
+              } else if (
+                block["type"] === "text" &&
+                typeof block["text"] === "string" &&
+                !deltaSeen
+              ) {
+                // Fallback: assistant text normally arrives as stream deltas;
+                // without them (partial messages absent) the text must still
+                // reach the daemon.
+                send({
+                  type: "text_delta",
+                  request_id,
+                  text: block["text"],
+                });
               }
             }
             break;
@@ -278,11 +293,12 @@ export function createSidecar(deps: SidecarDeps) {
           }
           case "result": {
             if (msg.subtype && msg.subtype !== "success") {
+              const message = (msg.errors ?? [msg.subtype]).join("; ");
               send({
                 type: "error",
                 request_id,
-                category: "internal",
-                message: (msg.errors ?? [msg.subtype]).join("; "),
+                category: categorizeError(message),
+                message,
               });
             }
             send({

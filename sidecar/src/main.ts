@@ -2,6 +2,8 @@
 // and emits JSONL events on an output stream. Extracted from the entrypoint
 // so the loop runs under tests with fake streams and a fake query.
 
+import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { decodeLine, encodeLine, type Event } from "./protocol.js";
@@ -13,7 +15,32 @@ export type SidecarProcess = {
   errput: Writable;
   env: Record<string, string | undefined>;
   queryFn: QueryFn;
+  fileExists?: (path: string) => boolean;
 };
+
+// The SDK locates its claude executable by require.resolve on its optional
+// platform package, which fails inside a single-file bundle (no node_modules
+// next to the installed .mjs). The path must therefore be explicit:
+// CLAUDE_CLI_PATH wins, otherwise the claude CLI installed on PATH is used.
+export function resolveClaudeCli(
+  env: Record<string, string | undefined>,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  const override = env.CLAUDE_CLI_PATH;
+  if (override && override.trim() !== "") {
+    return override;
+  }
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (dir === "") {
+      continue;
+    }
+    const candidate = join(dir, "claude");
+    if (exists(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
 
 export function runSidecar(proc: SidecarProcess): { closed: Promise<void> } {
   // Auth always rides on the claude CLI login (Claude Max subscription); a
@@ -35,7 +62,7 @@ export function runSidecar(proc: SidecarProcess): { closed: Promise<void> } {
     queryFn: proc.queryFn,
     send,
     log,
-    claudeCliPath: proc.env.CLAUDE_CLI_PATH || undefined,
+    claudeCliPath: resolveClaudeCli(proc.env, proc.fileExists),
   });
 
   const rl = createInterface({ input: proc.input, crlfDelay: Infinity });
