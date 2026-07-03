@@ -25,8 +25,10 @@ func renderInWindow(_ view: some View, size: CGSize = CGSize(width: 900, height:
 }
 
 /// Polls a condition on the main actor until it holds or the timeout hits.
+/// The default is generous because CI runners take seconds to launch the
+/// host app and evaluate the first render.
 func waitUntil(
-    timeout: TimeInterval = 2,
+    timeout: TimeInterval = 15,
     _ condition: @MainActor @escaping () -> Bool
 ) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
@@ -42,11 +44,15 @@ func waitUntil(
 func startedSession() async -> SessionModel {
     let model = SessionModel(backend: PreviewBackend())
     model.start()
-    _ = await waitUntil { !model.tasks.isEmpty && model.pendingPermission != nil }
+    let ready = await waitUntil { !model.tasks.isEmpty && model.pendingPermission != nil }
+    precondition(ready, "preview backend did not deliver the scripted session in time")
     return model
 }
 
 @MainActor
 func sampleTask(_ session: SessionModel, _ id: String) -> TaskItem {
-    session.tasks.first { $0.id == id }!
+    guard let task = session.tasks.first(where: { $0.id == id }) else {
+        preconditionFailure("scripted task \(id) missing from the preview session")
+    }
+    return task
 }
