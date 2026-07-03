@@ -1,34 +1,154 @@
 {
   "client": {
-    "Resize": {
-      "cols": 80,
-      "rows": 24
+    "Hello": {
+      "device": {
+        "kind": "terminal",
+        "name": "mbp-de-joao"
+      },
+      "protocol_version": 1,
+      "token": null
+    }
+  },
+  "first_snapshot": {
+    "Snapshot": {
+      "board": {
+        "card_selected": 0,
+        "cards": [
+          {
+            "Session": {
+              "kind": "play",
+              "last_activity_ms": 1700000000000,
+              "live": true
+            }
+          },
+          {
+            "Verdict": {
+              "clean": false
+            }
+          }
+        ],
+        "chat_fullscreen": false,
+        "detail_open": false,
+        "detail_scroll": 0,
+        "focus": "cards",
+        "overlaps": [
+          {
+            "a": "TASK-001",
+            "b": "TASK-002",
+            "repo": "org/x"
+          }
+        ],
+        "project_selected": false,
+        "review": {
+          "blocking": 1,
+          "clean": false,
+          "constraints": [
+            {
+              "text": "no legacy",
+              "verdict": "ok"
+            }
+          ],
+          "criteria": [
+            {
+              "text": "roundtrip works",
+              "verdict": "pending"
+            }
+          ],
+          "findings": [
+            "[MAJOR] src/a.rs:10 - broken invariant"
+          ],
+          "reviewed_at": 1700000000,
+          "reviewed_shas": [
+            "abc1234def5678"
+          ]
+        },
+        "selected": 0,
+        "setup_live": false,
+        "setup_needed": true,
+        "tasks": [
+          {
+            "adrs": [
+              "ADR-0002"
+            ],
+            "body": "## Objective\nDo the thing.\n",
+            "constraints": [
+              {
+                "enforce": "hook",
+                "text": "do not touch src/legacy/"
+              }
+            ],
+            "deferred": [
+              "extra scope"
+            ],
+            "id": "TASK-001",
+            "live_session": true,
+            "parallel": "conflict",
+            "prs": [
+              {
+                "branch": "feat/thing",
+                "pr": 42,
+                "repo": "org/x",
+                "reviewed_sha": "abc1234def5678"
+              }
+            ],
+            "review": {
+              "badge": 2,
+              "clean": false,
+              "reviewed_at": 1700000000,
+              "unmet": 1
+            },
+            "review_progress": "awaiting_ci",
+            "rfcs": [
+              "RFC-0001"
+            ],
+            "status": "wip",
+            "task_type": "impl"
+          }
+        ]
+      },
+      "docs": {
+        "dir": "/home/u/jaum/proj/docs",
+        "doc_open": false,
+        "list": [
+          "rfcs/RFC-0001.md"
+        ],
+        "preview": "# RFC-0001\n",
+        "scroll": 0,
+        "selected": 0
+      },
+      "input": {
+        "buffer": "tests first",
+        "kind": "convention"
+      },
+      "job": {
+        "finished": false,
+        "follow": true,
+        "logs": [
+          "scanning docs"
+        ],
+        "scroll": 0,
+        "title": "ingest"
+      },
+      "job_overlay": true,
+      "picker": {
+        "selected": 0
+      },
+      "project": "proj",
+      "projects": [
+        {
+          "backlog": "/home/u/jaum/proj/backlog",
+          "name": "proj"
+        }
+      ],
+      "statusline": "[Board] TASK-001 feat/thing",
+      "tab": "board",
+      "toast": "play started on TASK-001"
     }
   },
   "server": {
-    "FrameFull": {
-      "cells": [
-        {
-          "bg": "Reset",
-          "fg": "#B48EFF",
-          "mods": "BOLD",
-          "sym": "j",
-          "underline": "Reset",
-          "x": 0,
-          "y": 0
-        },
-        {
-          "bg": "Black",
-          "fg": "42",
-          "mods": "ITALIC | UNDERLINED",
-          "sym": "◆",
-          "underline": "Cyan",
-          "x": 1,
-          "y": 0
-        }
-      ],
-      "cols": 80,
-      "rows": 24
+    "Welcome": {
+      "device_id": 0,
+      "protocol_version": 1
     }
   }
 }

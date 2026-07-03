@@ -12,6 +12,7 @@ use jaum_adapters::{ClaudeExecutor, Gh, Git, Session};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config as GlobalConfig;
+use crate::protocol::{Intent, SessionEvent, SessionEventKind};
 use jaum_core::{CiStatus, MergeState, PrCi, Repo, Status, Store, Task};
 use jaum_flows::conflict::Conflict;
 use jaum_flows::finish::Finish;
@@ -70,9 +71,6 @@ impl Tab {
     pub fn next(self) -> Tab {
         Tab::from_index((self.index() + 1) % 2)
     }
-    pub fn prev(self) -> Tab {
-        Tab::from_index((self.index() + 1) % 2)
-    }
 }
 
 /// Focused panel in the Board (3-column layout: tasks | cards | chat).
@@ -112,16 +110,6 @@ pub const STATUS_ORDER: [Status; 5] = [
     Status::Backlog,
     Status::Merged,
 ];
-
-pub fn status_label(s: Status) -> &'static str {
-    match s {
-        Status::Backlog => "backlog",
-        Status::Ready => "ready",
-        Status::Wip => "wip",
-        Status::Review => "review",
-        Status::Merged => "merged",
-    }
-}
 
 fn status_rank(s: Status) -> usize {
     STATUS_ORDER
@@ -341,14 +329,20 @@ impl SessionEntry {
     }
 
     /// Drains the PTY's pending bytes; marks `finished` on EOF. No-op for history
-    /// entries (no `rx`).
-    fn drain(&mut self) {
+    /// entries (no `rx`). Returns the drained bytes and whether the session
+    /// finished during this drain (both feed `SessionEvent`s).
+    fn drain(&mut self) -> (Vec<u8>, bool) {
         use std::sync::mpsc::TryRecvError;
-        let Some(rx) = &self.rx else { return };
+        let was_finished = self.finished;
+        let mut drained = Vec::new();
+        let Some(rx) = &self.rx else {
+            return (drained, false);
+        };
         loop {
             match rx.try_recv() {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
+                    drained.extend_from_slice(&bytes);
                     self.last_activity = SystemTime::now();
                 }
                 Err(TryRecvError::Empty) => break,
@@ -366,18 +360,13 @@ impl SessionEntry {
         {
             self.finished = true;
         }
+        (drained, self.finished && !was_finished)
     }
 }
 
-/// What the text input is capturing (dispatched on Enter).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum InputKind {
-    Defer,
-    Convention,
-    NewTask,
-    NewTaskClaude,
-    InitPath,
-}
+/// What the text input is capturing (dispatched on Enter). Shared with the
+/// wire protocol so intents carry it as-is.
+pub use crate::protocol::InputKind;
 
 /// Async job kind (defines what to do when it finishes).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -469,6 +458,10 @@ pub struct App {
     /// Live sessions (PTYs), running in parallel. The "focused" session is the one
     /// of the selected card in the Board (`current_session_idx`).
     pub sessions: Vec<SessionEntry>,
+
+    /// Session lifecycle/output events accumulated since the last take (the
+    /// daemon broadcasts them; the local TUI discards them each frame).
+    session_events: Vec<SessionEvent>,
 
     pub review_report: Option<ReviewReport>,
 
@@ -574,6 +567,7 @@ impl App {
             watch_rx: None,
             should_quit: false,
             sessions: Vec::new(),
+            session_events: Vec::new(),
             review_report: None,
             board_focus: BoardFocus::Tasks,
             card_selected: 0,
@@ -1021,12 +1015,6 @@ impl App {
             .read_doc::<ReviewReport>(&path)
             .ok()
             .map(|(r, _)| r)
-    }
-
-    /// Review badge ⚑ N: findings + constraints and acceptance criteria not-ok.
-    pub fn review_badge(&self, id: &str) -> Option<usize> {
-        let r = self.load_review(id)?;
-        Some(r.findings.len() + r.unmet_count())
     }
 
     /// Status line: tab/focus, selected task/branch and navigation hint.
@@ -1844,19 +1832,6 @@ impl App {
 
     // --- quick capture -----------------------------------------------------
 
-    /// Starts capturing text of a kind (opens the input in the footer).
-    pub fn start_input(&mut self, kind: InputKind) {
-        self.input = Some((kind, String::new()));
-    }
-
-    /// Opens the `init` input prefilled with the current directory.
-    pub fn start_init_input(&mut self) {
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.input = Some((InputKind::InitPath, cwd));
-    }
-
     /// Dispatches the captured text per kind.
     pub fn submit_input(&mut self, kind: InputKind, text: String) {
         match kind {
@@ -1865,6 +1840,91 @@ impl App {
             InputKind::NewTask => self.new_task_quick(&text),
             InputKind::NewTaskClaude => self.start_capture_job(&text),
             InputKind::InitPath => self.start_init_job(&text),
+        }
+    }
+
+    /// Applies a domain intent (the only mutation path shared by the daemon
+    /// and the local TUI). Action intents re-show the toast (retry feedback):
+    /// retrying a command that fails the same way shows the error again
+    /// instead of going silent.
+    pub fn apply_intent(&mut self, intent: Intent) {
+        let rearm = matches!(
+            intent,
+            Intent::Play
+                | Intent::ReviewChat
+                | Intent::Handoff
+                | Intent::Finish
+                | Intent::Ingest
+                | Intent::AnalyzeParallel
+                | Intent::StartSetup
+                | Intent::StartInput {
+                    kind: InputKind::InitPath,
+                    ..
+                }
+        );
+        match intent {
+            Intent::Quit => self.should_quit = true,
+            Intent::NextTab => self.tab = self.tab.next(),
+            Intent::SetTab { index } => self.tab = Tab::from_index(index),
+            Intent::SelectNext => self.select_next(),
+            Intent::SelectPrev => self.select_prev(),
+            Intent::SelectFirst => self.select_first(),
+            Intent::SelectLast => self.select_last(),
+            Intent::FocusLeft => self.focus_left(),
+            Intent::FocusRight => self.focus_right(),
+            Intent::CardNext => self.card_next(),
+            Intent::CardPrev => self.card_prev(),
+            Intent::OpenDetail => self.open_detail(),
+            Intent::CloseDetail => self.close_detail(),
+            Intent::DetailScrollDown => self.detail_scroll_down(),
+            Intent::DetailScrollUp => self.detail_scroll_up(),
+            Intent::DocsNext => self.docs_next(),
+            Intent::DocsPrev => self.docs_prev(),
+            Intent::OpenDoc => self.open_doc(),
+            Intent::CloseDoc => self.close_doc(),
+            Intent::DocScrollDown => self.doc_scroll_down(),
+            Intent::DocScrollUp => self.doc_scroll_up(),
+            Intent::OpenPicker => self.open_picker(),
+            Intent::ClosePicker => self.close_picker(),
+            Intent::PickerNext => self.picker_next(),
+            Intent::PickerPrev => self.picker_prev(),
+            Intent::PickerConfirm => self.confirm_picker(),
+            Intent::DismissJob => self.dismiss_job(),
+            Intent::JobScrollUp => self.job_scroll_up(),
+            Intent::JobScrollDown => self.job_scroll_down(),
+            Intent::JobScrollTop => self.job_scroll_top(),
+            Intent::JobFollow => self.job_follow(),
+            Intent::ToggleZoom => self.chat_fullscreen = !self.chat_fullscreen,
+            Intent::Play => self.play_selected(),
+            Intent::ReviewChat => self.review_selected(),
+            Intent::Handoff => self.handoff_selected(),
+            Intent::Finish => self.finish_selected(),
+            Intent::Ingest => self.start_ingest_job(),
+            Intent::AnalyzeParallel => self.start_parallel_job(),
+            Intent::StartSetup => self.setup_start(),
+            Intent::EditConventions => self.request_edit_conventions(),
+            Intent::StartInput { kind, prefill } => self.input = Some((kind, prefill)),
+            Intent::InputChar { ch } => {
+                if let Some((_, buf)) = self.input.as_mut() {
+                    buf.push(ch);
+                }
+            }
+            Intent::InputBackspace => {
+                if let Some((_, buf)) = self.input.as_mut() {
+                    buf.pop();
+                }
+            }
+            Intent::InputCancel => self.input = None,
+            Intent::InputSubmit => {
+                if let Some((kind, text)) = self.input.take() {
+                    self.submit_input(kind, text);
+                }
+            }
+            Intent::FinishSession => self.finish_selected_session(),
+            Intent::CloseSession => self.close_selected_session(),
+        }
+        if rearm {
+            self.rearm_toast();
         }
     }
 
@@ -1919,6 +1979,13 @@ impl App {
         claude_session_id: String,
         cwd: PathBuf,
     ) {
+        self.session_events.push(SessionEvent {
+            session_id: claude_session_id.clone(),
+            kind: SessionEventKind::Started {
+                kind: crate::snapshot::wire_session_kind(kind),
+                task: task.clone(),
+            },
+        });
         self.sessions.push(SessionEntry::spawn(
             kind,
             task,
@@ -2024,6 +2091,10 @@ impl App {
         let worktrees = self.sessions[idx].worktrees.clone();
         self.cleanup_worktrees(&task, &worktrees);
         self.sessions[idx].finished = true;
+        self.session_events.push(SessionEvent {
+            session_id: self.sessions[idx].claude_session_id.clone(),
+            kind: SessionEventKind::Finished,
+        });
         self.status_msg = format!("session finished: {}", self.sessions[idx].name());
         self.persist_sessions();
     }
@@ -2037,6 +2108,10 @@ impl App {
         if let Some(s) = &mut e.session {
             let _ = s.kill();
         }
+        self.session_events.push(SessionEvent {
+            session_id: e.claude_session_id.clone(),
+            kind: SessionEventKind::Finished,
+        });
         self.cleanup_worktrees(&e.task, &e.worktrees);
         // the cards cursor recomputes; if we were in chat, fall back to cards.
         self.card_selected = self.card_selected.saturating_sub(1);
@@ -2060,14 +2135,32 @@ impl App {
         self.card_selected = 0;
     }
 
-    /// Applies each PTY's pending bytes to its vt100 parser.
+    /// Applies each PTY's pending bytes to its vt100 parser, emitting session
+    /// events (output/finished) for connected clients.
     pub fn drain_pty(&mut self) {
         for e in &mut self.sessions {
-            e.drain();
+            let (bytes, finished_now) = e.drain();
+            if !bytes.is_empty() {
+                self.session_events.push(SessionEvent {
+                    session_id: e.claude_session_id.clone(),
+                    kind: SessionEventKind::Output { bytes },
+                });
+            }
+            if finished_now {
+                self.session_events.push(SessionEvent {
+                    session_id: e.claude_session_id.clone(),
+                    kind: SessionEventKind::Finished,
+                });
+            }
         }
         // `drain` updates `last_activity`; reorder to keep the most recent on top
         // (without losing the selected session).
         self.sort_sessions();
+    }
+
+    /// Takes the session events accumulated since the last call.
+    pub fn take_session_events(&mut self) -> Vec<SessionEvent> {
+        std::mem::take(&mut self.session_events)
     }
 
     /// Sorts sessions by activity (most recent on top), repositioning the cards

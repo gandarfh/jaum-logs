@@ -1,9 +1,10 @@
 mod app;
-mod backend;
 mod client;
 mod config;
 mod daemon;
+mod keymap;
 mod protocol;
+mod snapshot;
 mod tui;
 
 use std::path::PathBuf;
@@ -29,7 +30,7 @@ fn main() -> Result<()> {
             let cfg = Config::load()?;
             let app = App::new(cfg, idx)?;
             let sock = daemon::socket_path()?;
-            daemon::serve(&sock, app, 80, 24)
+            daemon::serve(&sock, app)
         }
         Some("shutdown") => {
             let sock = daemon::socket_path()?;

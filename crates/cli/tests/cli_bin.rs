@@ -360,12 +360,68 @@ fn ingest_creates_stubs_via_stubbed_claude() {
 
 // --- full client session over a pty ------------------------------------------
 
-/// Drives a complete attach: a fake daemon on the socket sends frames, requests
-/// the editor and finally detaches, while the client runs on a real pty
-/// allocated by `script(1)`.
+/// Minimal but complete snapshot for the fake daemon.
+fn sample_snapshot() -> protocol::DomainSnapshot {
+    use protocol::*;
+    DomainSnapshot {
+        project: "proj".into(),
+        projects: vec![ProjectRef {
+            name: "proj".into(),
+            backlog: "/tmp/backlog".into(),
+        }],
+        tab: TabId::Board,
+        board: BoardView {
+            tasks: vec![TaskView {
+                id: "TASK-001".into(),
+                task_type: TaskTypeId::Impl,
+                status: StatusId::Backlog,
+                rfcs: vec![],
+                adrs: vec![],
+                prs: vec![],
+                deferred: vec![],
+                constraints: vec![],
+                body: "## Objective\nx\n".into(),
+                live_session: false,
+                review: None,
+                parallel: None,
+                review_progress: None,
+            }],
+            selected: 0,
+            project_selected: false,
+            focus: FocusId::Tasks,
+            cards: vec![],
+            card_selected: 0,
+            chat_fullscreen: false,
+            setup_needed: false,
+            setup_live: false,
+            detail_open: false,
+            detail_scroll: 0,
+            review: None,
+            overlaps: vec![],
+        },
+        docs: DocsView {
+            dir: "/tmp/docs".into(),
+            list: vec![],
+            selected: 0,
+            preview: String::new(),
+            doc_open: false,
+            scroll: 0,
+        },
+        picker: None,
+        input: None,
+        job: None,
+        job_overlay: false,
+        toast: None,
+        statusline: "[Board] TASK-001".into(),
+    }
+}
+
+/// Drives a complete attach: a fake daemon on the socket answers the
+/// handshake, streams a snapshot, requests the editor and finally detaches,
+/// while the client runs on a real pty allocated by `script(1)`.
 #[test]
 fn attach_runs_full_client_session_over_pty() {
-    use protocol::{ServerMsg, read_msg};
+    use protocol::{PROTOCOL_VERSION, ServerMsg, read_msg};
     use std::os::unix::net::UnixListener;
 
     let home = Home::new("pty");
@@ -445,32 +501,28 @@ fn attach_runs_full_client_session_over_pty() {
         }
         let mut reader = BufReader::new(conn.try_clone().unwrap());
         match read_msg::<_, ClientMsg>(&mut reader) {
-            Ok(Some(ClientMsg::Resize { .. })) => break (conn, reader),
+            Ok(Some(ClientMsg::Hello {
+                protocol_version, ..
+            })) => {
+                assert_eq!(protocol_version, PROTOCOL_VERSION, "client version");
+                break (conn, reader);
+            }
             _ => continue, // is_running probe: connect + drop
         }
     };
 
-    // full frame so the client paints something real
-    let cells = vec![protocol::WireCell {
-        x: 0,
-        y: 0,
-        sym: "j".into(),
-        fg: ratatui::style::Color::Reset,
-        bg: ratatui::style::Color::Reset,
-        underline: ratatui::style::Color::Reset,
-        mods: ratatui::style::Modifier::empty(),
-    }];
+    // handshake answer + first snapshot so the client paints something real
     write_msg(
         &mut conn,
-        &ServerMsg::FrameFull {
-            cols: 4,
-            rows: 2,
-            cells: cells.clone(),
+        &ServerMsg::Welcome {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: 0,
         },
     )
     .unwrap();
+    write_msg(&mut conn, &ServerMsg::Snapshot(Box::new(sample_snapshot()))).unwrap();
 
-    // editor round-trip: client suspends, runs $EDITOR, answers Done + Resize
+    // editor round-trip: client suspends, runs $EDITOR, answers EditorDone
     write_msg(
         &mut conn,
         &ServerMsg::RunEditor {
@@ -479,45 +531,41 @@ fn attach_runs_full_client_session_over_pty() {
     )
     .unwrap();
     let mut got_editor_done = false;
-    let mut got_resize_back = false;
     for _ in 0..10 {
         match read_msg::<_, ClientMsg>(&mut reader).unwrap() {
-            Some(ClientMsg::EditorDone) => got_editor_done = true,
-            Some(ClientMsg::Resize { .. }) => {
-                got_resize_back = true;
+            Some(ClientMsg::EditorDone) => {
+                got_editor_done = true;
                 break;
             }
-            Some(_) => continue,
+            Some(_) => continue, // pings keep flowing
             None => break,
         }
     }
     assert!(got_editor_done, "client never reported EditorDone");
-    assert!(got_resize_back, "client never resent its size");
     assert_eq!(
         fs::read_to_string(&marker).unwrap().trim(),
         "/tmp/jaum-pty-conv.md",
         "stub editor should have received the path"
     );
 
-    // keystroke through the pty reaches the daemon as a Key message
-    stdin.write_all(b"x").unwrap();
+    // keystroke through the pty reaches the daemon as a domain intent
+    stdin.write_all(b"j").unwrap();
     stdin.flush().unwrap();
-    let mut got_key = false;
+    let mut got_intent = false;
     for _ in 0..10 {
         match read_msg::<_, ClientMsg>(&mut reader).unwrap() {
-            Some(ClientMsg::Key(k)) => {
-                assert!(matches!(k.code, crossterm::event::KeyCode::Char('x')));
-                got_key = true;
+            Some(ClientMsg::Intent(protocol::Intent::SelectNext)) => {
+                got_intent = true;
                 break;
             }
             Some(_) => continue,
             None => break,
         }
     }
-    assert!(got_key, "keystroke never arrived");
+    assert!(got_intent, "keystroke never arrived as an intent");
 
-    // a diff keeps the redraw path warm, then detach ends the session
-    write_msg(&mut conn, &ServerMsg::FrameDiff(cells)).unwrap();
+    // a second snapshot keeps the redraw path warm, then detach ends the session
+    write_msg(&mut conn, &ServerMsg::Snapshot(Box::new(sample_snapshot()))).unwrap();
     write_msg(&mut conn, &ServerMsg::Detach).unwrap();
 
     let out = wait_with_timeout(child, Duration::from_secs(15));

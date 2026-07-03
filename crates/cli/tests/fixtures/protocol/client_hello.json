@@ -1,0 +1,10 @@
+{
+  "Hello": {
+    "device": {
+      "kind": "terminal",
+      "name": "mbp-de-joao"
+    },
+    "protocol_version": 1,
+    "token": null
+  }
+}

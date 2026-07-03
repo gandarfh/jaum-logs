@@ -1,0 +1,5 @@
+{
+  "Rejected": {
+    "reason": "incompatible protocol: daemon speaks v1, client sent v2"
+  }
+}

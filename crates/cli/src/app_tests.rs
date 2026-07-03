@@ -215,18 +215,10 @@ fn tab_navigation_and_labels() {
     assert_eq!(Tab::from_index(9), Tab::Docs);
     assert_eq!(Tab::Board.next(), Tab::Docs);
     assert_eq!(Tab::Docs.next(), Tab::Board);
-    assert_eq!(Tab::Board.prev(), Tab::Docs);
-    assert_eq!(Tab::Docs.prev(), Tab::Board);
 }
 
 #[test]
 fn status_labels_and_board_order() {
-    assert_eq!(status_label(Status::Backlog), "backlog");
-    assert_eq!(status_label(Status::Ready), "ready");
-    assert_eq!(status_label(Status::Wip), "wip");
-    assert_eq!(status_label(Status::Review), "review");
-    assert_eq!(status_label(Status::Merged), "merged");
-
     let mk = |id: &str, status: Status| Task {
         id: id.into(),
         task_type: jaum_core::TaskType::Impl,
@@ -825,18 +817,18 @@ fn selection_moves_through_project_row_and_bounds() {
 }
 
 #[test]
-fn review_badge_counts_findings_and_unmet_items() {
+fn load_review_counts_findings_and_unmet_items() {
     let dir = TmpDir::new("badge");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     assert!(app.load_review("TASK-001").is_none());
-    assert!(app.review_badge("TASK-001").is_none());
     fs::write(
         dir.path().join(".backlog/TASK-001.review.md"),
         "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n",
     )
     .unwrap();
     app.refresh().unwrap();
-    assert_eq!(app.review_badge("TASK-001"), Some(2));
+    let r = app.load_review("TASK-001").unwrap();
+    assert_eq!(r.findings.len() + r.unmet_count(), 2);
 }
 
 #[test]
@@ -1694,13 +1686,19 @@ fn new_task_quick_creates_and_reports_errors() {
 fn input_capture_dispatches_by_kind() {
     let dir = TmpDir::new("input");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
-    app.start_input(InputKind::Defer);
+    app.apply_intent(Intent::StartInput {
+        kind: InputKind::Defer,
+        prefill: String::new(),
+    });
     assert!(matches!(app.input, Some((InputKind::Defer, ref s)) if s.is_empty()));
 
-    app.start_init_input();
+    app.apply_intent(Intent::StartInput {
+        kind: InputKind::InitPath,
+        prefill: "/tmp/somewhere".into(),
+    });
     let (kind, buf) = app.input.clone().unwrap();
     assert!(kind == InputKind::InitPath);
-    assert!(!buf.is_empty());
+    assert_eq!(buf, "/tmp/somewhere");
 
     app.submit_input(InputKind::Defer, "split the migration".into());
     assert!(app.status_msg.contains("deferred"));
