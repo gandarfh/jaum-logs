@@ -50,12 +50,24 @@ jobs:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
-          # Pinned: the coverageThreshold semantics vary across bun versions
-          # (newer ones apply the lines threshold to functions too).
+          # Pinned for reproducible coverage output across runs.
           bun-version: "1.3.12"
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
+      # The gate reads the lcov report directly: bun's own coverageThreshold
+      # is inconsistent across versions (and gates per file, not per total).
+      - name: Enforce minimum line coverage
+        env:
+          COVERAGE_MIN: "95"
+        run: |
+          pct=$(awk -F: '/^LF/{lf+=$2} /^LH/{lh+=$2} END{print 100*lh/lf}' coverage/lcov.info)
+          printf 'Line coverage: %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN"
+          printf 'Sidecar line coverage: %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+            printf '::error::Line coverage %.2f%% is below the %s%% minimum\n' "$pct" "$COVERAGE_MIN"
+            exit 1
+          fi
       - run: bun run build
 
   coverage:

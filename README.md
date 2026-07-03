@@ -140,7 +140,7 @@ on every PR and on push to `main`:
 - **Lint**: `cargo clippy --all-targets -- -D warnings`
 - **Build and tests**: `cargo build --all-targets` + `cargo test --workspace`
 - **Sidecar**: `bun run typecheck` + `bun test` + `bun run build` in `sidecar/`;
-  `bun test` enforces the same 95% line coverage minimum (bunfig.toml)
+  the job enforces the same 95% line coverage minimum from the lcov report
 - **Coverage**: `cargo llvm-cov`, minimum of 95% line coverage. The gate is
   blocking: the job fails below the minimum.
 

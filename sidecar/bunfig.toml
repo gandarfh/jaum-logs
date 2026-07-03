@@ -1,5 +1,6 @@
 [test]
 coverage = true
 coverageSkipTestFiles = true
-# Same bar as the Rust workspace gate: 95% of lines.
-coverageThreshold = { lines = 0.95 }
+# The gate itself is enforced from the lcov report (CI and make sidecar-test):
+# bun's inline-table coverageThreshold is inconsistent across versions.
+coverageReporter = ["text", "lcov"]
