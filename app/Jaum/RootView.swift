@@ -118,6 +118,13 @@ struct RootView: View {
     /// External resolution closes the alert via onChange. A dismissal that
     /// carried no decision (scene teardown) re-presents shortly after, so a
     /// pending request can never be orphaned behind a closed alert.
+    ///
+    /// The delay is not load-bearing for correctness, only for ordering
+    /// robustness: SwiftUI gives no guarantee whether the button action or
+    /// this setter runs first, so the re-present check waits long enough for
+    /// `permissionDecided` to be set by a button tap. Re-presenting is
+    /// idempotent, and `onAppear` restores the prompt anyway if the scene
+    /// was rebuilt in the meantime.
     var permissionPresented: Binding<Bool> {
         Binding(
             get: { permissionPrompt != nil },

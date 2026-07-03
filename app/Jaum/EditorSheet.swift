@@ -65,7 +65,11 @@ struct EditorSheet: View {
     }
 
     func cancel() async {
-        await terminal.cancelEditing()
+        do {
+            try await terminal.cancelEditing()
+        } catch {
+            saveError = error.localizedDescription
+        }
     }
 
     var fileName: String {

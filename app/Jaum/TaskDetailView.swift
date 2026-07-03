@@ -163,7 +163,7 @@ struct DetailTabView: View {
                     Text("Critérios de aceite")
                         .font(.callout.weight(.bold))
                         .padding(.bottom, 4)
-                    ForEach(task.criteria) { criterion in
+                    ForEach(Array(task.criteria.enumerated()), id: \.offset) { _, criterion in
                         HStack(spacing: 9) {
                             Image(systemName: criterion.done ? "checkmark" : "clock")
                                 .font(.caption)
@@ -185,7 +185,7 @@ struct DetailTabView: View {
                         .font(.callout.weight(.bold))
                         .padding(.top, 16)
                         .padding(.bottom, 4)
-                    ForEach(task.constraints, id: \.self) { constraint in
+                    ForEach(Array(task.constraints.enumerated()), id: \.offset) { _, constraint in
                         HStack(spacing: 9) {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.caption)
@@ -232,7 +232,7 @@ struct ReviewSessionView: View {
                 }
                 .padding(.bottom, 10)
 
-                ForEach(taskSession.findings) { finding in
+                ForEach(Array(taskSession.findings.enumerated()), id: \.offset) { _, finding in
                     HStack(alignment: .top, spacing: 11) {
                         Image(systemName: "flag")
                             .font(.callout)

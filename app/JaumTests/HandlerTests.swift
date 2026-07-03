@@ -7,7 +7,7 @@ import Testing
 @MainActor
 struct HandlerTests {
     private func terminal() -> TerminalModel {
-        TerminalModel(transport: UnixSocketTransport(path: "/tmp/jaum-nada.sock"))
+        TerminalModel(transport: NullTransport())
     }
 
     @Test func editorSaveWritesTheFileAndClearsTheRequest() async throws {
@@ -66,7 +66,8 @@ struct HandlerTests {
 
     @Test func reconnectOnlyFiresWhenDisconnected() async {
         let session = await startedSession()
-        let model = terminal()
+        let model = TerminalModel(
+            transport: UnixSocketTransport(path: "/tmp/jaum-nada.sock"))
         let root = RootView(session: session, terminal: model)
         root.reconnectIfNeeded()
         _ = await waitUntil { model.lastError != nil }

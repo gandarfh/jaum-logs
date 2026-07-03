@@ -95,7 +95,7 @@ struct TerminalModelTests {
         try transport.push(.runEditor(path: "/tmp/whatever.md"))
         #expect(await waitUntil { model.editorRequest != nil })
 
-        await model.cancelEditing()
+        try await model.cancelEditing()
         #expect(model.editorRequest == nil)
         #expect(try transport.sentMessages().last == .editorDone)
     }
@@ -105,8 +105,41 @@ struct TerminalModelTests {
         let model = TerminalModel(transport: transport)
         await model.attach()
         try await model.finishEditing(content: "x")
-        await model.cancelEditing()
+        try await model.cancelEditing()
         #expect(try transport.sentMessages() == [.resize(cols: 120, rows: 40)])
+    }
+
+    /// If EditorDone cannot be sent the request must survive, so the sheet
+    /// stays open and the user can retry instead of the daemon hanging.
+    @Test func finishEditingKeepsTheRequestWhenSendFails() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jaumkit-editor-send-\(getpid())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("conventions.md")
+        try "antes".write(to: file, atomically: true, encoding: .utf8)
+
+        let transport = FakeTransport()
+        let model = TerminalModel(transport: transport)
+        await model.attach()
+        try transport.push(.runEditor(path: file.path))
+        #expect(await waitUntil { model.editorRequest != nil })
+
+        transport.failSend = true
+        await #expect(throws: (any Error).self) {
+            try await model.finishEditing(content: "depois")
+        }
+        #expect(model.editorRequest != nil)
+        await #expect(throws: (any Error).self) {
+            try await model.cancelEditing()
+        }
+        #expect(model.editorRequest != nil)
+
+        transport.failSend = false
+        try await model.finishEditing(content: "depois")
+        #expect(model.editorRequest == nil)
+        #expect(try String(contentsOf: file, encoding: .utf8) == "depois")
+        #expect(try transport.sentMessages().last == .editorDone)
     }
 
     @Test func detachMessageDisconnects() async throws {

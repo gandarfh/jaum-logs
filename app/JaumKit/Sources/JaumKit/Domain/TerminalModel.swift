@@ -70,21 +70,23 @@ public final class TerminalModel {
     }
 
     /// Saves the embedded editor buffer back to disk and tells the daemon the
-    /// interactive step finished. I/O runs off the main actor.
+    /// interactive step finished. I/O runs off the main actor. The request is
+    /// only cleared after EditorDone is confirmed sent, so a failure keeps
+    /// the sheet open for retry instead of leaving the daemon hanging.
     public func finishEditing(content: String) async throws {
         guard let request = editorRequest else { return }
         let path = request.path
         try await Task.detached(priority: .userInitiated) {
             try content.write(toFile: path, atomically: true, encoding: .utf8)
         }.value
+        try await client.send(.editorDone)
         editorRequest = nil
-        await send(.editorDone)
     }
 
-    public func cancelEditing() async {
+    public func cancelEditing() async throws {
         guard editorRequest != nil else { return }
+        try await client.send(.editorDone)
         editorRequest = nil
-        await send(.editorDone)
     }
 
     func apply(_ event: DaemonClient.Event) {

@@ -130,6 +130,27 @@ struct SessionModelTests {
         #expect(model.attachmentError == nil)
     }
 
+    /// An attachment issued before a typed message must reach the backend
+    /// first, even though the file read is asynchronous.
+    @Test func attachImageKeepsTheCommandOrder() async throws {
+        let model = await startedModel()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jaumkit-order-\(getpid()).png")
+        try Data([5, 5]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let before = playMessages(model).count
+        model.attachImage(.success(url), taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("depois da imagem", taskID: "jaum-42", sessionID: "jaum-42-play")
+        #expect(await waitUntil { self.playMessages(model).count == before + 3 })
+        #expect(playMessages(model)[before].blocks.contains(.image(Data([5, 5]))))
+        guard case .markdown(let text) = playMessages(model)[before + 1].blocks.first else {
+            Issue.record("expected markdown block")
+            return
+        }
+        #expect(text == "depois da imagem")
+    }
+
     @Test func attachImageFailuresSurfaceTheError() async {
         let model = await startedModel()
         model.attachImage(

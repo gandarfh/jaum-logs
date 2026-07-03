@@ -46,11 +46,11 @@ public struct ProjectItem: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct Criterion: Identifiable, Hashable, Sendable {
+/// Not Identifiable on purpose: two criteria may carry the same text, so
+/// lists must key by position, not content.
+public struct Criterion: Hashable, Sendable {
     public var text: String
     public var done: Bool
-
-    public var id: String { text }
 
     public init(text: String, done: Bool = false) {
         self.text = text
@@ -58,13 +58,12 @@ public struct Criterion: Identifiable, Hashable, Sendable {
     }
 }
 
-/// A review finding shown in the review session tab.
-public struct Finding: Identifiable, Hashable, Sendable {
+/// A review finding shown in the review session tab. Like `Criterion`, keyed
+/// by position in lists because titles may repeat.
+public struct Finding: Hashable, Sendable {
     public var title: String
     public var detail: String
     public var location: String
-
-    public var id: String { title }
 
     public init(title: String, detail: String, location: String) {
         self.title = title

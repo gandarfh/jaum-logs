@@ -103,21 +103,28 @@ public final class SessionModel {
     }
 
     /// Handles a file-picker result: reads the image off the main actor and
-    /// sends it, or surfaces the failure for the UI to show.
+    /// sends it, or surfaces the failure for the UI to show. The read joins
+    /// the ordered dispatch chain, so an attachment issued before a typed
+    /// message reaches the backend before it.
     public func attachImage(_ result: Result<URL, any Error>, taskID: String, sessionID: String) {
         switch result {
         case .success(let url):
-            Task {
+            let backend = self.backend
+            let previous = lastDispatch
+            lastDispatch = Task {
+                await previous?.value
                 do {
                     let data = try await Self.readFile(at: url)
-                    sendImage(
-                        data: data,
-                        filename: url.lastPathComponent,
-                        taskID: taskID,
-                        sessionID: sessionID
-                    )
+                    guard !data.isEmpty else { return }
+                    await backend.send(
+                        .sendImage(
+                            taskID: taskID,
+                            sessionID: sessionID,
+                            data: data,
+                            filename: url.lastPathComponent
+                        ))
                 } catch {
-                    attachmentError = error.localizedDescription
+                    self.attachmentError = error.localizedDescription
                 }
             }
         case .failure(let error):

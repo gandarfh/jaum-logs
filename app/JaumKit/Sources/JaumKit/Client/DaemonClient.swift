@@ -28,7 +28,13 @@ public actor DaemonClient {
         }
         decoder = WireFrameDecoder()
         let incoming = try await transport.connect()
-        try await send(.resize(cols: cols, rows: rows))
+        do {
+            try await send(.resize(cols: cols, rows: rows))
+        } catch {
+            // Do not leave a half-open connection behind a failed handshake.
+            await transport.close()
+            throw error
+        }
         let (stream, continuation) = AsyncStream.makeStream(of: Event.self)
         receiveTask = Task {
             do {

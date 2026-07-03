@@ -52,6 +52,9 @@ public enum KeyEventKind: String, Codable, Sendable {
 
 /// Mirrors crossterm's `KeyCode` serde enum: unit variants are bare strings,
 /// payload variants are single-key objects ({"Char": "p"}, {"F": 5}).
+/// Deliberate parity gap: crossterm's `Media` and `Modifier` variants are
+/// omitted because the app never synthesizes them and the daemon never sends
+/// key events; add them here if media keys ever need to cross the wire.
 public enum KeyCode: Hashable, Sendable {
     case backspace
     case enter

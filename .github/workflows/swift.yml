@@ -14,7 +14,7 @@ on:
       - ".github/workflows/swift.yml"
 
 concurrency:
-  group: swift-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -35,12 +35,13 @@ jobs:
           -enableCodeCoverage YES -resultBundlePath TestResults.xcresult
       - name: Enforce minimum line coverage
         run: |
-          pct=$(xcrun xccov view --report --json TestResults.xcresult \
-            | jq '[.targets[] | select(.name | startswith("JaumKit") and (contains("Tests") | not))][0].lineCoverage * 100')
-          if [ "$pct" = "null" ]; then
+          cov=$(xcrun xccov view --report --json TestResults.xcresult \
+            | jq -r '[.targets[] | select(.name | startswith("JaumKit") and (contains("Tests") | not))][0].lineCoverage')
+          if [ "$cov" = "null" ] || [ -z "$cov" ]; then
             echo "::error::JaumKit target missing from the coverage report"
             exit 1
           fi
+          pct=$(awk -v c="$cov" 'BEGIN { printf "%.4f", c * 100 }')
           printf 'Line coverage (JaumKit): %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN"
           printf 'Line coverage (JaumKit): %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN" >> "$GITHUB_STEP_SUMMARY"
           if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
@@ -66,12 +67,13 @@ jobs:
           -resultBundlePath TestResults.xcresult
       - name: Enforce minimum line coverage
         run: |
-          pct=$(xcrun xccov view --report --json TestResults.xcresult \
-            | jq '[.targets[] | select(.name | startswith("Jaum.app"))][0].lineCoverage * 100')
-          if [ "$pct" = "null" ]; then
+          cov=$(xcrun xccov view --report --json TestResults.xcresult \
+            | jq -r '[.targets[] | select(.name | startswith("Jaum.app"))][0].lineCoverage')
+          if [ "$cov" = "null" ] || [ -z "$cov" ]; then
             echo "::error::Jaum.app target missing from the coverage report"
             exit 1
           fi
+          pct=$(awk -v c="$cov" 'BEGIN { printf "%.4f", c * 100 }')
           printf 'Line coverage (Jaum.app): %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN"
           printf 'Line coverage (Jaum.app): %.2f%% (minimum: %s%%)\n' "$pct" "$COVERAGE_MIN" >> "$GITHUB_STEP_SUMMARY"
           if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then

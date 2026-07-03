@@ -115,6 +115,18 @@ struct DaemonClientTests {
         }
     }
 
+    /// A handshake that fails after connect must not leave the connection
+    /// open behind the thrown error.
+    @Test func failedHandshakeClosesTheTransport() async {
+        let transport = FakeTransport()
+        transport.failSend = true
+        let client = DaemonClient(transport: transport)
+        await #expect(throws: FakeTransport.Failure.self) {
+            _ = try await client.attach(cols: 1, rows: 1)
+        }
+        #expect(transport.closed)
+    }
+
     @Test func secondAttachWithoutDetachIsRejected() async throws {
         let transport = FakeTransport()
         let client = DaemonClient(transport: transport)

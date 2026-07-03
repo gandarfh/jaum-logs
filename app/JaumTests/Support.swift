@@ -56,3 +56,15 @@ func sampleTask(_ session: SessionModel, _ id: String) -> TaskItem {
     }
     return task
 }
+
+/// Transport that connects to nowhere and accepts every send, for exercising
+/// flows (editor round-trip) that need a working connection but no daemon.
+final class NullTransport: WireTransport, Sendable {
+    func connect() async throws -> AsyncThrowingStream<Data, any Error> {
+        AsyncThrowingStream { _ in }
+    }
+
+    func send(_ data: Data) async throws {}
+
+    func close() async {}
+}
