@@ -300,6 +300,32 @@ fn loop_without_snapshot_sends_no_intents() {
 }
 
 #[test]
+fn loop_without_snapshot_still_quits_locally() {
+    // q must exit even if the daemon never sends a snapshot (no key context
+    // exists yet, so the quit cannot travel as an intent)
+    let (stx, srx) = channel();
+    let snap = slot_with(None);
+    let mut ui = ScriptUi::new(stx, vec![press('q'), press('x')]);
+    let mut wire = Vec::new();
+    client_loop(&mut ui, &mut wire, &srx, &snap, NO_PING).unwrap();
+    assert_eq!(ui.polls.len(), 1, "loop returned on q, x never polled");
+    assert!(
+        !sent_msgs(wire)
+            .iter()
+            .any(|m| matches!(m, ClientMsg::Intent(_)))
+    );
+
+    // Ctrl+C takes the same local exit
+    let (stx, srx) = channel();
+    let snap = slot_with(None);
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let mut ui = ScriptUi::new(stx, vec![ctrl_c, press('x')]);
+    let mut wire = Vec::new();
+    client_loop(&mut ui, &mut wire, &srx, &snap, NO_PING).unwrap();
+    assert_eq!(ui.polls.len(), 1, "loop returned on Ctrl+C");
+}
+
+#[test]
 fn loop_runs_editor_then_reports_done() {
     let (stx, srx) = channel();
     let snap = slot_with(Some(board_snapshot()));

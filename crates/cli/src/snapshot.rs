@@ -103,8 +103,8 @@ fn epoch_ms(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() * 1000
 }
 
-fn task_view(app: &App, t: &Task, active: &[String]) -> TaskView {
-    let review = app.load_review(&t.id).map(|r| ReviewBadge {
+fn task_view(app: &App, t: &Task, report: Option<&ReviewReport>, active: &[String]) -> TaskView {
+    let review = report.map(|r| ReviewBadge {
         clean: r.is_clean(),
         badge: r.findings.len() + r.unmet_count(),
         unmet: r.unmet_count(),
@@ -175,15 +175,23 @@ fn card_view(app: &App, card: BoardCard, selected_review: Option<&ReviewView>) -
 /// Builds the full snapshot of the app's domain state.
 pub fn build_snapshot(app: &App) -> DomainSnapshot {
     let active = app.active_task_ids();
+    // one review read per task, reused for the badge AND the selected-task
+    // detail (this runs on every daemon tick; no doubled disk reads).
+    let reports: Vec<Option<ReviewReport>> =
+        app.tasks.iter().map(|t| app.load_review(&t.id)).collect();
     let tasks: Vec<TaskView> = app
         .tasks
         .iter()
-        .map(|t| task_view(app, t, &active))
+        .zip(&reports)
+        .map(|(t, report)| task_view(app, t, report.as_ref(), &active))
         .collect();
 
+    // reuse the deduped report for the selected task (no second disk read).
     let selected_review = app.selected_task().and_then(|t| {
-        app.load_review(&t.id)
-            .map(|r| review_view(&r, reviewed_shas(t)))
+        reports
+            .get(app.selected)
+            .and_then(Option::as_ref)
+            .map(|r| review_view(r, reviewed_shas(t)))
     });
     let cards: Vec<CardView> = app
         .task_cards()

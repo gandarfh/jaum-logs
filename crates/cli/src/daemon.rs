@@ -330,6 +330,13 @@ impl Server {
                     self.drop_client(id);
                     return;
                 }
+                // events buffered while nobody was attached are history, not
+                // state: the first arrival bootstraps from the snapshot and
+                // must not receive them on the next broadcast.
+                let had_audience = self.clients.values().any(|c| c.device.is_some());
+                if !had_audience {
+                    let _ = self.daemon.app_mut().take_session_events();
+                }
                 if let Some(c) = self.clients.get_mut(&id) {
                     c.device = Some(device);
                 }

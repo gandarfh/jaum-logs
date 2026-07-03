@@ -236,6 +236,11 @@ mod b64 {
             for c in &chunk[..4 - pad] {
                 n = (n << 6) | value(*c)?;
             }
+            // canonical form only: sextet bits that map to no byte must be
+            // zero, otherwise two encodings would decode to the same payload.
+            if pad > 0 && n & ((1 << (2 * pad)) - 1) != 0 {
+                return Err("non-canonical base64 padding bits".into());
+            }
             n <<= 6 * pad as u32;
             let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
             out.extend_from_slice(&bytes[..3 - pad]);
@@ -670,6 +675,10 @@ pub(crate) mod tests {
         assert!(b64::decode("ab!=").is_err(), "invalid character");
         assert!(b64::decode("a===").is_err(), "too much padding");
         assert!(b64::decode("a=bc").is_err(), "padding in the middle");
+        assert!(
+            b64::decode("Zm9vYh==").is_err(),
+            "non-canonical padding bits must be rejected"
+        );
 
         // the serde hook uses it: Output pins a string, not a number array
         let json = serde_json::to_value(SessionEventKind::Output {

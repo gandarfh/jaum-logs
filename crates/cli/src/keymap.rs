@@ -138,11 +138,18 @@ pub fn map_key(ctx: &KeyCtx, key: KeyEvent) -> Option<Intent> {
         };
     }
 
-    // 2) chat focus without a local PTY (socket client): only Esc leaves the
-    //    chat; every other key is swallowed (there is no PTY to type into).
+    // 2) chat focus without a local PTY: this branch only runs on the socket
+    //    client (the local TUI feeds chat keys straight into its PTY before
+    //    mapping). With nothing to type into, Esc leaves the chat and the
+    //    quit keys still work; the rest is swallowed so a future session
+    //    stream can claim them without changing meaning.
     if ctx.tab == TabId::Board && ctx.focus == FocusId::Chat && ctx.chat_live {
         return match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => Some(Intent::FocusLeft),
+            KeyCode::Char('q') if key.modifiers.is_empty() => Some(Intent::Quit),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Intent::Quit)
+            }
             _ => None,
         };
     }

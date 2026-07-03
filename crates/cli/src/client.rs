@@ -121,7 +121,10 @@ pub(crate) fn client_loop<W: Write>(
     let mut last_draw = Instant::now();
     let mut next_seq: u64 = 0;
     let mut ping_sent: Option<(u64, Instant)> = None;
-    let mut last_ping = Instant::now() - ping_every;
+    // None = never pinged, so the first loop iteration pings right away.
+    // (Subtracting the interval from Instant::now() instead can underflow on
+    // a freshly booted system, where the monotonic clock is near zero.)
+    let mut last_ping: Option<Instant> = None;
     let mut last_rtt_ms: Option<u64> = None;
     loop {
         // 1) server events
@@ -146,7 +149,7 @@ pub(crate) fn client_loop<W: Write>(
         }
 
         // 2) liveness ping (reports the RTT measured on the previous pong)
-        if last_ping.elapsed() >= ping_every {
+        if last_ping.is_none_or(|t| t.elapsed() >= ping_every) {
             write_msg(
                 write_half,
                 &ClientMsg::Ping {
@@ -156,7 +159,7 @@ pub(crate) fn client_loop<W: Write>(
             )?;
             ping_sent = Some((next_seq, Instant::now()));
             next_seq += 1;
-            last_ping = Instant::now();
+            last_ping = Some(Instant::now());
         }
 
         // 3) redraw from the shared snapshot (or periodically, for the ages)
@@ -179,11 +182,24 @@ pub(crate) fn client_loop<W: Write>(
                             .as_ref()
                             .map(keymap::KeyCtx::from_snapshot)
                     };
-                    if let Some(ctx) = ctx
-                        && let Some(intent) = keymap::map_key(&ctx, k)
-                    {
-                        let intent = keymap::with_local_prefill(intent);
-                        write_msg(write_half, &ClientMsg::Intent(intent))?;
+                    match ctx {
+                        Some(ctx) => {
+                            if let Some(intent) = keymap::map_key(&ctx, k) {
+                                let intent = keymap::with_local_prefill(intent);
+                                write_msg(write_half, &ClientMsg::Intent(intent))?;
+                            }
+                        }
+                        // no snapshot yet, so no key context: still honor the
+                        // quit keys locally, or a silent daemon would leave the
+                        // user stuck with only kill -9 as an exit.
+                        None => {
+                            let ctrl_c = k.code == crossterm::event::KeyCode::Char('c')
+                                && k.modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL);
+                            if k.code == crossterm::event::KeyCode::Char('q') || ctrl_c {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 Event::Resize(_, _) => needs_redraw = true,

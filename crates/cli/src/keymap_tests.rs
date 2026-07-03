@@ -111,15 +111,18 @@ fn input_capture_takes_every_char() {
 }
 
 #[test]
-fn chat_focus_swallows_keys_except_esc() {
+fn chat_focus_swallows_keys_except_esc_and_quit() {
     let ctx = KeyCtx {
         focus: FocusId::Chat,
         chat_live: true,
         ..base_ctx()
     };
     assert_eq!(map_key(&ctx, key(KeyCode::Esc)), Some(Intent::FocusLeft));
-    assert_eq!(map_key(&ctx, ch('q')), None, "keys belong to the session");
-    assert_eq!(map_key(&ctx, ch('j')), None);
+    // with no PTY behind the placeholder, quitting must stay possible
+    assert_eq!(map_key(&ctx, ch('q')), Some(Intent::Quit));
+    assert_eq!(map_key(&ctx, ctrl('c')), Some(Intent::Quit));
+    assert_eq!(map_key(&ctx, ch('j')), None, "reserved for the session");
+    assert_eq!(map_key(&ctx, ch('p')), None);
 
     // a dead session releases the keys back to navigation
     let ctx = KeyCtx {
