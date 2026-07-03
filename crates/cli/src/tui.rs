@@ -19,8 +19,9 @@ use tui_term::widget::PseudoTerminal;
 use crate::app::{App, BoardFocus, Tab};
 use crate::keymap;
 use crate::protocol::{
-    CardView, CheckVerdict, CheckView, DocsView, DomainSnapshot, EnforceId, FocusId, InputKind,
-    ParallelMark, ReviewProgressId, ReviewView, SessionKind, StatusId, TabId, TaskTypeId, TaskView,
+    CardView, CheckVerdict, CheckView, DocsView, DomainSnapshot, EnforceId, FindingView, FocusId,
+    InputKind, ParallelMark, ReviewProgressId, ReviewView, SessionKind, SeverityId, StatusId,
+    TabId, TaskTypeId, TaskView,
 };
 use crate::snapshot::build_snapshot;
 
@@ -1468,8 +1469,8 @@ fn render_card_content(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>, 
 }
 
 /// Renders the selected session: the local PTY when the `App` is at hand
-/// (local mode), or a placeholder for socket clients (the session panel
-/// streams over the wire in a later phase).
+/// (local mode), or a placeholder for socket clients (no session stream to
+/// draw from on this side of the wire).
 fn render_session_pane(f: &mut Frame, app: Option<&App>, area: Rect, focused: bool) {
     let Some(app) = app else {
         let block = if focused {
@@ -1477,7 +1478,7 @@ fn render_session_pane(f: &mut Frame, app: Option<&App>, area: Rect, focused: bo
         } else {
             panel_tight("chat")
         };
-        let msg = "Session panel not available on this client yet.\nThe board stays fully usable; chat lands in a next phase.";
+        let msg = "Session panel not available on this client.\nThe board stays fully usable; the chat runs where the daemon lives.";
         f.render_widget(
             Paragraph::new(msg)
                 .style(Style::default().fg(SUBTLE))
@@ -1572,12 +1573,35 @@ fn verdict_lines(review: Option<&ReviewView>) -> Vec<Line<'static>> {
         lines.push(Line::from("  (none)"));
     } else {
         for finding in &r.findings {
-            lines.push(Line::from(format!("  {finding}")));
+            lines.push(Line::from(format!("  {}", finding_line(finding))));
         }
     }
     push_verdict_section(&mut lines, "Constraints (enforce: review)", &r.constraints);
     push_verdict_section(&mut lines, "Acceptance criteria", &r.criteria);
     lines
+}
+
+fn severity_tag(s: SeverityId) -> &'static str {
+    match s {
+        SeverityId::Blocker => "BLOCKER",
+        SeverityId::Major => "MAJOR",
+        SeverityId::Minor => "MINOR",
+        SeverityId::Nit => "NIT",
+    }
+}
+
+/// Terminal rendering of a structured finding: `[SEV] file:line - message
+/// (violates ref)`.
+fn finding_line(f: &FindingView) -> String {
+    let loc = match f.line {
+        Some(l) => format!("{}:{}", f.file, l),
+        None => f.file.clone(),
+    };
+    let tag = severity_tag(f.severity);
+    match &f.reference {
+        Some(r) => format!("[{tag}] {loc} - {} (violates {r})", f.message),
+        None => format!("[{tag}] {loc} - {}", f.message),
+    }
 }
 
 /// Age of an epoch-milliseconds instant. Tolerant of a clock that went
@@ -1726,6 +1750,48 @@ fn doc_group_color(group: &str) -> Color {
     }
 }
 
+/// Footer status text built from the domain snapshot: tab, selected row,
+/// branch, overlap warning and this terminal's navigation hints. Presentation
+/// belongs here, not on the wire.
+fn statusline_text(snap: &DomainSnapshot) -> String {
+    let mut s = format!(
+        "[{}]",
+        match snap.tab {
+            TabId::Board => "Board",
+            TabId::Docs => "Docs",
+        }
+    );
+    // in-flight review first, so the narrow footer never truncates it away.
+    if let Some(t) = snap
+        .board
+        .tasks
+        .iter()
+        .find(|t| t.review_progress == Some(ReviewProgressId::Running))
+    {
+        s.push_str(&format!(" ⟳ review {}", t.id));
+    }
+    if snap.board.project_selected {
+        s.push_str(" · project");
+    } else if let Some(t) = selected_task(snap) {
+        s.push_str(&format!(" {}", t.id));
+        if let Some(pr) = t.prs.first() {
+            s.push_str(&format!(" {}", pr.branch));
+        }
+    }
+    if let Some(o) = snap.board.overlaps.first() {
+        s.push_str(&format!(" · ⚠ overlap {} ({}↔{})", o.repo, o.a, o.b));
+    }
+    // navigation hint depending on the focused panel (Board only).
+    if snap.tab == TabId::Board {
+        s.push_str(match snap.board.focus {
+            FocusId::Tasks => "   h/l focus · l items · z zoom",
+            FocusId::Cards => "   Enter chat · h back · z zoom",
+            FocusId::Chat => "   Ctrl+G cmd · Ctrl+G z zoom",
+        });
+    }
+    s
+}
+
 fn render_statusline(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     // input mode: active prompt
     if let Some(input) = &snap.input {
@@ -1779,7 +1845,7 @@ fn render_statusline(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(84)]).split(area);
     f.render_widget(
         Paragraph::new(Span::styled(
-            snap.statusline.clone(),
+            statusline_text(snap),
             Style::default().fg(SUBTLE),
         )),
         cols[0],

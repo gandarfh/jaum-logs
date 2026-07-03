@@ -110,17 +110,22 @@ fn snapshot_mirrors_tasks_project_and_docs() {
     assert!(!t.live_session);
     assert!(t.review.is_none());
 
-    // docs list + preview of the selected doc
+    // docs list travels always; the preview only while something displays it
     assert_eq!(snap.docs.list, vec!["rfcs/RFC-0001.md".to_string()]);
-    assert!(snap.docs.preview.contains("RFC content"));
+    assert!(
+        snap.docs.preview.is_empty(),
+        "no preview read on the board tab"
+    );
     assert!(snap.docs.dir.ends_with("docs"));
+    app.apply_intent(Intent::SetTab { index: 1 });
+    let docs_tab = build_snapshot(&app);
+    assert!(docs_tab.docs.preview.contains("RFC content"));
 
     // no overlays at boot
     assert!(snap.picker.is_none());
     assert!(snap.input.is_none());
     assert!(snap.job.is_none());
     assert!(!snap.job_overlay);
-    assert!(snap.statusline.contains("TASK-001"));
 }
 
 #[test]
@@ -179,7 +184,12 @@ fn snapshot_carries_review_badge_and_detail() {
     let review = snap.board.review.expect("review detail");
     assert!(!review.clean);
     assert_eq!(review.blocking, 1);
-    assert!(review.findings[0].contains("broken invariant"));
+    let finding = &review.findings[0];
+    assert_eq!(finding.severity, crate::protocol::SeverityId::Blocker);
+    assert_eq!(finding.file, "src/a.rs");
+    assert_eq!(finding.line, Some(3));
+    assert_eq!(finding.message, "broken invariant");
+    assert_eq!(finding.reference.as_deref(), Some("RFC-001"));
     assert_eq!(review.constraints[0].verdict, CheckVerdict::Failed);
     assert_eq!(review.criteria[0].verdict, CheckVerdict::Pending);
 
@@ -248,14 +258,19 @@ fn snapshot_tracks_sessions_cards_focus_and_events() {
     let snap = build_snapshot(&app);
     let t = &snap.board.tasks[0];
     assert!(t.live_session);
-    assert!(matches!(
-        snap.board.cards[0],
+    match snap.board.cards[0] {
         CardView::Session {
             kind: crate::protocol::SessionKind::Play,
             live: true,
-            ..
+            last_activity_ms,
+        } => {
+            // truncated to the second: sub-second churn must not invalidate
+            // the snapshot dedupe while a PTY streams.
+            assert_eq!(last_activity_ms % 1000, 0);
+            assert!(last_activity_ms > 0);
         }
-    ));
+        ref other => panic!("expected a live play card, got {other:?}"),
+    }
     // opening a live session focuses its chat
     assert_eq!(snap.board.focus, FocusId::Chat);
 

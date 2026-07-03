@@ -44,7 +44,13 @@
           }
         ],
         "findings": [
-          "[MAJOR] src/a.rs:10 - broken invariant"
+          {
+            "file": "src/a.rs",
+            "line": 10,
+            "message": "broken invariant",
+            "reference": "RFC-0001",
+            "severity": "major"
+          }
         ],
         "reviewed_at": 1700000000,
         "reviewed_shas": [
@@ -129,7 +135,6 @@
         "name": "proj"
       }
     ],
-    "statusline": "[Board] TASK-001 feat/thing",
     "tab": "board",
     "toast": "play started on TASK-001"
   }

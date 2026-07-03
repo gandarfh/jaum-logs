@@ -209,8 +209,6 @@ fn fake_job(kind: JobKind) -> (std::sync::mpsc::Sender<JobMsg>, Job) {
 #[test]
 fn tab_navigation_and_labels() {
     assert_eq!(Tab::all().len(), 2);
-    assert_eq!(Tab::Board.title(), "Board");
-    assert_eq!(Tab::Docs.title(), "Docs");
     assert_eq!(Tab::Board.index(), 0);
     assert_eq!(Tab::from_index(9), Tab::Docs);
     assert_eq!(Tab::Board.next(), Tab::Docs);
@@ -483,8 +481,11 @@ fn refresh_clamps_selection_and_docs_cursor() {
 fn refresh_reports_overlap_between_wip_tasks_in_same_repo() {
     let dir = TmpDir::new("overlap");
     let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
-    assert!(!app.overlaps.is_empty());
-    assert!(app.statusline().contains("overlap"));
+    let (a, b, repo) = app.overlaps.first().expect("overlap detected");
+    assert_eq!(
+        (a.as_str(), b.as_str(), repo.as_str()),
+        ("TASK-001", "TASK-002", "org/x")
+    );
 }
 
 #[test]
@@ -829,30 +830,6 @@ fn load_review_counts_findings_and_unmet_items() {
     app.refresh().unwrap();
     let r = app.load_review("TASK-001").unwrap();
     assert_eq!(r.findings.len() + r.unmet_count(), 2);
-}
-
-#[test]
-fn statusline_reflects_selection_focus_and_tab() {
-    let dir = TmpDir::new("statusline");
-    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
-    let s = app.statusline();
-    assert!(s.contains("[Board]"));
-    assert!(s.contains("TASK-001"));
-    assert!(s.contains("feat/task-001"));
-    assert!(s.contains("focus"));
-
-    app.board_focus = BoardFocus::Cards;
-    assert!(app.statusline().contains("Enter chat"));
-    app.board_focus = BoardFocus::Chat;
-    assert!(app.statusline().contains("Ctrl+G"));
-
-    app.project_selected = true;
-    assert!(app.statusline().contains("· project"));
-
-    app.tab = Tab::Docs;
-    let s = app.statusline();
-    assert!(s.contains("[Docs]"));
-    assert!(!s.contains("focus"));
 }
 
 // --- parallelism ----------------------------------------------------------
@@ -1336,7 +1313,7 @@ fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
 }
 
 #[test]
-fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
+fn reviewing_task_id_tracks_the_running_capture() {
     let dir = TmpDir::new("reviewing-id");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     assert_eq!(app.reviewing_task_id(), None);
@@ -1347,17 +1324,13 @@ fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
     app.job = Some(job);
     assert_eq!(app.reviewing_task_id(), None);
 
-    // a running review job exposes its task and shows in the statusline
+    // a running review job exposes its task (the snapshot maps it to a
+    // Running review progress, rendered in the statusline; see tui_tests)
     let (_tx2, mut rjob) = fake_job(JobKind::Review);
     rjob.task = Some("TASK-001".into());
     app.job = Some(rjob);
     app.selected = 0;
     assert_eq!(app.reviewing_task_id(), Some("TASK-001"));
-    assert!(
-        app.statusline().contains("⟳ review TASK-001"),
-        "{}",
-        app.statusline()
-    );
 
     // a finished review no longer counts
     app.job.as_mut().unwrap().finished = true;

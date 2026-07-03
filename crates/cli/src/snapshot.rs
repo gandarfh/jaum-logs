@@ -6,12 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::app::{App, BoardCard, BoardFocus, ReviewProgress, SessionKind, Tab};
 use crate::protocol::{
     BoardView, CardView, CheckVerdict, CheckView, ConstraintView, DocsView, DomainSnapshot,
-    EnforceId, FocusId, InputView, JobView, OverlapView, ParallelMark, PickerView, PrView,
-    ProjectRef, ReviewBadge, ReviewProgressId, ReviewView, SessionKind as WireSessionKind,
-    StatusId, TabId, TaskTypeId, TaskView,
+    EnforceId, FindingView, FocusId, InputView, JobView, OverlapView, ParallelMark, PickerView,
+    PrView, ProjectRef, ReviewBadge, ReviewProgressId, ReviewView, SessionKind as WireSessionKind,
+    SeverityId, StatusId, TabId, TaskTypeId, TaskView,
 };
 use jaum_core::{Enforce, Status, Task, TaskType};
-use jaum_flows::review::{ConstraintResult, ConstraintVerdict, ReviewReport};
+use jaum_flows::review::{ConstraintResult, ConstraintVerdict, Finding, ReviewReport, Severity};
 
 fn review_progress_id(p: ReviewProgress) -> ReviewProgressId {
     match p {
@@ -69,11 +69,26 @@ fn check_view(c: &ConstraintResult) -> CheckView {
     }
 }
 
+fn finding_view(f: &Finding) -> FindingView {
+    FindingView {
+        severity: match f.severity {
+            Severity::Blocker => SeverityId::Blocker,
+            Severity::Major => SeverityId::Major,
+            Severity::Minor => SeverityId::Minor,
+            Severity::Nit => SeverityId::Nit,
+        },
+        file: f.file.clone(),
+        line: f.line,
+        message: f.message.clone(),
+        reference: f.reference.clone(),
+    }
+}
+
 fn review_view(r: &ReviewReport, shas: Vec<String>) -> ReviewView {
     ReviewView {
         clean: r.is_clean(),
         blocking: r.blocking_count(),
-        findings: r.findings.iter().map(|f| f.render()).collect(),
+        findings: r.findings.iter().map(finding_view).collect(),
         constraints: r.constraints.iter().map(check_view).collect(),
         criteria: r.criteria.iter().map(check_view).collect(),
         reviewed_shas: shas,
@@ -81,8 +96,11 @@ fn review_view(r: &ReviewReport, shas: Vec<String>) -> ReviewView {
     }
 }
 
+/// Epoch milliseconds truncated to the second: sub-second churn (PTY output
+/// bumps `last_activity` every drain) would make consecutive snapshots
+/// compare as different and defeat the coalescing dedupe.
 fn epoch_ms(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() * 1000
 }
 
 fn task_view(app: &App, t: &Task, active: &[String]) -> TaskView {
@@ -204,15 +222,22 @@ pub fn build_snapshot(app: &App) -> DomainSnapshot {
             .collect(),
     };
 
+    // the preview is only read (and shipped) while something displays it,
+    // mirroring the old render path; snapshots are built every tick, so an
+    // unconditional read would hit the disk at 60/s for nothing.
+    let preview_visible = app.tab == Tab::Docs || app.doc_open;
     let docs = DocsView {
         dir: app.docs_dir.display().to_string(),
         list: app.docs.clone(),
         selected: app.docs_selected,
-        preview: app
-            .docs
-            .get(app.docs_selected)
-            .map(|rel| std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default())
-            .unwrap_or_default(),
+        preview: if preview_visible {
+            app.docs
+                .get(app.docs_selected)
+                .map(|rel| std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        },
         doc_open: app.doc_open,
         scroll: app.doc_scroll,
     };
@@ -250,7 +275,6 @@ pub fn build_snapshot(app: &App) -> DomainSnapshot {
         }),
         job_overlay: app.job_overlay,
         toast: app.active_toast().map(str::to_string),
-        statusline: app.statusline(),
     }
 }
 

@@ -149,6 +149,53 @@ fn shutdown_without_daemon_reports_false() {
     assert!(!shutdown(&sock).unwrap());
 }
 
+#[test]
+fn snapshot_rate_samples_stay_bounded_without_pings() {
+    let mut server = Server::new(Daemon::new(app()));
+    // stale samples piled up while nobody pinged for a status read
+    for _ in 0..64 {
+        server
+            .snap_times
+            .push_back(Instant::now() - Duration::from_secs(30));
+    }
+    // recording new broadcasts must drop the stale ones on its own
+    for _ in 0..8 {
+        server.note_snapshot();
+    }
+    assert!(
+        server.snap_times.len() <= 8,
+        "stale samples must be pruned on push, got {}",
+        server.snap_times.len()
+    );
+    let status = server.status();
+    assert!(status.snapshots_per_sec >= 0.0);
+}
+
+#[test]
+fn burst_drain_yields_within_the_cap_under_continuous_events() {
+    let mut server = Server::new(Daemon::new(app()));
+    let (tx, rx) = channel::<Event>();
+    // producer keeps the channel busy with sub-COALESCE gaps for ~2s
+    let producer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if tx.send(Event::Disconnect(9999)).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let started = std::time::Instant::now();
+    drain_burst(&rx, &mut server);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "burst must yield to tick/broadcast within the cap, took {elapsed:?}"
+    );
+    drop(rx);
+    producer.join().unwrap();
+}
+
 // --- serve (socket) -----------------------------------------------------------
 
 fn sock_path(tag: &str) -> PathBuf {
@@ -234,7 +281,21 @@ fn serve_rejects_incompatible_version_and_missing_hello() {
         other => panic!("expected Rejected, got {other:?}"),
     }
 
-    // a rejected client never blocks a well-behaved one
+    // a second Hello on an already-handshaken connection is a protocol error
+    let (mut conn, mut reader) = connect(&sock);
+    write_msg(&mut conn, &hello_msg()).unwrap();
+    assert!(matches!(next_msg(&mut reader), ServerMsg::Welcome { .. }));
+    assert!(matches!(next_msg(&mut reader), ServerMsg::Snapshot(_)));
+    write_msg(&mut conn, &hello_msg()).unwrap();
+    match next_msg(&mut reader) {
+        ServerMsg::Rejected { reason } => {
+            assert!(reason.contains("already completed"), "{reason}")
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+    assert!(read_msg::<_, ServerMsg>(&mut reader).unwrap().is_none());
+
+    // rejected clients never block a well-behaved one
     let (mut conn, mut reader) = connect(&sock);
     write_msg(&mut conn, &hello_msg()).unwrap();
     assert!(matches!(next_msg(&mut reader), ServerMsg::Welcome { .. }));

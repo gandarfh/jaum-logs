@@ -20,10 +20,10 @@ mod protocol;
 
 use protocol::{
     BoardView, CardView, CheckVerdict, CheckView, ClientMsg, ConstraintView, DaemonStatus, Device,
-    DeviceKind, DeviceStatus, DocsView, DomainSnapshot, EnforceId, FocusId, InputKind, InputView,
-    Intent, JobView, OverlapView, PROTOCOL_VERSION, ParallelMark, PickerView, PrView, ProjectRef,
-    ReviewBadge, ReviewProgressId, ReviewView, ServerMsg, SessionEvent, SessionEventKind,
-    SessionKind, StatusId, TabId, TaskTypeId, TaskView,
+    DeviceKind, DeviceStatus, DocsView, DomainSnapshot, EnforceId, FindingView, FocusId, InputKind,
+    InputView, Intent, JobView, OverlapView, PROTOCOL_VERSION, ParallelMark, PickerView, PrView,
+    ProjectRef, ReviewBadge, ReviewProgressId, ReviewView, ServerMsg, SessionEvent,
+    SessionEventKind, SessionKind, SeverityId, StatusId, TabId, TaskTypeId, TaskView,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -143,7 +143,13 @@ fn sample_snapshot() -> DomainSnapshot {
             review: Some(ReviewView {
                 clean: false,
                 blocking: 1,
-                findings: vec!["[MAJOR] src/a.rs:10 - broken invariant".into()],
+                findings: vec![FindingView {
+                    severity: SeverityId::Major,
+                    file: "src/a.rs".into(),
+                    line: Some(10),
+                    message: "broken invariant".into(),
+                    reference: Some("RFC-0001".into()),
+                }],
                 constraints: vec![CheckView {
                     text: "no legacy".into(),
                     verdict: CheckVerdict::Ok,
@@ -183,7 +189,6 @@ fn sample_snapshot() -> DomainSnapshot {
         }),
         job_overlay: true,
         toast: Some("play started on TASK-001".into()),
-        statusline: "[Board] TASK-001 feat/thing".into(),
     }
 }
 

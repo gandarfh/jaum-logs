@@ -139,7 +139,7 @@ pub fn map_key(ctx: &KeyCtx, key: KeyEvent) -> Option<Intent> {
     }
 
     // 2) chat focus without a local PTY (socket client): only Esc leaves the
-    //    chat; every other key is swallowed until the session panel lands.
+    //    chat; every other key is swallowed (there is no PTY to type into).
     if ctx.tab == TabId::Board && ctx.focus == FocusId::Chat && ctx.chat_live {
         return match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => Some(Intent::FocusLeft),

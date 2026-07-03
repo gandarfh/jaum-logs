@@ -47,10 +47,26 @@ pub(crate) trait Ui {
     fn run_editor(&mut self, path: &str) -> Result<()>;
 }
 
+/// Machine hostname (identifies the device better than $USER: two terminals
+/// of the same user on different machines stay distinguishable).
+pub(crate) fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes a NUL-terminated name into the buffer we own.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|b| *b == 0)?;
+    let name = String::from_utf8_lossy(&buf[..len]).into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// This client as a `Device` for the handshake.
 fn local_device() -> Device {
     Device {
-        name: std::env::var("USER").unwrap_or_else(|_| "terminal".into()),
+        name: hostname()
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_else(|| "terminal".into()),
         kind: DeviceKind::Terminal,
     }
 }
@@ -208,8 +224,8 @@ impl Ui for TerminalUi {
 }
 
 /// Reader thread: stores snapshots in the shared slot and signals the loop.
-/// Session events are dropped for now (the session panel arrives in a later
-/// phase); everything else maps 1:1 to a loop event.
+/// Session events are dropped (this client has no session panel consuming
+/// them); everything else maps 1:1 to a loop event.
 pub(crate) fn spawn_reader(
     mut reader: BufReader<UnixStream>,
     snap: Arc<Mutex<Option<DomainSnapshot>>>,

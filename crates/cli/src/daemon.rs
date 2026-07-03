@@ -24,6 +24,9 @@ const TICK: Duration = Duration::from_millis(16);
 /// Coalescing window: a burst of events with gaps under this becomes ONE
 /// snapshot broadcast.
 const COALESCE: Duration = Duration::from_millis(20);
+/// Hard ceiling for one burst: even a continuous event stream must yield to
+/// tick/broadcast at least this often.
+const COALESCE_CAP: Duration = Duration::from_millis(100);
 /// Window used to derive `snapshots_per_sec`.
 const RATE_WINDOW: Duration = Duration::from_secs(1);
 
@@ -113,7 +116,9 @@ impl Daemon {
         Self { app, last: None }
     }
 
-    /// Drains PTYs/jobs/toast and picks up external edits.
+    /// Drains PTYs/jobs/toast and picks up external edits. PTYs keep their
+    /// spawn size: the wire has no viewport/resize path while the session
+    /// panel is a placeholder on socket clients.
     pub fn tick(&mut self) {
         self.app.drain_pty();
         self.app.poll_job();
@@ -201,8 +206,9 @@ impl Server {
         }
     }
 
-    /// Telemetry for `Pong`: uptime, recent snapshot rate, connected devices.
-    fn status(&mut self) -> DaemonStatus {
+    /// Drops rate samples older than the window. Called on every push AND on
+    /// every read, so the deque stays bounded even when no client pings.
+    fn prune_snap_times(&mut self) {
         let now = Instant::now();
         while let Some(t) = self.snap_times.front() {
             if now.duration_since(*t) > RATE_WINDOW {
@@ -211,6 +217,18 @@ impl Server {
                 break;
             }
         }
+    }
+
+    /// Records a snapshot broadcast for the rate telemetry.
+    fn note_snapshot(&mut self) {
+        self.prune_snap_times();
+        self.snap_times.push_back(Instant::now());
+    }
+
+    /// Telemetry for `Pong`: uptime, recent snapshot rate, connected devices.
+    fn status(&mut self) -> DaemonStatus {
+        self.prune_snap_times();
+        let now = Instant::now();
         let mut devices: Vec<DeviceStatus> = self
             .clients
             .iter()
@@ -302,6 +320,16 @@ impl Server {
                     self.drop_client(id);
                     return;
                 }
+                if self.clients.get(&id).is_some_and(|c| c.device.is_some()) {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Rejected {
+                            reason: "handshake already completed".into(),
+                        },
+                    );
+                    self.drop_client(id);
+                    return;
+                }
                 if let Some(c) = self.clients.get_mut(&id) {
                     c.device = Some(device);
                 }
@@ -318,7 +346,7 @@ impl Server {
                 // others, exactly one for the newcomer).
                 match self.daemon.snapshot_if_changed() {
                     Some(snap) => {
-                        self.snap_times.push_back(Instant::now());
+                        self.note_snapshot();
                         self.broadcast(&ServerMsg::Snapshot(Box::new(snap)));
                     }
                     None => {
@@ -332,7 +360,11 @@ impl Server {
                 }
             }
             Event::Client(id, msg) => {
-                // any traffic before a valid Hello is a protocol error.
+                // any traffic before a valid Hello is a protocol error, EXCEPT
+                // Shutdown: `jaum shutdown` (and the installer swapping
+                // binaries) must be able to stop a daemon of ANY protocol
+                // version, so it cannot depend on a successful handshake.
+                // Revisit when the auth token becomes enforced.
                 if self.clients.get(&id).is_none_or(|c| c.device.is_none())
                     && !matches!(msg, ClientMsg::Shutdown)
                 {
@@ -353,7 +385,11 @@ impl Server {
                         }
                         if fx.detach {
                             self.send_to(id, &ServerMsg::Detach);
-                            self.drop_client(id);
+                            // plain remove (no socket shutdown): the client
+                            // closes after reading Detach; an immediate
+                            // shutdown here could turn an in-flight ping into
+                            // EPIPE on the client side.
+                            self.clients.remove(&id);
                         }
                     }
                     ClientMsg::Ping { seq, last_rtt_ms } => {
@@ -397,15 +433,7 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
         match rx.recv_timeout(TICK) {
             Ok(ev) => {
                 server.handle_event(ev);
-                while server.running {
-                    match rx.recv_timeout(COALESCE) {
-                        Ok(ev) => server.handle_event(ev),
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => {
-                            server.running = false;
-                        }
-                    }
-                }
+                drain_burst(&rx, &mut server);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -418,7 +446,7 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
         }
         let has_audience = server.clients.values().any(|c| c.device.is_some());
         if has_audience && let Some(snap) = server.daemon.snapshot_if_changed() {
-            server.snap_times.push_back(Instant::now());
+            server.note_snapshot();
             server.broadcast(&ServerMsg::Snapshot(Box::new(snap)));
         }
     }
@@ -427,6 +455,26 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
     server.daemon.app_mut().stop_all_sessions();
     let _ = std::fs::remove_file(sock);
     Ok(())
+}
+
+/// Drains a burst of events until it goes quiet (COALESCE) or the cap is hit.
+/// The cap keeps a continuous stream (key auto-repeat, chatty client) from
+/// starving `tick()` and the broadcasts indefinitely.
+fn drain_burst(rx: &std::sync::mpsc::Receiver<Event>, server: &mut Server) {
+    let deadline = Instant::now() + COALESCE_CAP;
+    while server.running {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(COALESCE.min(deadline - now)) {
+            Ok(ev) => server.handle_event(ev),
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                server.running = false;
+            }
+        }
+    }
 }
 
 /// Thread that accepts connections and, per client, a `ClientMsg` reader thread.

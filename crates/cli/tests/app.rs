@@ -158,17 +158,6 @@ fn navigation_respects_bounds() {
 }
 
 #[test]
-fn statusline_shows_tab_and_focus_hint() {
-    let dir = TmpDir::new("status");
-    let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    let s = app.statusline();
-    assert!(s.contains("[Board]"));
-    // in the Board, the statusline carries the focus navigation hint.
-    assert!(s.contains("focus"));
-    assert!(s.contains("zoom"));
-}
-
-#[test]
 fn defer_creates_new_backlog_and_refreshes() {
     let dir = TmpDir::new("defer");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);

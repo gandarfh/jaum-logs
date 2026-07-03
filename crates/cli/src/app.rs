@@ -56,12 +56,6 @@ impl Tab {
     pub fn all() -> [Tab; 2] {
         [Tab::Board, Tab::Docs]
     }
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Board => "Board",
-            Tab::Docs => "Docs",
-        }
-    }
     pub fn index(self) -> usize {
         Tab::all().iter().position(|t| *t == self).unwrap()
     }
@@ -1015,35 +1009,6 @@ impl App {
             .read_doc::<ReviewReport>(&path)
             .ok()
             .map(|(r, _)| r)
-    }
-
-    /// Status line: tab/focus, selected task/branch and navigation hint.
-    pub fn statusline(&self) -> String {
-        let mut s = format!("[{}]", self.tab.title());
-        // in-flight review first, so the narrow footer never truncates it away.
-        if let Some(id) = self.reviewing_task_id() {
-            s.push_str(&format!(" ⟳ review {id}"));
-        }
-        if self.project_selected {
-            s.push_str(" · project");
-        } else if let Some(t) = self.selected_task() {
-            s.push_str(&format!(" {}", t.id));
-            if let Some(pr) = t.prs.first() {
-                s.push_str(&format!(" {}", pr.branch));
-            }
-        }
-        if let Some((a, b, repo)) = self.overlaps.first() {
-            s.push_str(&format!(" · ⚠ overlap {repo} ({a}↔{b})"));
-        }
-        // navigation hint depending on the focused panel (Board only).
-        if self.tab == Tab::Board {
-            s.push_str(match self.board_focus {
-                BoardFocus::Tasks => "   h/l focus · l items · z zoom",
-                BoardFocus::Cards => "   Enter chat · h back · z zoom",
-                BoardFocus::Chat => "   Ctrl+G cmd · Ctrl+G z zoom",
-            });
-        }
-        s
     }
 
     // --- project setup ----------------------------------------------------
@@ -2083,6 +2048,7 @@ impl App {
         let Some(idx) = self.current_session_idx() else {
             return;
         };
+        let was_live = self.sessions[idx].is_live();
         if let Some(s) = &mut self.sessions[idx].session {
             let _ = s.kill();
         }
@@ -2091,10 +2057,13 @@ impl App {
         let worktrees = self.sessions[idx].worktrees.clone();
         self.cleanup_worktrees(&task, &worktrees);
         self.sessions[idx].finished = true;
-        self.session_events.push(SessionEvent {
-            session_id: self.sessions[idx].claude_session_id.clone(),
-            kind: SessionEventKind::Finished,
-        });
+        // history entries were already reported as finished; no duplicate event.
+        if was_live {
+            self.session_events.push(SessionEvent {
+                session_id: self.sessions[idx].claude_session_id.clone(),
+                kind: SessionEventKind::Finished,
+            });
+        }
         self.status_msg = format!("session finished: {}", self.sessions[idx].name());
         self.persist_sessions();
     }
@@ -2105,13 +2074,17 @@ impl App {
             return;
         };
         let mut e = self.sessions.remove(idx);
+        let was_live = e.is_live();
         if let Some(s) = &mut e.session {
             let _ = s.kill();
         }
-        self.session_events.push(SessionEvent {
-            session_id: e.claude_session_id.clone(),
-            kind: SessionEventKind::Finished,
-        });
+        // history entries were already reported as finished; no duplicate event.
+        if was_live {
+            self.session_events.push(SessionEvent {
+                session_id: e.claude_session_id.clone(),
+                kind: SessionEventKind::Finished,
+            });
+        }
         self.cleanup_worktrees(&e.task, &e.worktrees);
         // the cards cursor recomputes; if we were in chat, fall back to cards.
         self.card_selected = self.card_selected.saturating_sub(1);

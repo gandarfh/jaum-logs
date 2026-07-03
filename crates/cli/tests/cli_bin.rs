@@ -412,7 +412,6 @@ fn sample_snapshot() -> protocol::DomainSnapshot {
         job: None,
         job_overlay: false,
         toast: None,
-        statusline: "[Board] TASK-001".into(),
     }
 }
 

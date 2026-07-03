@@ -175,11 +175,82 @@ pub enum SessionEventKind {
         kind: SessionKind,
         task: Option<String>,
     },
-    /// Raw PTY bytes (may split escape sequences at any point).
+    /// Raw PTY bytes (may split escape sequences at any point). Base64 on the
+    /// wire: a JSON number array would inflate PTY streams roughly 4x.
     Output {
+        #[serde(with = "b64")]
         bytes: Vec<u8>,
     },
     Finished,
+}
+
+/// Standard base64 (RFC 4648, with padding) for byte payloads. Implemented
+/// here so the protocol stays dependency-free for non-Rust mirrors.
+mod b64 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub(super) fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            let sextets = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+            for (i, s) in sextets.into_iter().enumerate() {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[s as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn decode(s: &str) -> Result<Vec<u8>, String> {
+        if !s.len().is_multiple_of(4) {
+            return Err("base64 length must be a multiple of 4".into());
+        }
+        let value = |c: u8| -> Result<u32, String> {
+            match c {
+                b'A'..=b'Z' => Ok(u32::from(c - b'A')),
+                b'a'..=b'z' => Ok(u32::from(c - b'a') + 26),
+                b'0'..=b'9' => Ok(u32::from(c - b'0') + 52),
+                b'+' => Ok(62),
+                b'/' => Ok(63),
+                _ => Err(format!("invalid base64 character {:?}", c as char)),
+            }
+        };
+        let mut out = Vec::with_capacity(s.len() / 4 * 3);
+        for chunk in s.as_bytes().chunks(4) {
+            let pad = chunk.iter().rev().take_while(|c| **c == b'=').count();
+            if pad > 2 || chunk[..4 - pad].contains(&b'=') {
+                return Err("misplaced base64 padding".into());
+            }
+            let mut n = 0u32;
+            for c in &chunk[..4 - pad] {
+                n = (n << 6) | value(*c)?;
+            }
+            n <<= 6 * pad as u32;
+            let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+            out.extend_from_slice(&bytes[..3 - pad]);
+        }
+        Ok(out)
+    }
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(de)?;
+        decode(&s).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,8 +284,6 @@ pub struct DomainSnapshot {
     pub job_overlay: bool,
     /// Active toast text, already time-filtered by the daemon.
     pub toast: Option<String>,
-    /// Footer status line.
-    pub statusline: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,14 +456,34 @@ pub struct CheckView {
 pub struct ReviewView {
     pub clean: bool,
     pub blocking: usize,
-    /// Findings already rendered as display lines.
-    pub findings: Vec<String>,
+    pub findings: Vec<FindingView>,
     pub constraints: Vec<CheckView>,
     pub criteria: Vec<CheckView>,
     /// Head SHAs the verdict was taken against (idempotence tag).
     pub reviewed_shas: Vec<String>,
     /// When the capture ran, Unix seconds.
     pub reviewed_at: Option<u64>,
+}
+
+/// A single review finding as structured data; each client renders it in its
+/// own idiom (the wire never carries display strings).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingView {
+    pub severity: SeverityId,
+    pub file: String,
+    pub line: Option<u32>,
+    pub message: String,
+    /// Violated RFC/ADR, if applicable.
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeverityId {
+    Blocker,
+    Major,
+    Minor,
+    Nit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,8 +649,39 @@ pub(crate) mod tests {
         assert_eq!(got, ServerMsg::Snapshot(Box::new(snap)));
     }
 
-    /// A snapshot exercising every view type (also mirrored in the golden
-    /// fixtures, which pin the exact JSON).
+    #[test]
+    fn base64_roundtrip_and_rejects_garbage() {
+        // every padding shape roundtrips
+        for bytes in [
+            Vec::new(),
+            vec![0x1b],
+            vec![0x1b, b'['],
+            vec![0x1b, b'[', b'A'],
+            (0u8..=255).collect::<Vec<u8>>(),
+        ] {
+            let enc = b64::encode(&bytes);
+            assert_eq!(b64::decode(&enc).unwrap(), bytes, "payload {bytes:?}");
+        }
+        // known vector (RFC 4648)
+        assert_eq!(b64::encode(b"foob"), "Zm9vYg==");
+        assert_eq!(b64::decode("Zm9vYmFy").unwrap(), b"foobar");
+        // malformed inputs
+        assert!(b64::decode("abc").is_err(), "length not multiple of 4");
+        assert!(b64::decode("ab!=").is_err(), "invalid character");
+        assert!(b64::decode("a===").is_err(), "too much padding");
+        assert!(b64::decode("a=bc").is_err(), "padding in the middle");
+
+        // the serde hook uses it: Output pins a string, not a number array
+        let json = serde_json::to_value(SessionEventKind::Output {
+            bytes: vec![0x1b, b'[', b'A'],
+        })
+        .unwrap();
+        assert_eq!(json["Output"]["bytes"], serde_json::json!("G1tB"));
+    }
+
+    /// A snapshot exercising every view type. The golden fixtures pin the
+    /// exact JSON with their own (richer) sample; this one backs the in-crate
+    /// roundtrip and client/keymap tests.
     pub(crate) fn sample_snapshot() -> DomainSnapshot {
         DomainSnapshot {
             project: "proj".into(),
@@ -619,7 +739,13 @@ pub(crate) mod tests {
                 review: Some(ReviewView {
                     clean: false,
                     blocking: 1,
-                    findings: vec!["[MAJOR] src/a.rs:10 - broken".into()],
+                    findings: vec![FindingView {
+                        severity: SeverityId::Major,
+                        file: "src/a.rs".into(),
+                        line: Some(10),
+                        message: "broken".into(),
+                        reference: None,
+                    }],
                     constraints: vec![CheckView {
                         text: "no legacy".into(),
                         verdict: CheckVerdict::Ok,
@@ -659,7 +785,6 @@ pub(crate) mod tests {
             }),
             job_overlay: true,
             toast: Some("play started on TASK-001".into()),
-            statusline: "[Board] TASK-001 feat/thing".into(),
         }
     }
 }

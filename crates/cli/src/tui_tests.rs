@@ -831,6 +831,52 @@ fn tiny_terminals_render_without_panicking() {
 }
 
 #[test]
+fn statusline_reflects_selection_focus_tab_and_overlap() {
+    let dir = TmpDir::new("statusline");
+    let mut a = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
+    let text = |a: &App| tui::statusline_text(&crate::snapshot::build_snapshot(a));
+
+    let s = text(&a);
+    assert!(s.contains("[Board]"));
+    assert!(s.contains("TASK-001"));
+    assert!(s.contains("feat/TASK-001"));
+    assert!(s.contains("focus"), "tasks focus hint");
+    assert!(s.contains("overlap"), "two wip tasks on the same repo");
+
+    a.board_focus = BoardFocus::Cards;
+    assert!(text(&a).contains("Enter chat"));
+    a.board_focus = BoardFocus::Chat;
+    assert!(text(&a).contains("Ctrl+G"));
+
+    a.project_selected = true;
+    assert!(text(&a).contains("· project"));
+
+    a.tab = Tab::Docs;
+    let s = text(&a);
+    assert!(s.contains("[Docs]"));
+    assert!(!s.contains("focus"), "no board hints on the docs tab");
+}
+
+#[test]
+fn statusline_shows_running_review() {
+    let dir = TmpDir::new("statusline-review");
+    let mut a = app_with(&dir, &[("TASK-001", "review")]);
+    let text = |a: &App| tui::statusline_text(&crate::snapshot::build_snapshot(a));
+    assert!(!text(&a).contains("⟳ review"));
+
+    // a running review capture surfaces as the ⟳ prefix (via review_progress)
+    let (mut rjob, _tx) = fake_job(&[], false, true, 0);
+    rjob.kind = app::JobKind::Review;
+    rjob.task = Some("TASK-001".into());
+    a.job = Some(rjob);
+    assert!(
+        text(&a).contains("⟳ review TASK-001"),
+        "{}",
+        text(&a)
+    );
+}
+
+#[test]
 fn header_highlights_docs_tab() {
     let dir = TmpDir::new("header");
     let mut a = app_with(&dir, &[]);
