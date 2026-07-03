@@ -146,14 +146,54 @@ export function decodeLine(line: string, secret?: string): Command {
     }
     body = JSON.parse(payload);
   }
-  const cmd = body as Command;
-  switch (cmd.type) {
-    case "chat":
-    case "permission_response":
-    case "abort":
+  return validateCommand(body);
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === "string";
+}
+
+// Structural validation so a malformed command fails here, with a clear
+// message, instead of deep inside a handler.
+function validateCommand(body: unknown): Command {
+  const cmd = body as Record<string, unknown>;
+  switch (cmd["type"]) {
+    case "chat": {
+      if (!isString(cmd["request_id"]) || !isString(cmd["session_id"])) {
+        throw new Error("chat: request_id and session_id must be strings");
+      }
+      if (!Array.isArray(cmd["content"])) {
+        throw new Error("chat: content must be an array");
+      }
+      for (const field of ["allowed_tools", "disallowed_tools", "guard_patterns"]) {
+        if (!Array.isArray(cmd[field])) {
+          throw new Error(`chat: ${field} must be an array`);
+        }
+      }
+      return cmd as unknown as ChatCommand;
+    }
+    case "permission_response": {
+      const decision = cmd["decision"] as Record<string, unknown> | null;
+      if (!isString(cmd["permission_id"])) {
+        throw new Error("permission_response: permission_id must be a string");
+      }
+      if (
+        decision == null ||
+        (decision["behavior"] !== "allow" && decision["behavior"] !== "deny")
+      ) {
+        throw new Error("permission_response: decision.behavior must be allow or deny");
+      }
+      return cmd as unknown as PermissionResponseCommand;
+    }
+    case "abort": {
+      if (!isString(cmd["request_id"])) {
+        throw new Error("abort: request_id must be a string");
+      }
+      return cmd as unknown as AbortCommand;
+    }
     case "ping":
-      return cmd;
+      return { type: "ping" };
     default:
-      throw new Error(`unknown command type: ${String((cmd as { type?: unknown }).type)}`);
+      throw new Error(`unknown command type: ${String(cmd["type"])}`);
   }
 }

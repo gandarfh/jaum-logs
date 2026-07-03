@@ -394,27 +394,32 @@ impl SessionEntry {
         let text = match event {
             ChatEvent::TextDelta { text } => text.replace('\n', "\r\n"),
             ChatEvent::ToolUse { name, input, .. } => {
-                let mut summary = input.to_string();
-                summary.truncate(120);
+                let summary = clip(&input.to_string(), 120);
                 format!("\r\n[tool {name}] {summary}\r\n")
             }
             ChatEvent::ToolResult {
                 content, is_error, ..
             } => {
-                let mut first = content
+                let first = content
                     .first()
                     .map(|b| match b {
-                        ContentBlock::Text { text } => text.clone(),
+                        ContentBlock::Text { text } => clip(text, 120),
                         ContentBlock::Image { .. } => "[image]".into(),
                     })
                     .unwrap_or_default();
-                first.truncate(120);
                 let tag = if *is_error { "result error" } else { "result" };
                 format!("[{tag}] {}\r\n", first.replace('\n', " "))
             }
             ChatEvent::Image { .. } => "[image]\r\n".into(),
             ChatEvent::PermissionRequest { tool_name, .. } => {
                 format!("[permission? {tool_name}]\r\n")
+            }
+            ChatEvent::PermissionDecision {
+                permission_id,
+                behavior,
+                ..
+            } => {
+                format!("[permission {permission_id}: {behavior}]\r\n")
             }
             ChatEvent::Done { .. } => "\r\n[turn done]\r\n".into(),
             ChatEvent::Error { category, message } => {
@@ -522,6 +527,12 @@ fn expand_tilde(p: &str) -> PathBuf {
 }
 
 const HINT: &str = "jaum";
+
+/// First `max` chars of `s`. Byte-indexed truncation panics when the cut
+/// lands inside a multibyte character (accents are common in tool inputs).
+fn clip(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
 
 /// Converts the flow's guard spec into wire guard patterns for the sidecar.
 fn guard_patterns(spec: &GuardSpec) -> Vec<GuardPattern> {
@@ -1249,19 +1260,50 @@ impl App {
             self.status_msg = format!("play for {id} is already open");
             return;
         }
-        let result = Play::new(
-            &self.store,
-            &self.git,
-            self.repos.clone(),
-            self.conventions.clone(),
-        )
-        .launch(&id)
-        .and_then(|launch| self.open_play_session(launch));
+        // Spawn the sidecar BEFORE creating any side effect: a spawn failure
+        // must not leave worktrees or a wip status behind.
+        let prior_status = self.store.get(&id).map(|t| t.status).ok();
+        let result = self.ensure_sidecar().map(|_| ()).and_then(|()| {
+            Play::new(
+                &self.store,
+                &self.git,
+                self.repos.clone(),
+                self.conventions.clone(),
+            )
+            .launch(&id)
+        });
+        let result = result.and_then(|launch| {
+            let opened = self.open_play_session(&launch);
+            if opened.is_err() {
+                self.rollback_play_launch(&id, &launch.worktrees, prior_status);
+            }
+            opened
+        });
         match result {
             Ok(()) => self.status_msg = format!("play started on {id}"),
             Err(e) => self.status_msg = format!("play failed: {e}"),
         }
         let _ = self.refresh();
+    }
+
+    /// Undoes a launch whose session never opened: removes the worktrees and
+    /// restores the task status, so nothing stays orphaned without a session.
+    fn rollback_play_launch(
+        &self,
+        id: &str,
+        worktrees: &[(String, PathBuf)],
+        prior_status: Option<Status>,
+    ) {
+        let _ = Play::new(
+            &self.store,
+            &self.git,
+            self.repos.clone(),
+            self.conventions.clone(),
+        )
+        .cleanup(id, worktrees);
+        if let Some(status) = prior_status {
+            let _ = self.store.set_status(id, status);
+        }
     }
 
     // --- sidecar sessions (play) --------------------------------------------
@@ -1280,7 +1322,7 @@ impl App {
 
     /// Sends the launch prompt as the session's first chat turn and registers
     /// the sidecar-backed entry.
-    fn open_play_session(&mut self, launch: PlayLaunch) -> Result<()> {
+    fn open_play_session(&mut self, launch: &PlayLaunch) -> Result<()> {
         let log = SessionLog::new(&self.home(), &launch.session_id);
         let mut entry = SessionEntry::sidecar(
             SessionKind::Play,
@@ -1379,7 +1421,8 @@ impl App {
     /// the text view, updates the claude session id and routes permissions.
     pub fn drain_sidecar(&mut self) {
         let route_permissions = self.route_permissions;
-        let mut to_answer: Vec<String> = Vec::new();
+        let home = self.home();
+        let mut to_answer: Vec<(usize, String)> = Vec::new();
         let mut to_track: Vec<(String, String)> = Vec::new();
         let mut to_send: Vec<(usize, String)> = Vec::new();
         let mut to_unregister: Vec<String> = Vec::new();
@@ -1393,6 +1436,7 @@ impl App {
                 continue;
             };
             let mut turn_done = false;
+            let mut disconnected = false;
             loop {
                 match rx.try_recv() {
                     Ok(event) => {
@@ -1400,7 +1444,16 @@ impl App {
                             SidecarEvent::Session {
                                 claude_session_id, ..
                             } if *claude_session_id != e.claude_session_id => {
+                                // The SDK did not honor the requested id: the
+                                // history must follow the resumable one.
                                 e.claude_session_id = claude_session_id.clone();
+                                if let Some(chat) = e.chat.as_mut() {
+                                    let old = std::mem::replace(
+                                        &mut chat.log,
+                                        SessionLog::new(&home, claude_session_id),
+                                    );
+                                    chat.log = old.migrate(&home, claude_session_id);
+                                }
                                 changed = true;
                             }
                             SidecarEvent::PermissionRequest { permission_id, .. } => {
@@ -1408,10 +1461,12 @@ impl App {
                                     to_track
                                         .push((e.claude_session_id.clone(), permission_id.clone()));
                                 } else {
-                                    to_answer.push(permission_id.clone());
+                                    to_answer.push((idx, permission_id.clone()));
                                 }
                             }
-                            SidecarEvent::Done { .. } | SidecarEvent::Error { .. } => {
+                            // Error is informational: the sidecar still closes
+                            // the turn with a done afterwards.
+                            SidecarEvent::Done { .. } => {
                                 turn_done = true;
                             }
                             _ => {}
@@ -1430,9 +1485,22 @@ impl App {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         turn_done = true;
+                        disconnected = true;
                         break;
                     }
                 }
+            }
+            if disconnected {
+                // The sidecar died (or was restarted) mid-turn: the failure
+                // must be visible in the log and in the panel.
+                let event = SessionEvent::Error {
+                    category: "sidecar".into(),
+                    message: "sidecar disconnected before the turn finished".into(),
+                };
+                if let Some(chat) = &e.chat {
+                    let _ = chat.log.append(&event);
+                }
+                e.render_event(&event);
             }
             let chat = e.chat.as_mut().expect("drained a chat session");
             if turn_done {
@@ -1452,8 +1520,23 @@ impl App {
             for request_id in to_unregister {
                 client.unregister(&request_id);
             }
-            for permission_id in to_answer {
+        }
+        for (idx, permission_id) in to_answer {
+            if let Some(client) = &self.sidecar {
                 let _ = client.respond_permission(&permission_id, PermissionDecision::Allow);
+            }
+            // The resolution goes into the log too, otherwise a replay shows
+            // the request as eternally pending.
+            let event = SessionEvent::PermissionDecision {
+                permission_id,
+                behavior: "allow".into(),
+                message: None,
+            };
+            if let Some(e) = self.sessions.get_mut(idx) {
+                if let Some(chat) = &e.chat {
+                    let _ = chat.log.append(&event);
+                }
+                e.render_event(&event);
             }
         }
         for (session_id, permission_id) in to_track {
@@ -1518,12 +1601,10 @@ impl App {
                 .find(|e| e.claude_session_id == pending.session_id)
             {
                 e.blocked = true;
-                let event = ChatEvent::Error {
-                    category: "permission_timeout".into(),
-                    message: format!(
-                        "permission {} denied by default after the deadline",
-                        pending.permission_id
-                    ),
+                let event = ChatEvent::PermissionDecision {
+                    permission_id: pending.permission_id.clone(),
+                    behavior: "deny".into(),
+                    message: Some("no decision within the deadline; denied by default".into()),
                 };
                 if let Some(chat) = &e.chat {
                     let _ = chat.log.append(&event);

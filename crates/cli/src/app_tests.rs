@@ -2360,7 +2360,14 @@ fn play_permission_request_is_auto_allowed_while_no_client_answers() {
             .any(|e| matches!(e, ChatEvent::PermissionRequest { tool_name, .. } if tool_name == "Write")),
         "permission request not routed into the log: {events:?}"
     );
-    // the stub reflects the decision in the done stop_reason: auto-allowed
+    // the resolution is logged too, so a replay never shows it pending
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PermissionDecision { behavior, .. } if behavior == "allow"
+        )),
+        "auto-allow decision not logged: {events:?}"
+    );
     assert!(!app.sessions[0].blocked);
     assert_eq!(app.permissions.pending_count(), 0);
     app.close_selected_session();
@@ -2398,10 +2405,12 @@ fn unanswered_permission_expires_denies_and_blocks_the_session() {
     );
     let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
     assert!(
-        events.iter().any(
-            |e| matches!(e, ChatEvent::Error { category, .. } if category == "permission_timeout")
-        ),
-        "timeout not logged: {events:?}"
+        events.iter().any(|e| matches!(
+            e,
+            ChatEvent::PermissionDecision { behavior, message: Some(m), .. }
+                if behavior == "deny" && m.contains("denied by default")
+        )),
+        "timeout decision not logged: {events:?}"
     );
     // the deny reached the sidecar: the turn finished with the deny verdict
     assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
@@ -2522,6 +2531,165 @@ fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
     app.play_selected();
     assert!(app.status_msg.contains("play failed"), "{}", app.status_msg);
     assert!(app.sessions.is_empty());
+    // the spawn failed BEFORE any side effect: no worktree, status untouched
+    let wt = app.repos["org/x"]
+        .with_file_name("repo.worktrees")
+        .join("feat-no-sidecar");
+    assert!(
+        !wt.exists(),
+        "worktree must not be created on spawn failure"
+    );
+    assert_eq!(app.store.get("TASK-001").unwrap().status, Status::Backlog);
+}
+
+#[test]
+fn rollback_undoes_worktrees_and_status_of_a_failed_launch() {
+    let dir = TmpDir::new("rollback");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task(&backlog, "TASK-001", "backlog", "feat/rollback-me");
+    let cfg = GlobalConfig {
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo,
+            }],
+        )],
+    };
+    let app = App::new(cfg, 0).unwrap();
+    // launch creates the worktree and marks wip; the rollback restores both
+    let launch = Play::new(
+        &app.store,
+        &app.git,
+        app.repos.clone(),
+        app.conventions.clone(),
+    )
+    .launch("TASK-001")
+    .unwrap();
+    assert!(launch.worktrees[0].1.exists());
+    assert_eq!(app.store.get("TASK-001").unwrap().status, Status::Wip);
+
+    app.rollback_play_launch("TASK-001", &launch.worktrees, Some(Status::Backlog));
+    assert!(!launch.worktrees[0].1.exists(), "worktree not removed");
+    assert_eq!(app.store.get("TASK-001").unwrap().status, Status::Backlog);
+}
+
+#[test]
+fn disconnected_sidecar_surfaces_an_error_and_closes_the_turn() {
+    let dir = TmpDir::new("disconnect");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    let idx = open_sidecar_play(&mut app, "TASK-001", "s-disc", dir.path());
+    let (tx, rx) = channel::<SidecarEvent>();
+    {
+        let chat = app.sessions[idx].chat.as_mut().unwrap();
+        chat.rx = Some(rx);
+        chat.request_id = Some("s-disc#1".into());
+        chat.turn_seq = 1;
+    }
+    drop(tx);
+    app.drain_sidecar();
+    assert!(!app.sessions[idx].turn_active(), "turn must close");
+    let events = app.sessions[idx].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SessionEvent::Error { category, message }
+                if category == "sidecar" && message.contains("disconnected")
+        )),
+        "disconnect not logged: {events:?}"
+    );
+    let text = app.sessions[idx].parser.screen().contents();
+    assert!(text.contains("disconnected"), "not rendered: {text}");
+}
+
+#[test]
+fn diverging_claude_session_id_migrates_the_log() {
+    let dir = TmpDir::new("migrate");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    let idx = open_sidecar_play(&mut app, "TASK-001", "old-id", dir.path());
+    // history already written under the requested id
+    app.sessions[idx]
+        .chat
+        .as_ref()
+        .unwrap()
+        .log
+        .append(&SessionEvent::TextDelta {
+            text: "before the switch".into(),
+        })
+        .unwrap();
+    let (tx, rx) = channel::<SidecarEvent>();
+    {
+        let chat = app.sessions[idx].chat.as_mut().unwrap();
+        chat.rx = Some(rx);
+        chat.request_id = Some("old-id#1".into());
+        chat.turn_seq = 1;
+    }
+    tx.send(SidecarEvent::Session {
+        request_id: "old-id#1".into(),
+        claude_session_id: "new-id".into(),
+    })
+    .unwrap();
+    tx.send(SidecarEvent::Done {
+        request_id: "old-id#1".into(),
+        usage: None,
+        stop_reason: Some("end_turn".into()),
+    })
+    .unwrap();
+    app.drain_sidecar();
+
+    assert_eq!(app.sessions[idx].claude_session_id, "new-id");
+    let sessions_dir = app.home().join(".sessions");
+    assert!(
+        sessions_dir.join("new-id.jsonl").exists(),
+        "log not migrated"
+    );
+    assert!(
+        !sessions_dir.join("old-id.jsonl").exists(),
+        "old log left behind"
+    );
+    // the history and the new turn live in the migrated file
+    let events = app.sessions[idx].chat.as_ref().unwrap().log.replay();
+    assert!(events.contains(&SessionEvent::TextDelta {
+        text: "before the switch".into()
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Done { .. }))
+    );
+    // the persisted record follows the resumable id
+    assert!(
+        app.load_session_records()
+            .iter()
+            .any(|r| r.claude_session_id == "new-id")
+    );
+}
+
+#[test]
+fn render_event_clips_multibyte_text_without_panicking() {
+    let dir = TmpDir::new("clip");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    let idx = open_sidecar_play(&mut app, "TASK-001", "s-clip", dir.path());
+    // 200 two-byte chars: a byte-indexed truncate(120) would split one in half
+    let acentos = "çãé".repeat(70);
+    app.sessions[idx].render_event(&SessionEvent::ToolUse {
+        tool_use_id: "tu".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({ "command": acentos.clone() }),
+    });
+    app.sessions[idx].render_event(&SessionEvent::ToolResult {
+        tool_use_id: "tu".into(),
+        content: vec![ContentBlock::Text { text: acentos }],
+        is_error: false,
+    });
+    assert!(
+        app.sessions[idx]
+            .parser
+            .screen()
+            .contents()
+            .contains("[tool Bash]")
+    );
 }
 
 #[test]

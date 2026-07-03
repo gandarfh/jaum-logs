@@ -62,6 +62,11 @@ fn sample_events() -> Vec<SessionEvent> {
             tool_name: "Write".into(),
             tool_input: json!({"file_path": "/tmp/x"}),
         },
+        SessionEvent::PermissionDecision {
+            permission_id: "perm_1".into(),
+            behavior: "deny".into(),
+            message: Some("denied by default".into()),
+        },
         SessionEvent::Done {
             usage: Some(Usage {
                 input_tokens: 10,
@@ -95,6 +100,7 @@ fn events_serialize_with_snake_case_tags() {
             "tool_result",
             "image",
             "permission_request",
+            "permission_decision",
             "done",
             "error"
         ]
@@ -102,6 +108,17 @@ fn events_serialize_with_snake_case_tags() {
     // done without usage keeps the field explicit as null.
     let done = serde_json::to_value(SessionEvent::Done { usage: None }).unwrap();
     assert_eq!(done, json!({"type": "done", "usage": null}));
+    // an allow decision has no message and omits the field entirely.
+    let allow = serde_json::to_value(SessionEvent::PermissionDecision {
+        permission_id: "perm_1".into(),
+        behavior: "allow".into(),
+        message: None,
+    })
+    .unwrap();
+    assert_eq!(
+        allow,
+        json!({"type": "permission_decision", "permission_id": "perm_1", "behavior": "allow"})
+    );
 }
 
 #[test]

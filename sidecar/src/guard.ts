@@ -5,8 +5,17 @@
 import type { GuardPattern } from "./protocol.js";
 
 // Always blocked, independent of task constraints: merging is a manual user
-// command, never the agent's.
-const MERGE_RE = /git\s+merge|gh\s+pr\s+merge/i;
+// command, never the agent's. Flags between the binary and the subcommand
+// (git -C <path> merge, git --no-pager merge, gh --repo x pr merge) must not
+// slip through, but merge as a plain argument (git commit -m "merge notes")
+// must not trip it.
+const GIT_FLAGS = String.raw`(?:\s+-{1,2}[^-\s]\S*(?:\s+[^-\s]\S*)?)*`;
+const MERGE_RE = new RegExp(
+  String.raw`\bgit${GIT_FLAGS}\s+merge\b` +
+    "|" +
+    String.raw`\bgh${GIT_FLAGS}\s+pr${GIT_FLAGS}\s+merge\b`,
+  "i",
+);
 
 // Input fields that carry the target a pattern is matched against (command
 // for Bash, paths for file tools), mirroring the old hook's extraction.

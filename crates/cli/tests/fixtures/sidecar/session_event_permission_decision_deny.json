@@ -1,0 +1,6 @@
+{
+  "behavior": "deny",
+  "message": "no decision within the deadline; denied by default",
+  "permission_id": "perm_2",
+  "type": "permission_decision"
+}

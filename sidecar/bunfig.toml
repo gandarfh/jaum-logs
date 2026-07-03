@@ -1,0 +1,5 @@
+[test]
+coverage = true
+coverageSkipTestFiles = true
+# Same bar as the Rust workspace gate: 95% of lines.
+coverageThreshold = { lines = 0.95 }

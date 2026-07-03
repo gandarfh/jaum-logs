@@ -270,6 +270,7 @@ describe("options mapping", () => {
     const o = h.captured.params!.options;
     expect(o["cwd"]).toBe("/tmp/wt");
     expect(o["model"]).toBe("claude-fable-5");
+    expect(o["settings"]).toEqual({ includeCoAuthoredBy: false });
     expect(o["allowedTools"]).toEqual(["Read"]);
     expect(o["disallowedTools"]).toEqual(["Bash(git merge)"]);
     expect(o["permissionMode"]).toBe("default");
@@ -280,6 +281,25 @@ describe("options mapping", () => {
       preset: "claude_code",
       append: "constraints here",
     });
+  });
+
+  test("the allowlist never bypasses the guards", async () => {
+    // Bash entries are always dropped (the merge guard reads Bash commands)
+    const bash = harness([RESULT]);
+    await bash.sidecar.handleChat(
+      chatCommand({ allowed_tools: ["Read", "Bash", "Bash(git status:*)"] }),
+    );
+    expect(bash.captured.params!.options["allowedTools"]).toEqual(["Read"]);
+
+    // guard patterns match file paths too: they disable the allowlist
+    const guarded = harness([RESULT]);
+    await guarded.sidecar.handleChat(
+      chatCommand({
+        allowed_tools: ["Read", "Edit"],
+        guard_patterns: [{ pattern: "src/legacy/", reason: "no legacy" }],
+      }),
+    );
+    expect(guarded.captured.params!.options["allowedTools"]).toBeUndefined();
   });
 
   test("empty lists and null fields are omitted", async () => {

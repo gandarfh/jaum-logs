@@ -8,6 +8,11 @@ describe("merge guard", () => {
     "gh pr merge 42",
     "GIT MERGE main",
     "cd repo && git merge other",
+    "git -C /some/path merge feature",
+    "git --no-pager merge main",
+    "git --work-tree /x -c user.name=x merge main",
+    "gh --repo owner/name pr merge 42",
+    "gh pr --repo owner/name merge 42",
   ])("blocks %p", (command) => {
     const v = checkGuards("Bash", { command }, []);
     expect(v.blocked).toBe(true);
@@ -20,6 +25,15 @@ describe("merge guard", () => {
     expect(checkGuards("Bash", { command: "git status" }, []).blocked).toBe(
       false,
     );
+    // merge as a plain argument is not the merge subcommand
+    expect(
+      checkGuards("Bash", { command: 'git commit -m "merge notes"' }, [])
+        .blocked,
+    ).toBe(false);
+    expect(
+      checkGuards("Bash", { command: "git branch -d merge-helper" }, [])
+        .blocked,
+    ).toBe(false);
     // The merge regex only applies to Bash commands, not file paths.
     expect(
       checkGuards("Read", { file_path: "/repo/git merge.txt" }, []).blocked,

@@ -48,7 +48,9 @@ rl.on('line', (line) => {
   if (text.includes('garbage-first')) process.stdout.write('this is not json\n');
   send({ type: 'session', request_id: rid, claude_session_id: cmd.resume ?? cmd.session_id });
   if (text.includes('env-check')) {
-    send({ type: 'error', request_id: rid, category: 'internal', message: process.env.ANTHROPIC_API_KEY ?? 'unset' });
+    const vars = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'SIDECAR_HMAC_SECRET'];
+    const message = vars.map((v) => process.env[v] ?? 'unset').join('|');
+    send({ type: 'error', request_id: rid, category: 'internal', message });
     send({ type: 'done', request_id: rid, usage: null, stop_reason: 'end_turn' });
     return;
   }
@@ -532,15 +534,18 @@ fn malformed_sidecar_output_is_skipped() {
 }
 
 #[test]
-fn anthropic_key_variables_never_reach_the_sidecar() {
+fn key_and_hmac_variables_never_reach_the_sidecar() {
     let client = spawn_stub();
     let rx = client.chat(turn("req-e", "env-check")).unwrap();
     let events = collect_until_done(&rx);
-    assert!(events.contains(&SidecarEvent::Error {
-        request_id: "req-e".into(),
-        category: "internal".into(),
-        message: "unset".into(),
-    }));
+    assert!(
+        events.contains(&SidecarEvent::Error {
+            request_id: "req-e".into(),
+            category: "internal".into(),
+            message: "unset|unset|unset".into(),
+        }),
+        "scrubbed env vars leaked into the sidecar: {events:?}"
+    );
 }
 
 #[test]

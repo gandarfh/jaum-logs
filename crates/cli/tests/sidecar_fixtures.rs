@@ -271,6 +271,22 @@ fn session_events() {
         },
     );
     check_golden(
+        "session_event_permission_decision_allow",
+        &SessionEvent::PermissionDecision {
+            permission_id: "perm_1".into(),
+            behavior: "allow".into(),
+            message: None,
+        },
+    );
+    check_golden(
+        "session_event_permission_decision_deny",
+        &SessionEvent::PermissionDecision {
+            permission_id: "perm_2".into(),
+            behavior: "deny".into(),
+            message: Some("no decision within the deadline; denied by default".into()),
+        },
+    );
+    check_golden(
         "session_event_done",
         &SessionEvent::Done {
             usage: Some(usage()),

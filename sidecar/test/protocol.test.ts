@@ -46,6 +46,41 @@ describe("decodeLine", () => {
     expect(() => decodeLine("   ")).toThrow("empty line");
     expect(() => decodeLine("{oops")).toThrow();
   });
+
+  test("rejects structurally invalid commands with clear messages", () => {
+    expect(() => decodeLine('{"type":"chat","request_id":"r"}')).toThrow(
+      "request_id and session_id must be strings",
+    );
+    expect(() =>
+      decodeLine('{"type":"chat","request_id":"r","session_id":"s"}'),
+    ).toThrow("content must be an array");
+    expect(() =>
+      decodeLine(
+        '{"type":"chat","request_id":"r","session_id":"s","content":[]}',
+      ),
+    ).toThrow("allowed_tools must be an array");
+    expect(() =>
+      decodeLine(
+        '{"type":"chat","request_id":"r","session_id":"s","content":[],"allowed_tools":[],"disallowed_tools":[]}',
+      ),
+    ).toThrow("guard_patterns must be an array");
+    expect(() => decodeLine('{"type":"abort"}')).toThrow(
+      "request_id must be a string",
+    );
+    expect(() =>
+      decodeLine('{"type":"permission_response","permission_id":"p"}'),
+    ).toThrow("behavior must be allow or deny");
+    expect(() =>
+      decodeLine(
+        '{"type":"permission_response","permission_id":"p","decision":{"behavior":"maybe"}}',
+      ),
+    ).toThrow("behavior must be allow or deny");
+    expect(() =>
+      decodeLine(
+        '{"type":"permission_response","decision":{"behavior":"allow"}}',
+      ),
+    ).toThrow("permission_id must be a string");
+  });
 });
 
 describe("hmac envelope", () => {

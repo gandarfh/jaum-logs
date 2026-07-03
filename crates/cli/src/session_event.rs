@@ -60,6 +60,14 @@ pub enum SessionEvent {
         tool_name: String,
         tool_input: serde_json::Value,
     },
+    /// Resolution of a routed permission request (allow or deny), so a
+    /// replayed log never shows a request as eternally pending.
+    PermissionDecision {
+        permission_id: String,
+        behavior: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     Done {
         usage: Option<Usage>,
     },
@@ -78,6 +86,9 @@ pub const REPLAY_MAX_EVENTS: usize = 2000;
 pub struct SessionLog {
     dir: PathBuf,
     path: PathBuf,
+    /// `.sessions/` was already created by this handle (one syscall per
+    /// event otherwise; long turns append thousands of lines).
+    dir_ready: std::sync::atomic::AtomicBool,
 }
 
 impl SessionLog {
@@ -85,13 +96,21 @@ impl SessionLog {
     pub fn new(home: &Path, session_id: &str) -> Self {
         let dir = home.join(".sessions");
         let path = dir.join(format!("{session_id}.jsonl"));
-        Self { dir, path }
+        Self {
+            dir,
+            path,
+            dir_ready: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Appends one event as a line, creating `.sessions/` on first write.
     pub fn append(&self, event: &SessionEvent) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .with_context(|| format!("creating {}", self.dir.display()))?;
+        use std::sync::atomic::Ordering;
+        if !self.dir_ready.load(Ordering::Relaxed) {
+            fs::create_dir_all(&self.dir)
+                .with_context(|| format!("creating {}", self.dir.display()))?;
+            self.dir_ready.store(true, Ordering::Relaxed);
+        }
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -101,6 +120,19 @@ impl SessionLog {
         line.push('\n');
         file.write_all(line.as_bytes())
             .with_context(|| format!("appending to {}", self.path.display()))
+    }
+
+    /// Moves the log to a new session id and returns the handle for it.
+    /// Used when the SDK reports a claude session id different from the one
+    /// requested: the history must follow the resumable identifier or the
+    /// next restart replays nothing.
+    pub fn migrate(self, home: &Path, new_id: &str) -> SessionLog {
+        let new = SessionLog::new(home, new_id);
+        if self.path.exists() {
+            let _ = fs::create_dir_all(&new.dir);
+            let _ = fs::rename(&self.path, &new.path);
+        }
+        new
     }
 
     /// Replays the tail of the log within the default attach budget.

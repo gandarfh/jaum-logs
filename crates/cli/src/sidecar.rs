@@ -258,6 +258,9 @@ impl SidecarClient {
             .arg(bundle)
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
+            // This client speaks plain JSONL; an inherited HMAC secret would
+            // make the sidecar reject every command as unsigned.
+            .env_remove("SIDECAR_HMAC_SECRET")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

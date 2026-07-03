@@ -109,6 +109,9 @@ export function createSidecar(deps: SidecarDeps) {
     const options: Record<string, unknown> = {
       permissionMode: "default",
       includePartialMessages: true,
+      // Hard guarantee kept from the old settings.json: no AI attribution
+      // trailer on commits, independent of the system prompt.
+      settings: { includeCoAuthoredBy: false },
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
@@ -162,8 +165,16 @@ export function createSidecar(deps: SidecarDeps) {
     if (cmd.model) {
       options["model"] = cmd.model;
     }
-    if (cmd.allowed_tools.length > 0) {
-      options["allowedTools"] = cmd.allowed_tools;
+    // Pre-approved tools bypass canUseTool in the SDK, so an allowlist can
+    // never punch through the guards: Bash entries are always dropped (the
+    // merge guard reads Bash commands), and any guard pattern (they match
+    // file paths too) disables the allowlist entirely for the turn.
+    const allowedTools =
+      cmd.guard_patterns.length > 0
+        ? []
+        : cmd.allowed_tools.filter((t) => !/^Bash\b/.test(t));
+    if (allowedTools.length > 0) {
+      options["allowedTools"] = allowedTools;
     }
     if (cmd.disallowed_tools.length > 0) {
       options["disallowedTools"] = cmd.disallowed_tools;
