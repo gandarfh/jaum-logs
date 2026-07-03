@@ -1,1 +1,5 @@
 /target
+.build/
+.swiftpm/
+xcuserdata/
+*.xcresult
