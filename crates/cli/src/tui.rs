@@ -941,6 +941,27 @@ fn overlay_panel(title: &str) -> Block<'static> {
 }
 
 /// Content lines of a task (metadata + markdown body). Reused by the Board
+/// Short (7-char) commit hash, git-style.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// Short hash(es) the task's review was taken against, from the persisted
+/// `reviewed_sha` per PR link. `None` when nothing was reviewed yet; distinct
+/// shas (multi-PR tasks) are joined so the tag says which commits it covers.
+fn reviewed_tag(t: &jaum_core::Task) -> Option<String> {
+    let mut shas: Vec<String> = Vec::new();
+    for link in &t.prs {
+        if let Some(sha) = &link.reviewed_sha {
+            let s = short_sha(sha);
+            if !shas.contains(&s) {
+                shas.push(s);
+            }
+        }
+    }
+    (!shas.is_empty()).then(|| shas.join(", "))
+}
+
 /// preview and the detail overlay.
 fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -1301,7 +1322,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         if let Some(r) = app.load_review(&t.id) {
-            let (txt, c) = if r.is_clean() {
+            let (mut txt, c) = if r.is_clean() {
                 ("review CLEAN".to_string(), Color::Green)
             } else {
                 (
@@ -1309,6 +1330,10 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
                     Color::Red,
                 )
             };
+            // tag the commit the verdict was taken against (short reviewed SHA).
+            if let Some(tag) = reviewed_tag(t) {
+                txt.push_str(&format!(" · @{tag}"));
+            }
             detail(
                 &mut items,
                 Line::from(Span::styled(txt, Style::default().fg(c))),
@@ -1565,6 +1590,16 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
         ),
         Style::default().fg(SUBTLE),
     )));
+    // which commit this verdict was taken against.
+    if let Some(tag) = id
+        .and_then(|i| app.tasks.iter().find(|t| t.id == i))
+        .and_then(reviewed_tag)
+    {
+        lines.push(Line::from(Span::styled(
+            format!("reviewed @{tag}"),
+            Style::default().fg(SUBTLE),
+        )));
+    }
     if !clean {
         lines.push(Line::from(Span::styled(
             "`H` sends the open items to the play session to fix",

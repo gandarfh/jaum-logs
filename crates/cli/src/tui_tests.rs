@@ -292,6 +292,40 @@ fn board_shows_pending_re_review_glyphs_from_ci() {
 }
 
 #[test]
+fn board_tags_the_reviewed_commit() {
+    let dir = TmpDir::new("reviewed-tag");
+    // a task whose PR link records the reviewed commit
+    write_task(
+        &dir,
+        "TASK-001",
+        "---\nid: TASK-001\ntype: impl\nstatus: review\nprs:\n  - repo: org/x\n    pr: 7\n    branch: feat/x\n    reviewed_sha: c93e38d24f6bb1a703026358d83f2184da7c416d\n---\n\n## Objective\nx\n",
+    );
+    let mut a = app_with(&dir, &[]);
+    a.refresh().unwrap();
+    write_review(&dir, "TASK-001", &clean_review_md("TASK-001"));
+    a.selected = 0;
+
+    // middle-column detail carries the short reviewed hash next to the verdict
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(
+        s.contains("review CLEAN · @c93e38d"),
+        "reviewed tag in detail"
+    );
+
+    // the verdict panel repeats it as "reviewed @<sha>"
+    a.card_selected = a
+        .task_cards()
+        .iter()
+        .position(|c| *c == BoardCard::Verdict)
+        .unwrap();
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(
+        s.contains("reviewed @c93e38d"),
+        "reviewed tag in verdict panel"
+    );
+}
+
+#[test]
 fn board_project_row_shows_setup_state() {
     let dir = TmpDir::new("projrow");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
