@@ -19,6 +19,14 @@ public enum WireFraming {
 /// Incremental decoder: feed raw socket bytes, pop complete messages.
 /// Handles payloads split across reads and multiple messages per read.
 public struct WireFrameDecoder: Sendable {
+    public enum FramingError: Error {
+        case oversizedFrame(length: UInt32)
+    }
+
+    /// Well above any real frame (a full 200x60 screen is under 2 MiB); a
+    /// corrupted length prefix fails fast instead of buffering forever.
+    public static let maxFrameLength: UInt32 = 16 * 1024 * 1024
+
     private var buffer = Data()
 
     public init() {}
@@ -26,19 +34,22 @@ public struct WireFrameDecoder: Sendable {
     public mutating func feed<T: Decodable>(_ chunk: Data, as type: T.Type) throws -> [T] {
         buffer.append(chunk)
         var messages: [T] = []
-        while let payload = popPayload() {
+        while let payload = try popPayload() {
             messages.append(try JSONDecoder().decode(type, from: payload))
         }
         return messages
     }
 
-    private mutating func popPayload() -> Data? {
+    private mutating func popPayload() throws -> Data? {
         guard buffer.count >= 4 else { return nil }
         let length =
             (UInt32(buffer[buffer.startIndex]) << 24)
             | (UInt32(buffer[buffer.startIndex + 1]) << 16)
             | (UInt32(buffer[buffer.startIndex + 2]) << 8)
             | UInt32(buffer[buffer.startIndex + 3])
+        guard length <= Self.maxFrameLength else {
+            throw FramingError.oversizedFrame(length: length)
+        }
         let total = 4 + Int(length)
         guard buffer.count >= total else { return nil }
         let payload = buffer.subdata(

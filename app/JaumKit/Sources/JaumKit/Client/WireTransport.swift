@@ -46,6 +46,10 @@ public final class UnixSocketTransport: WireTransport, Sendable {
                 switch state {
                 case .ready:
                     if resumed.tryResume() { cont.resume() }
+                // .waiting is treated as terminal on purpose: for a local
+                // unix socket it means the daemon is not listening (refused
+                // or missing), and failing fast beats hanging the pill in
+                // "connecting" while NW retries. Reconnection is one click.
                 case .failed(let error), .waiting(let error):
                     connection.cancel()
                     if resumed.tryResume() { cont.resume(throwing: error) }

@@ -66,11 +66,11 @@ struct TaskViewsTests {
     @Test func sessionTabButtonActionSwitchesTheTab() async {
         let session = await startedSession()
         session.selectedTaskID = "jaum-42"
-        var tapped = false
+        #expect(session.selectedTab == .detail)
         let button = SessionTabButton(title: "Play", isLive: false, isSelected: false) {
-            tapped = true
+            session.selectedTab = .session("jaum-42-play")
         }
         button.action()
-        #expect(tapped)
+        #expect(session.selectedTab == .session("jaum-42-play"))
     }
 }

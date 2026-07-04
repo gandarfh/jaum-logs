@@ -47,6 +47,19 @@ struct FramingTests {
         #expect(rest == [.frameDiff([WireCell(x: 0, y: 0, sym: "a")])])
     }
 
+    @Test func decoderRejectsOversizedFramesInsteadOfBuffering() {
+        var prefix = Data()
+        let huge = WireFrameDecoder.maxFrameLength + 1
+        prefix.append(UInt8((huge >> 24) & 0xFF))
+        prefix.append(UInt8((huge >> 16) & 0xFF))
+        prefix.append(UInt8((huge >> 8) & 0xFF))
+        prefix.append(UInt8(huge & 0xFF))
+        var decoder = WireFrameDecoder()
+        #expect(throws: WireFrameDecoder.FramingError.self) {
+            try decoder.feed(prefix, as: ServerMessage.self)
+        }
+    }
+
     @Test func decoderThrowsOnMalformedPayload() throws {
         var framed = Data([0, 0, 0, 4])
         framed.append(Data("nope".utf8))

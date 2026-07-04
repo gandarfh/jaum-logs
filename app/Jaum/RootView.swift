@@ -25,6 +25,9 @@ enum AppMode: String, CaseIterable, Identifiable {
 struct RootView: View {
     @Bindable var session: SessionModel
     @Bindable var terminal: TerminalModel
+    /// True while the session data comes from the scripted preview backend,
+    /// so the UI labels it instead of passing fabricated data off as real.
+    var showsPreviewBadge = false
     @State private var mode: AppMode = .tasks
     @State private var permissionPrompt: PermissionRequest?
     @State private var permissionDecided = false
@@ -49,15 +52,25 @@ struct RootView: View {
                 .pickerStyle(.segmented)
                 .labelStyle(.titleAndIcon)
             }
+            if showsPreviewBadge {
+                ToolbarItem(placement: .status) {
+                    Chip(text: "dados de demonstração", systemImage: "sparkles")
+                        .help(
+                            "Tasks, chat e permissões são roteirizados; o protocolo de domínio do daemon ainda não existe"
+                        )
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     reconnectIfNeeded()
                 } label: {
+                    // Latency stays hidden until the daemon protocol carries
+                    // real Ping/Pong telemetry; the scripted samples must not
+                    // masquerade as response time of the live socket.
                     ConnectionPill(
                         state: terminal.connection,
-                        averageLatency: terminal.connection == .connected
-                            ? session.averageLatency : nil,
-                        samples: session.latencySamples
+                        averageLatency: nil,
+                        samples: []
                     )
                 }
                 .buttonStyle(.plain)

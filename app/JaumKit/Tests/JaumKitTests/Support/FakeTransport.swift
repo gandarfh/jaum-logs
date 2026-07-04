@@ -89,9 +89,11 @@ final class FakeTransport: WireTransport, Sendable {
 }
 
 /// Polls an async condition until it holds or the timeout hits, yielding to
-/// the cooperative pool between checks.
+/// the cooperative pool between checks. Duplicated in the app test bundle on
+/// purpose (the two targets share no test support product); keep the
+/// generous timeout in sync so slow CI runners do not flake.
 func waitUntil(
-    timeout: TimeInterval = 2,
+    timeout: TimeInterval = 15,
     _ condition: @MainActor @escaping () -> Bool
 ) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))

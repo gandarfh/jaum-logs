@@ -8,7 +8,7 @@ struct JaumApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(session: session, terminal: terminal)
+            RootView(session: session, terminal: terminal, showsPreviewBadge: true)
                 .background(WindowSharingGuard())
                 .task {
                     session.start()

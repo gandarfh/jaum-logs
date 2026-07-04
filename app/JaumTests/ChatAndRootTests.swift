@@ -106,6 +106,13 @@ struct ChatAndRootTests {
         renderInWindow(RootView(session: session, terminal: terminal))
     }
 
+    @Test func rootViewRendersThePreviewBadge() async {
+        let session = await startedSession()
+        let terminal = TerminalModel(transport: NullTransport())
+        renderInWindow(
+            RootView(session: session, terminal: terminal, showsPreviewBadge: true))
+    }
+
     @Test func rootViewRendersWithoutSelectionOrPermission() async {
         let session = SessionModel(backend: PreviewBackend())
         let terminal = TerminalModel(transport: UnixSocketTransport(path: "/tmp/jaum-nada.sock"))

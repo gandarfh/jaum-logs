@@ -2,16 +2,20 @@ import Foundation
 import Observation
 
 /// An embedded-editor request coming from the daemon (`RunEditor`): the app
-/// edits the file in place and answers `EditorDone` on save.
+/// edits the file in place and answers `EditorDone` on save. Identity
+/// includes a per-request revision, so a second RunEditor for the same path
+/// recreates the sheet with fresh content instead of showing a stale buffer.
 public struct EditorRequest: Identifiable, Hashable, Sendable {
     public var path: String
     public var content: String
+    public var revision: Int
 
-    public var id: String { path }
+    public var id: String { "\(revision):\(path)" }
 
-    public init(path: String, content: String) {
+    public init(path: String, content: String, revision: Int = 0) {
         self.path = path
         self.content = content
+        self.revision = revision
     }
 }
 
@@ -27,6 +31,8 @@ public final class TerminalModel {
 
     private let client: DaemonClient
     private var consumeTask: Task<Void, Never>?
+    private var cleanupTask: Task<Void, Never>?
+    private var editorRevision = 0
 
     public init(transport: any WireTransport) {
         self.client = DaemonClient(transport: transport)
@@ -37,7 +43,10 @@ public final class TerminalModel {
         connection = .connecting
         do {
             // A previous stream may still be tearing down asynchronously;
-            // detaching first makes manual reconnection deterministic.
+            // awaiting its cleanup keeps the stray detach from killing the
+            // connection this attach is about to open.
+            await cleanupTask?.value
+            cleanupTask = nil
             await client.detach()
             let events = try await client.attach(cols: cols, rows: rows)
             connection = .connected
@@ -111,7 +120,9 @@ public final class TerminalModel {
     private func openEditor(path: String) async {
         do {
             let content = try await Self.readIfExists(path)
-            editorRequest = EditorRequest(path: path, content: content ?? "")
+            editorRevision += 1
+            editorRequest = EditorRequest(
+                path: path, content: content ?? "", revision: editorRevision)
         } catch {
             lastError = "Não deu para ler \(path): \(error.localizedDescription)"
             await send(.editorDone)
@@ -126,14 +137,16 @@ public final class TerminalModel {
     }
 
     /// Releases the dead connection so a later `attach()` can start over
-    /// (the transport builds a fresh connection per connect).
+    /// (the transport builds a fresh connection per connect). The detach is
+    /// tracked in `cleanupTask` so the next attach awaits it instead of
+    /// racing it.
     private func handleStreamEnd(reason: String?) {
         connection = .disconnected
         lastError = reason
         consumeTask?.cancel()
         consumeTask = nil
         let client = self.client
-        Task {
+        cleanupTask = Task {
             await client.detach()
         }
     }
