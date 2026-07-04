@@ -464,7 +464,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('z') => app.chat_fullscreen = !app.chat_fullscreen,
         KeyCode::Char('p') => app.play_selected(),
-        KeyCode::Char('r') => app.start_review_job(),
         KeyCode::Char('R') => app.review_selected(),
         KeyCode::Char('H') => app.handoff_selected(),
         KeyCode::Char('f') => app.finish_selected(),
@@ -486,7 +485,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     // that fails the same way shows the error again instead of going silent.
     if matches!(
         key.code,
-        KeyCode::Char('p' | 'r' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
+        KeyCode::Char('p' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
     ) {
         app.rearm_toast();
     }
@@ -1349,7 +1348,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
         detail(
             &mut items,
             Line::from(Span::styled(
-                "  (none) — p play · R review · r verdict",
+                "  (none) — p play · R review chat",
                 Style::default().fg(SUBTLE),
             )),
         );
@@ -1514,7 +1513,7 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let Some(r) = report else {
         lines.push(Line::from(
-            "No review yet. `r` runs the verdict (writes the report); `R` opens the review chat.",
+            "No review yet. The verdict runs by itself when every PR check turns green; `R` opens the review chat.",
         ));
         return lines;
     };
@@ -1742,7 +1741,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
     // statusline (left) + key caps (right)
     let keys = [
         ("p", "play"),
-        ("r", "review"),
+        ("R", "review"),
         ("f", "finish"),
         ("a", "parallel"),
         ("S", "setup"),

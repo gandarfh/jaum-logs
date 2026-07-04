@@ -55,6 +55,7 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![project],
     };
     App::new(cfg, 0).unwrap()

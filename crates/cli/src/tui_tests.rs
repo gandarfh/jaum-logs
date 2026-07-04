@@ -62,6 +62,7 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![project],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -489,6 +490,7 @@ fn picker_overlay_lists_projects() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -535,6 +537,20 @@ fn job_overlay_renders_log_styles_running_and_done() {
     let s = buf_string(&draw(&a, 100, 30));
     assert!(s.contains("ingest · done"));
     assert!(s.contains("G live"), "paused hint offers going live");
+}
+
+#[test]
+fn verdict_key_is_gone_and_footer_points_to_the_review_chat() {
+    let dir = TmpDir::new("no-verdict-key");
+    let mut a = app_with(&dir, &[("TASK-001", "review")]);
+    let before = a.status_msg.clone();
+    tui::handle_key(&mut a, ch('r'));
+    assert!(a.job.is_none(), "'r' must not start the verdict job");
+    assert_eq!(a.status_msg, before, "'r' must be a no-op");
+
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("R review"), "footer advertises the review chat");
+    assert!(!s.contains("r review"), "old verdict key gone from footer");
 }
 
 #[test]
@@ -730,6 +746,7 @@ fn picker_keys_navigate_and_close() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();

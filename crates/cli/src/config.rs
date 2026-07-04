@@ -64,6 +64,9 @@ pub const CONVENTIONS_TEMPLATE: &str = "# Project conventions\n\nGuidelines inje
 pub struct Config {
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Interval (seconds) between CI polls of the tasks' PRs; `None` = default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_poll_secs: Option<u64>,
 }
 
 /// jaum base directory: `~/jaum`.
@@ -370,6 +373,7 @@ mod tests {
         let dir = TmpDir::new("roundtrip");
         let path = dir.path().join("nested").join("config.toml");
         let cfg = Config {
+            ci_poll_secs: None,
             projects: vec![project_at(
                 dir.path().to_path_buf(),
                 dir.path().join("backlog"),
@@ -398,6 +402,7 @@ mod tests {
     fn project_for_cwd_matches_by_root() {
         let dir = TmpDir::new("cwd-root");
         let cfg = Config {
+            ci_poll_secs: None,
             projects: vec![project_at(
                 dir.path().to_path_buf(),
                 PathBuf::from("/none/backlog"),
@@ -412,6 +417,7 @@ mod tests {
         let backlog = dir.path().join(".backlog");
         fs::create_dir_all(&backlog).unwrap();
         let cfg = Config {
+            ci_poll_secs: None,
             projects: vec![project_at(PathBuf::from("/none/root"), backlog)],
         };
         assert!(cfg.project_for_cwd(dir.path()).is_some());
@@ -422,6 +428,7 @@ mod tests {
         let dir = TmpDir::new("cwd-miss");
         let other = TmpDir::new("cwd-other");
         let cfg = Config {
+            ci_poll_secs: None,
             projects: vec![project_at(
                 other.path().to_path_buf(),
                 other.path().join(".backlog"),
@@ -441,6 +448,7 @@ mod tests {
 
         let dir = TmpDir::new("usable");
         let ok = Config {
+            ci_poll_secs: None,
             projects: vec![project_at(
                 dir.path().to_path_buf(),
                 dir.path().join(".backlog"),
