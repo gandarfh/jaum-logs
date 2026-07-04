@@ -63,7 +63,7 @@ struct ChatAndRootTests {
             session: session,
             task: task,
             taskSession: task.sessions[0],
-            draft: "mensagem do composer"
+            draft: "composer message"
         )
         let before = task.sessions[0].messages.count
         view.sendDraft()
@@ -73,7 +73,7 @@ struct ChatAndRootTests {
             })
         let sent = sampleTask(session, "jaum-42").sessions[0].messages[before]
         #expect(sent.role == .user)
-        #expect(sent.blocks == [.markdown("mensagem do composer")])
+        #expect(sent.blocks == [.markdown("composer message")])
     }
 
     @Test func sendDraftWithBlankComposerIsANoOp() async {
@@ -81,7 +81,7 @@ struct ChatAndRootTests {
         let view = chatView(session)
         let before = sampleTask(session, "jaum-42").sessions[0].messages.count
         view.sendDraft()
-        session.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        session.sendText("probe", taskID: "jaum-42", sessionID: "jaum-42-play")
         #expect(
             await waitUntil {
                 sampleTask(session, "jaum-42").sessions[0].messages.count >= before + 2
@@ -138,7 +138,7 @@ struct ChatAndRootTests {
     @Test func docViewRendersHeadingsAndParagraphs() async {
         let session = await startedSession()
         renderInWindow(DocView(doc: session.docs[0]))
-        renderInWindow(DocView(doc: DocItem(name: "vazio.md", content: "so um paragrafo")))
+        renderInWindow(DocView(doc: DocItem(name: "empty.md", content: "just one paragraph")))
     }
 
     @Test func editorSheetRendersAndSyncsContent() async {

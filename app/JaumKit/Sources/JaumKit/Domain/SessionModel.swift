@@ -195,6 +195,10 @@ public final class SessionModel {
             if latencySamples.count > 60 {
                 latencySamples.removeFirst(latencySamples.count - 60)
             }
+        case .reviewState(let taskID, let state):
+            if let index = tasks.firstIndex(where: { $0.id == taskID }) {
+                tasks[index].reviewState = state
+            }
         }
     }
 

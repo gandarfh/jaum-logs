@@ -47,6 +47,11 @@ struct FramingTests {
         #expect(rest == [.frameDiff([WireCell(x: 0, y: 0, sym: "a")])])
     }
 
+    @Test func encodeAcceptsNormalPayloads() throws {
+        let framed = try WireFraming.encode(ClientMessage.editorDone)
+        #expect(framed.count > 4)
+    }
+
     @Test func decoderRejectsOversizedFramesInsteadOfBuffering() {
         var prefix = Data()
         let huge = WireFrameDecoder.maxFrameLength + 1

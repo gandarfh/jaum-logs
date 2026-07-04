@@ -2,7 +2,7 @@ import JaumKit
 import SwiftUI
 
 /// Embedded editor answering the daemon's interactive edit request: header
-/// with the file name and Cancelar/Salvar, monospaced buffer below.
+/// with the file name and Cancel/Save, monospaced buffer below.
 struct EditorSheet: View {
     @Bindable var terminal: TerminalModel
     let request: EditorRequest
@@ -21,7 +21,7 @@ struct EditorSheet: View {
             HStack(spacing: 9) {
                 Image(systemName: "pencil")
                     .font(.caption)
-                Text("Editando · \(fileName)")
+                Text("Editing \u{00B7} \(fileName)")
                     .font(.callout.weight(.bold))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -33,12 +33,12 @@ struct EditorSheet: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Button("Cancelar") {
+                Button("Cancel") {
                     Task { await cancel() }
                 }
                 .buttonStyle(GhostButtonStyle())
                 .keyboardShortcut(.cancelAction)
-                Button("Salvar", systemImage: "checkmark") {
+                Button("Save", systemImage: "checkmark") {
                     Task { await save() }
                 }
                 .buttonStyle(PrimaryButtonStyle())

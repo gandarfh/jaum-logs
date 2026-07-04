@@ -15,12 +15,12 @@ struct HandlerTests {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("jaum-editor-\(getpid()).md")
         defer { try? FileManager.default.removeItem(at: file) }
-        let request = EditorRequest(path: file.path, content: "antes")
+        let request = EditorRequest(path: file.path, content: "before")
         model.editorRequest = request
 
         let sheet = EditorSheet(terminal: model, request: request)
         await sheet.save()
-        #expect(try String(contentsOf: file, encoding: .utf8) == "antes")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "before")
         #expect(model.editorRequest == nil)
     }
 
@@ -45,7 +45,7 @@ struct HandlerTests {
     @Test func editorSheetRendersErrorAndFileName() {
         let request = EditorRequest(path: "/tmp/pasta/conventions.md", content: "corpo")
         let sheet = EditorSheet(
-            terminal: terminal(), request: request, saveError: "sem espaço em disco")
+            terminal: terminal(), request: request, saveError: "no disk space")
         #expect(sheet.fileName == "conventions.md")
         renderInWindow(sheet)
     }

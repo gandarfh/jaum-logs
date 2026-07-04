@@ -56,7 +56,7 @@ struct ComponentsTests {
     }
 
     @Test func windowSharingGuardProtectsTheWindow() {
-        let window = renderInWindow(Text("conteudo").background(WindowSharingGuard()))
+        let window = renderInWindow(Text("content").background(WindowSharingGuard()))
         #expect(window.sharingType == .none)
         #expect(window.level == .normal)
     }

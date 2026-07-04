@@ -13,9 +13,9 @@ public enum TaskStatus: String, CaseIterable, Codable, Sendable, Identifiable {
 
     public var displayName: String {
         switch self {
-        case .wip: "Em progresso"
+        case .wip: "In progress"
         case .review: "Review"
-        case .ready: "Pronto"
+        case .ready: "Ready"
         case .backlog: "Backlog"
         case .merged: "Merged"
         }
@@ -28,7 +28,7 @@ public enum TaskKind: String, Codable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .implementation: "Implementação"
+        case .implementation: "Implementation"
         case .spike: "Spike"
         }
     }
@@ -84,8 +84,38 @@ public enum SessionKind: String, Codable, Sendable {
     }
 }
 
+/// CI-driven review state shown on the board. The manual review action is
+/// gone: the review runs automatically once every PR's checks are green, and
+/// these states carry the outcome (mirrors the Rust board indicators).
+public enum ReviewState: Hashable, Sendable {
+    /// Nothing to show (spike, or CI not green yet on the first pass).
+    case idle
+    /// A capture is running in the background.
+    case running
+    /// A newer commit's CI is still running, so a re-review is pending.
+    case rereviewPending
+    /// A newer commit's CI went red; no re-review until it is green.
+    case rereviewFailed
+    /// A verdict was captured and persisted for the reviewed commit.
+    case reviewed(ReviewVerdict)
+}
+
+/// The persisted verdict badge: reviewed commit (short SHA), how many findings
+/// it carried and when it was captured.
+public struct ReviewVerdict: Hashable, Sendable {
+    public var reviewedSHA: String
+    public var findings: Int
+    public var reviewedAt: Date
+
+    public init(reviewedSHA: String, findings: Int, reviewedAt: Date) {
+        self.reviewedSHA = reviewedSHA
+        self.findings = findings
+        self.reviewedAt = reviewedAt
+    }
+}
+
 /// One session of a task. The detail pane tabs are the task's own sessions
-/// (Detalhe plus one tab per session), never fixed global tabs.
+/// (Detail plus one tab per session), never fixed global tabs.
 public struct TaskSession: Identifiable, Hashable, Sendable {
     public var id: String
     public var kind: SessionKind
@@ -126,6 +156,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     public var prCount: Int
     public var lastActivity: String?
     public var sessions: [TaskSession]
+    public var reviewState: ReviewState
 
     public init(
         id: String,
@@ -140,7 +171,8 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         isEditing: Bool = false,
         prCount: Int = 0,
         lastActivity: String? = nil,
-        sessions: [TaskSession] = []
+        sessions: [TaskSession] = [],
+        reviewState: ReviewState = .idle
     ) {
         self.id = id
         self.title = title
@@ -155,6 +187,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         self.prCount = prCount
         self.lastActivity = lastActivity
         self.sessions = sessions
+        self.reviewState = reviewState
     }
 
     public var findingsCount: Int {
@@ -267,9 +300,9 @@ public enum ConnectionState: Hashable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .disconnected: "Desconectado"
-        case .connecting: "Conectando"
-        case .connected: "Conectado"
+        case .disconnected: "Disconnected"
+        case .connecting: "Connecting"
+        case .connected: "Connected"
         }
     }
 }

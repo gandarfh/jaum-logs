@@ -41,18 +41,18 @@ struct TerminalModelTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("conventions.md")
-        try "conteudo original".write(to: file, atomically: true, encoding: .utf8)
+        try "original content".write(to: file, atomically: true, encoding: .utf8)
 
         let transport = FakeTransport()
         let model = TerminalModel(transport: transport)
         await model.attach()
         try transport.push(.runEditor(path: file.path))
         #expect(await waitUntil { model.editorRequest != nil })
-        #expect(model.editorRequest?.content == "conteudo original")
+        #expect(model.editorRequest?.content == "original content")
 
-        try await model.finishEditing(content: "conteudo novo")
+        try await model.finishEditing(content: "new content")
         #expect(model.editorRequest == nil)
-        #expect(try String(contentsOf: file, encoding: .utf8) == "conteudo novo")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "new content")
         #expect(try transport.sentMessages().last == .editorDone)
     }
 
@@ -73,7 +73,7 @@ struct TerminalModelTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("secreto.md")
-        try "conteudo".write(to: file, atomically: true, encoding: .utf8)
+        try "content".write(to: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
 
         let transport = FakeTransport()
@@ -85,7 +85,7 @@ struct TerminalModelTests {
         #expect(try transport.sentMessages().last == .editorDone)
 
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
-        #expect(try String(contentsOf: file, encoding: .utf8) == "conteudo")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "content")
     }
 
     @Test func cancelEditingAnswersTheDaemonWithoutWriting() async throws {
@@ -117,7 +117,7 @@ struct TerminalModelTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("conventions.md")
-        try "antes".write(to: file, atomically: true, encoding: .utf8)
+        try "before".write(to: file, atomically: true, encoding: .utf8)
 
         let transport = FakeTransport()
         let model = TerminalModel(transport: transport)
@@ -127,7 +127,7 @@ struct TerminalModelTests {
 
         transport.failSend = true
         await #expect(throws: (any Error).self) {
-            try await model.finishEditing(content: "depois")
+            try await model.finishEditing(content: "after")
         }
         #expect(model.editorRequest != nil)
         await #expect(throws: (any Error).self) {
@@ -136,9 +136,9 @@ struct TerminalModelTests {
         #expect(model.editorRequest != nil)
 
         transport.failSend = false
-        try await model.finishEditing(content: "depois")
+        try await model.finishEditing(content: "after")
         #expect(model.editorRequest == nil)
-        #expect(try String(contentsOf: file, encoding: .utf8) == "depois")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "after")
         #expect(try transport.sentMessages().last == .editorDone)
     }
 

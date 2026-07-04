@@ -20,6 +20,21 @@ struct TaskViewsTests {
         renderInWindow(TaskRowView(task: sampleTask(session, "jaum-28")))
     }
 
+    @Test func reviewIndicatorRendersEveryGlyph() {
+        let verdict = ReviewVerdict(
+            reviewedSHA: "9534bae", findings: 2,
+            reviewedAt: Date(timeIntervalSince1970: 0))
+        let states: [ReviewState] = [
+            .running, .rereviewPending, .rereviewFailed, .reviewed(verdict),
+            .reviewed(ReviewVerdict(reviewedSHA: "abc1234", findings: 0, reviewedAt: Date())),
+        ]
+        for state in states {
+            if let indicator = ReviewIndicator.make(for: state, now: Date()) {
+                renderInWindow(ReviewIndicatorView(indicator: indicator))
+            }
+        }
+    }
+
     @Test func detailRendersEveryTab() async {
         let session = await startedSession()
         session.selectedTaskID = "jaum-42"

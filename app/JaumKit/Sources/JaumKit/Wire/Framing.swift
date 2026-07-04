@@ -3,10 +3,18 @@ import Foundation
 /// Length-prefixed framing shared with the daemon: 4-byte big-endian payload
 /// length followed by the JSON payload.
 public enum WireFraming {
+    public enum EncodeError: Error {
+        case payloadTooLarge(count: Int)
+    }
+
     public static func encode(_ message: some Encodable) throws -> Data {
         let payload = try JSONEncoder().encode(message)
+        // Mirror the Rust side (u32::try_from at protocol.rs): a payload past
+        // 4 GiB is an error, not a silent overflow.
+        guard let length = UInt32(exactly: payload.count) else {
+            throw EncodeError.payloadTooLarge(count: payload.count)
+        }
         var data = Data(count: 4)
-        let length = UInt32(payload.count)
         data[0] = UInt8((length >> 24) & 0xFF)
         data[1] = UInt8((length >> 16) & 0xFF)
         data[2] = UInt8((length >> 8) & 0xFF)

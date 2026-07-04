@@ -43,7 +43,7 @@ struct RootView: View {
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Picker("Modo", selection: $mode) {
+                Picker("Mode", selection: $mode) {
                     ForEach(AppMode.allCases) { mode in
                         Label(mode.title, systemImage: mode.systemImage)
                             .tag(mode)
@@ -54,9 +54,9 @@ struct RootView: View {
             }
             if showsPreviewBadge {
                 ToolbarItem(placement: .status) {
-                    Chip(text: "dados de demonstração", systemImage: "sparkles")
+                    Chip(text: "demo data", systemImage: "sparkles")
                         .help(
-                            "Tasks, chat e permissões são roteirizados; o protocolo de domínio do daemon ainda não existe"
+                            "Tasks, chat and permissions are scripted; the daemon domain protocol does not exist yet"
                         )
                 }
             }
@@ -76,7 +76,7 @@ struct RootView: View {
                 .buttonStyle(.plain)
                 .help(
                     terminal.connection == .disconnected
-                        ? "Clique para conectar ao daemon" : "Conexão com o daemon"
+                        ? "Click to connect to the daemon" : "Daemon connection"
                 )
             }
         }
@@ -90,14 +90,14 @@ struct RootView: View {
             permissionPrompt = session.pendingPermission
         }
         .alert(
-            "Permitir \(permissionPrompt?.toolName ?? "ferramenta")?",
+            "Allow \(permissionPrompt?.toolName ?? "tool")?",
             isPresented: permissionPresented,
             presenting: permissionPrompt
         ) { _ in
-            Button("Aprovar") {
+            Button("Approve") {
                 decidePermission(approved: true)
             }
-            Button("Negar", role: .cancel) {
+            Button("Deny", role: .cancel) {
                 decidePermission(approved: false)
             }
         } message: { request in
@@ -172,9 +172,9 @@ struct TasksSplitView: View {
                 TaskDetailView(session: session, task: task)
             } else {
                 ContentUnavailableView(
-                    "Nenhuma task selecionada",
+                    "No task selected",
                     systemImage: "sidebar.right",
-                    description: Text("Escolha uma task na lista para ver o detalhe.")
+                    description: Text("Pick a task from the list to see its detail.")
                 )
             }
         }
@@ -186,7 +186,7 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $session.selectedProjectID) {
-            Section("Projetos") {
+            Section("Projects") {
                 ForEach(session.projects) { project in
                     HStack {
                         Label(project.name, systemImage: "folder")
@@ -232,7 +232,7 @@ struct DocsSplitView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $session.selectedDocID) {
-                Section("Documentos") {
+                Section("Documents") {
                     ForEach(session.docs) { doc in
                         Label(doc.name, systemImage: "doc.text")
                             .tag(doc.id)
@@ -245,7 +245,7 @@ struct DocsSplitView: View {
             if let doc = session.selectedDoc {
                 DocView(doc: doc)
             } else {
-                ContentUnavailableView("Sem documentos", systemImage: "doc.text")
+                ContentUnavailableView("No documents", systemImage: "doc.text")
             }
         }
     }

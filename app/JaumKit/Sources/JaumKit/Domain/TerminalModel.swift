@@ -124,7 +124,7 @@ public final class TerminalModel {
             editorRequest = EditorRequest(
                 path: path, content: content ?? "", revision: editorRevision)
         } catch {
-            lastError = "Não deu para ler \(path): \(error.localizedDescription)"
+            lastError = "Could not read \(path): \(error.localizedDescription)"
             await send(.editorDone)
         }
     }

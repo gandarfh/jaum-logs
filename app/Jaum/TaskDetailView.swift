@@ -2,7 +2,7 @@ import JaumKit
 import SwiftUI
 
 /// Detail pane: header with actions, metadata chips and the task's session
-/// tabs (Detalhe plus one tab per session, never fixed global tabs).
+/// tabs (Detail plus one tab per session, never fixed global tabs).
 struct TaskDetailView: View {
     @Bindable var session: SessionModel
     let task: TaskItem
@@ -48,10 +48,9 @@ struct TaskDetailView: View {
             .padding(.vertical, 3)
             .background(Capsule().fill(Color.primary.opacity(0.08)))
             Spacer()
+            // Review is no longer a manual action: it runs automatically once
+            // every PR's checks are green (see the board review indicator).
             HStack(spacing: 7) {
-                Button("Review", systemImage: "flag") {}
-                    .buttonStyle(GhostButtonStyle())
-                    .disabled(true)
                 Button("Finish", systemImage: "arrow.triangle.merge") {}
                     .buttonStyle(GhostButtonStyle())
                     .disabled(true)
@@ -59,7 +58,7 @@ struct TaskDetailView: View {
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(true)
             }
-            .help("Ações chegam com o protocolo de domínio do daemon")
+            .help("Actions arrive with the daemon domain protocol")
         }
     }
 
@@ -69,7 +68,7 @@ struct TaskDetailView: View {
                 Chip(text: "worktree \(worktree)", systemImage: "arrow.triangle.branch")
             }
             if task.isEditing {
-                Chip(text: "editando", systemImage: "pencil")
+                Chip(text: "editing", systemImage: "pencil")
             }
             if task.prCount > 0 {
                 Chip(text: "\(task.prCount) PRs", systemImage: "link")
@@ -83,7 +82,7 @@ struct TaskDetailView: View {
     private var tabPicker: some View {
         HStack(spacing: 2) {
             SessionTabButton(
-                title: "Detalhe",
+                title: "Detail",
                 isLive: false,
                 isSelected: session.selectedTab == .detail
             ) {
@@ -152,7 +151,7 @@ struct SessionTabButton: View {
     }
 }
 
-/// The Detalhe tab: acceptance criteria checklist and constraints.
+/// The Detail tab: acceptance criteria checklist and constraints.
 struct DetailTabView: View {
     let task: TaskItem
 
@@ -160,7 +159,7 @@ struct DetailTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if !task.criteria.isEmpty {
-                    Text("Critérios de aceite")
+                    Text("Acceptance criteria")
                         .font(.callout.weight(.bold))
                         .padding(.bottom, 4)
                     ForEach(Array(task.criteria.enumerated()), id: \.offset) { _, criterion in
@@ -203,7 +202,7 @@ struct DetailTabView: View {
                     }
                 }
                 if task.criteria.isEmpty && task.constraints.isEmpty {
-                    Text("Sem critérios registrados.")
+                    Text("No criteria recorded.")
                         .font(.callout)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 8)
@@ -226,11 +225,16 @@ struct ReviewSessionView: View {
                     Image(systemName: "flag")
                     Text("\(taskSession.findings.count) findings")
                         .font(.callout.weight(.bold))
-                    Text("· critérios \(task.doneCriteriaCount)/\(task.criteria.count)")
+                    Text("\u{00B7} criteria \(task.doneCriteriaCount)/\(task.criteria.count)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.bottom, 10)
+
+                if let indicator = ReviewIndicator.make(for: task.reviewState, now: Date()) {
+                    ReviewIndicatorView(indicator: indicator)
+                        .padding(.bottom, 12)
+                }
 
                 ForEach(Array(taskSession.findings.enumerated()), id: \.offset) { _, finding in
                     HStack(alignment: .top, spacing: 11) {
@@ -257,7 +261,7 @@ struct ReviewSessionView: View {
                     }
                 }
                 if taskSession.findings.isEmpty {
-                    Text("Sem findings.")
+                    Text("No findings.")
                         .font(.callout)
                         .foregroundStyle(.tertiary)
                 }

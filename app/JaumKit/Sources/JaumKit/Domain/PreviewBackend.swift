@@ -69,7 +69,7 @@ public actor PreviewBackend: SessionBackend {
                     message: ChatMessage(
                         id: nextID("msg"),
                         role: .assistant,
-                        blocks: [.markdown("Recebi sua mensagem e vou considerar na sessão.")],
+                        blocks: [.markdown("Got your message, I will factor it into the session.")],
                         timestamp: nextTimestamp()
                     )))
         case .sendImage(let taskID, let sessionID, let data, let filename):
@@ -80,7 +80,7 @@ public actor PreviewBackend: SessionBackend {
                     message: ChatMessage(
                         id: nextID("msg"),
                         role: .user,
-                        blocks: [.markdown("Imagem enviada: \(filename)"), .image(data)],
+                        blocks: [.markdown("Image sent: \(filename)"), .image(data)],
                         timestamp: nextTimestamp()
                     )))
         case .approvePermission(let id):
@@ -126,11 +126,12 @@ public actor PreviewBackend: SessionBackend {
 
     private static let initialEvents: [SessionEvent] = {
         let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let reviewedAt = Date().addingTimeInterval(-5 * 60)
         let playChat: [ChatMessage] = [
             ChatMessage(
                 id: "seed-1",
                 role: .system,
-                blocks: [.markdown("carregando repo-map + constraints...")],
+                blocks: [.markdown("loading repo-map + constraints...")],
                 timestamp: base
             ),
             ChatMessage(
@@ -164,32 +165,32 @@ public actor PreviewBackend: SessionBackend {
             ChatMessage(
                 id: "seed-4",
                 role: .assistant,
-                blocks: [.markdown("Protocolo serializando redondo. **Rodo o próximo passo?**")],
+                blocks: [.markdown("Protocol round-trips cleanly. **Run the next step?**")],
                 timestamp: base.addingTimeInterval(3)
             ),
         ]
         let tasks: [TaskItem] = [
             TaskItem(
                 id: "jaum-42",
-                title: "Protocolo de domínio + daemon headless",
+                title: "Domain protocol + headless daemon",
                 status: .wip,
                 objective:
-                    "Trocar a etapa final do daemon de renderizar células por serializar estado de domínio, mantendo o cérebro em Rust.",
+                    "Swap the daemon's final stage from rendering cells to serializing domain state, keeping the brain in Rust.",
                 criteria: [
-                    Criterion(text: "Daemon deixa de depender de ratatui", done: true),
-                    Criterion(text: "DomainSnapshot roundtrip serde testado", done: true),
-                    Criterion(text: "Tee de PTY + ring buffer de scrollback"),
+                    Criterion(text: "Daemon no longer depends on ratatui", done: true),
+                    Criterion(text: "DomainSnapshot serde round-trip tested", done: true),
+                    Criterion(text: "PTY tee + scrollback ring buffer"),
                 ],
                 constraints: [
-                    "Não duplicar estado de PR",
-                    "Escopo extra vira deferred",
-                    "Sem exclusão de cobertura",
+                    "Do not duplicate PR state",
+                    "Extra scope becomes deferred",
+                    "No coverage exclusions",
                 ],
                 worktree: "jaum-42",
                 isParallel: true,
                 isEditing: true,
                 prCount: 2,
-                lastActivity: "agora",
+                lastActivity: "now",
                 sessions: [
                     TaskSession(
                         id: "jaum-42-play",
@@ -202,26 +203,29 @@ public actor PreviewBackend: SessionBackend {
             ),
             TaskItem(
                 id: "jaum-39",
-                title: "Migrar cliente TUI pro snapshot",
+                title: "Migrate the TUI client to the snapshot",
                 status: .wip,
-                objective: "Cliente TUI passa a renderizar a partir do DomainSnapshot.",
+                objective: "The TUI client renders from the DomainSnapshot.",
                 worktree: "jaum-39",
+                prCount: 1,
                 lastActivity: "8min",
                 sessions: [
                     TaskSession(id: "jaum-39-play", kind: .play, isLive: true, toolCount: 1)
-                ]
+                ],
+                reviewState: .running
             ),
             TaskItem(
                 id: "jaum-31",
-                title: "Transporte TCP + token",
+                title: "TCP transport + token",
                 status: .review,
-                objective: "Conexão remota com token de pareamento sobre Headscale.",
+                objective: "Remote connection with a pairing token over Headscale.",
                 criteria: [
-                    Criterion(text: "Handshake com versão", done: true),
-                    Criterion(text: "Token obrigatório no TCP", done: true),
-                    Criterion(text: "Reject fecha a conexão", done: true),
-                    Criterion(text: "Latência medida por Ping/Pong"),
+                    Criterion(text: "Handshake carries the version", done: true),
+                    Criterion(text: "Token required over TCP", done: true),
+                    Criterion(text: "Reject closes the connection", done: true),
+                    Criterion(text: "Latency measured via Ping/Pong"),
                 ],
+                prCount: 1,
                 lastActivity: "1h",
                 sessions: [
                     TaskSession(id: "jaum-31-play", kind: .play),
@@ -230,35 +234,39 @@ public actor PreviewBackend: SessionBackend {
                         kind: .review,
                         findings: [
                             Finding(
-                                title: "Estado de PR duplicado",
+                                title: "Duplicated PR state",
                                 detail:
-                                    "A struct guarda merge state que já vem do gh. Viola constraint.",
+                                    "The struct stores merge state that already comes from gh. Violates a constraint.",
                                 location: "crates/cli/src/app.rs:212"
                             ),
                             Finding(
-                                title: "Token lido sem trim",
-                                detail: "Handshake compara token com quebra de linha no fim.",
+                                title: "Token read without trim",
+                                detail: "The handshake compares the token with a trailing newline.",
                                 location: "crates/cli/src/config.rs:88"
                             ),
                         ]
                     ),
-                ]
+                ],
+                reviewState: .reviewed(
+                    ReviewVerdict(reviewedSHA: "9534bae", findings: 2, reviewedAt: reviewedAt))
             ),
             TaskItem(
                 id: "jaum-28",
-                title: "App macOS MVP",
+                title: "macOS app MVP",
                 status: .ready,
-                objective: "Alvo macOS com janela invisível em screen share."
+                objective: "macOS target with a window invisible to screen sharing.",
+                prCount: 1,
+                reviewState: .rereviewPending
             ),
             TaskItem(
                 id: "jaum-44",
-                title: "Editor embutido",
+                title: "Embedded editor",
                 status: .backlog,
-                objective: "Edição de arquivo in-app substituindo o $EDITOR externo."
+                objective: "In-app file editing replacing the external $EDITOR."
             ),
             TaskItem(
                 id: "jaum-8",
-                title: "Fixtures golden do protocolo",
+                title: "Golden protocol fixtures",
                 status: .merged,
                 prCount: 1
             ),
@@ -266,28 +274,28 @@ public actor PreviewBackend: SessionBackend {
         let docs: [DocItem] = [
             DocItem(
                 name: "conventions.md",
-                subtitle: "jaum-logs · editado 2h atrás",
+                subtitle: "jaum-logs \u{00B7} edited 2h ago",
                 content: """
                     ## Constraints
 
-                    O diretório `.backlog/` é a única fonte de verdade. GitHub é downstream.
+                    The `.backlog/` directory is the single source of truth. GitHub is downstream.
 
-                    - Não duplicar estado de PR, ler de `gh`, nunca guardar.
-                    - Escopo extra vira `deferred` + novo backlog.
+                    - Do not duplicate PR state, read from `gh`, never store it.
+                    - Extra scope becomes `deferred` + a new backlog item.
 
-                    ## Estilo
+                    ## Style
 
-                    Comentários explicam **porquê**, não o quê. Sem emojis.
+                    Comments explain **why**, not what. No emojis.
                     """
             ),
             DocItem(
-                name: "arquitetura.md",
+                name: "architecture.md",
                 subtitle: "jaum-logs",
                 content: """
-                    ## Camadas
+                    ## Layers
 
-                    - `jaum-core`: modelo + store do backlog.
-                    - `adapters`: git, gh, executor atrás de traits.
+                    - `jaum-core`: backlog model + store.
+                    - `adapters`: git, gh, executor behind traits.
                     - `flows`: play, review, ingest.
                     - `cli`: daemon + TUI.
                     """
@@ -304,15 +312,21 @@ public actor PreviewBackend: SessionBackend {
             .latency(milliseconds: 24),
             .projects([
                 ProjectItem(id: "jaum-logs", name: "jaum-logs", taskCount: tasks.count),
-                ProjectItem(id: "site-novo", name: "site-novo", taskCount: 9),
+                ProjectItem(id: "new-site", name: "new-site", taskCount: 9),
             ]),
             .docs(docs),
             .tasks(tasks),
+            // The daemon's CI watch finishes jaum-39's capture: the spinner
+            // resolves to a persisted verdict.
+            .reviewState(
+                taskID: "jaum-39",
+                state: .reviewed(
+                    ReviewVerdict(reviewedSHA: "1e5e355", findings: 0, reviewedAt: reviewedAt))),
             .permissionRequested(
                 PermissionRequest(
                     id: "perm-1",
                     toolName: "git push",
-                    request: "Enviar o branch de trabalho para o remoto"
+                    request: "Push the working branch to the remote"
                 )),
         ]
     }()

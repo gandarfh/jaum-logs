@@ -60,13 +60,13 @@ struct SessionChatView: View {
             session.attachImage(result, taskID: task.id, sessionID: taskSession.id)
         }
         .alert(
-            "Não deu para anexar a imagem",
+            "Could not attach the image",
             isPresented: Binding(
                 get: { session.attachmentError != nil },
                 set: { if !$0 { session.clearAttachmentError() } }
             )
         ) {
-            Button("Entendi", role: .cancel) {}
+            Button("Got it", role: .cancel) {}
         } message: {
             Text(session.attachmentError ?? "")
         }
@@ -76,19 +76,19 @@ struct SessionChatView: View {
         HStack(spacing: 8) {
             Image(systemName: "terminal")
                 .font(.caption)
-            Text("\(taskSession.kind.rawValue) · ")
+            Text("\(taskSession.kind.displayName) \u{00B7} ")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 + Text(task.id)
                 .font(.caption.weight(.semibold))
-                + Text(task.worktree != nil ? " · worktree" : "")
+                + Text(task.worktree != nil ? " \u{00B7} worktree" : "")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
             if taskSession.isLive {
                 HStack(spacing: 6) {
                     Image(systemName: "waveform.path.ecg")
-                    Text("ao vivo · \(taskSession.toolCount) tools")
+                    Text("live \u{00B7} \(taskSession.toolCount) tools")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -107,15 +107,15 @@ struct SessionChatView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("Enviar imagem")
+            .help("Send an image")
 
-            TextField("Digite pra conversar", text: $draft, axis: .vertical)
+            TextField("Type to chat", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.callout)
                 .lineLimit(1...5)
                 .onSubmit(sendDraft)
 
-            Button("Enviar", action: sendDraft)
+            Button("Send", action: sendDraft)
                 .buttonStyle(GhostButtonStyle())
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -129,7 +129,7 @@ struct SessionChatView: View {
     }
 }
 
-/// One timeline entry. User messages get a subtle "você" label; assistant
+/// One timeline entry. User messages get a subtle "you" label; assistant
 /// and system entries flow as a plain timeline like the approved mock.
 struct ChatEntryView: View {
     let message: ChatMessage
@@ -137,7 +137,7 @@ struct ChatEntryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if message.role == .user {
-                Text("você")
+                Text("you")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
             }
@@ -173,7 +173,7 @@ struct ChatBlockView: View {
                     .frame(maxWidth: 360, maxHeight: 280)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             } else {
-                Label("Imagem inválida", systemImage: "photo.trianglebadge.exclamationmark")
+                Label("Invalid image", systemImage: "photo.trianglebadge.exclamationmark")
                     .foregroundStyle(.secondary)
             }
         case .tool(let tool):

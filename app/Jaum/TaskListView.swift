@@ -31,9 +31,9 @@ struct TaskListView: View {
         .overlay {
             if session.sections.isEmpty {
                 ContentUnavailableView(
-                    "Sem tasks",
+                    "No tasks",
                     systemImage: "tray",
-                    description: Text("Nenhuma task neste filtro.")
+                    description: Text("No tasks under this filter.")
                 )
             }
         }
@@ -61,13 +61,17 @@ struct TaskRowView: View {
                             Chip(text: worktree, systemImage: "arrow.triangle.branch")
                         }
                         if task.isParallel {
-                            Chip(text: "paralelo", systemImage: "equal")
+                            Chip(text: "parallel", systemImage: "equal")
                         }
                         if task.findingsCount > 0 {
                             Chip(text: "\(task.findingsCount) findings", systemImage: "flag")
                         }
                     }
                     .padding(.top, 5)
+                }
+                if let indicator = ReviewIndicator.make(for: task.reviewState, now: Date()) {
+                    ReviewIndicatorView(indicator: indicator)
+                        .padding(.top, 5)
                 }
             }
             Spacer(minLength: 0)
@@ -81,7 +85,7 @@ struct TaskRowView: View {
                     Image(systemName: "record.circle")
                         .font(.caption)
                         .foregroundStyle(.primary)
-                        .accessibilityLabel("Sessão ao vivo")
+                        .accessibilityLabel("Live session")
                 }
             }
         }
@@ -90,5 +94,41 @@ struct TaskRowView: View {
 
     private var hasChips: Bool {
         task.worktree != nil || task.isParallel || task.findingsCount > 0
+    }
+}
+
+/// Board glyph plus label for a task's automatic review state.
+struct ReviewIndicatorView: View {
+    let indicator: ReviewIndicator
+
+    var body: some View {
+        HStack(spacing: 5) {
+            glyph
+                .font(.caption2)
+                .frame(width: 12)
+            Text(indicator.label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        switch indicator.glyph {
+        case .running:
+            ProgressView()
+                .controlSize(.mini)
+        case .rereviewPending:
+            Image(systemName: "hourglass")
+                .foregroundStyle(.secondary)
+        case .rereviewFailed:
+            Image(systemName: "xmark.circle")
+                .foregroundStyle(.primary)
+        case .reviewed(let hasFindings):
+            Image(systemName: hasFindings ? "flag.checkered" : "checkmark.seal")
+                .foregroundStyle(.primary)
+        }
     }
 }

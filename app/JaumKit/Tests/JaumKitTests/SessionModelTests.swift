@@ -29,9 +29,43 @@ struct SessionModelTests {
         let model = await startedModel()
         model.start()
         let before = playMessages(model).count
-        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("probe", taskID: "jaum-42", sessionID: "jaum-42-play")
         _ = await waitUntil { self.playMessages(model).count >= before + 2 }
         #expect(playMessages(model).count == before + 2)
+    }
+
+    @Test func scriptedReviewStatesLoadAndTransition() async {
+        let model = await startedModel()
+        #expect(reviewState(model, "jaum-28") == .rereviewPending)
+        #expect(reviewState(model, "jaum-42") == .idle)
+        guard case .reviewed(let verdict31) = reviewState(model, "jaum-31") else {
+            Issue.record("expected jaum-31 to carry a verdict")
+            return
+        }
+        #expect(verdict31.reviewedSHA == "9534bae")
+        #expect(verdict31.findings == 2)
+        // jaum-39 starts running, then the scripted CI watch resolves it.
+        guard case .reviewed = reviewState(model, "jaum-39") else {
+            Issue.record("expected jaum-39 to resolve to a verdict")
+            return
+        }
+    }
+
+    @Test func reviewStateEventUpdatesOnlyTheNamedTask() async {
+        let model = await startedModel()
+        let verdict = ReviewVerdict(
+            reviewedSHA: "deadbee", findings: 3,
+            reviewedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        model.apply(.reviewState(taskID: "jaum-42", state: .reviewed(verdict)))
+        #expect(reviewState(model, "jaum-42") == .reviewed(verdict))
+        // An event for an unknown task is dropped without touching others.
+        let snapshot = model.tasks.map(\.reviewState)
+        model.apply(.reviewState(taskID: "nope", state: .running))
+        #expect(model.tasks.map(\.reviewState) == snapshot)
+    }
+
+    private func reviewState(_ model: SessionModel, _ id: String) -> ReviewState {
+        model.tasks.first { $0.id == id }?.reviewState ?? .idle
     }
 
     @Test func sectionsFollowStatusOrderAndOmitEmptyGroups() async {
@@ -78,11 +112,11 @@ struct SessionModelTests {
     @Test func sendTextAppendsToTheAddressedSession() async {
         let model = await startedModel()
         let before = playMessages(model).count
-        model.sendText("  bora revisar  ", taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("  let us review  ", taskID: "jaum-42", sessionID: "jaum-42-play")
         #expect(await waitUntil { self.playMessages(model).count == before + 2 })
         let messages = playMessages(model)
         #expect(messages[before].role == .user)
-        #expect(messages[before].blocks == [.markdown("bora revisar")])
+        #expect(messages[before].blocks == [.markdown("let us review")])
         #expect(messages[before + 1].role == .assistant)
     }
 
@@ -93,14 +127,14 @@ struct SessionModelTests {
         let model = await startedModel()
         let before = playMessages(model).count
         model.sendText("   \n ", taskID: "jaum-42", sessionID: "jaum-42-play")
-        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("probe", taskID: "jaum-42", sessionID: "jaum-42-play")
         _ = await waitUntil { self.playMessages(model).count >= before + 2 }
         #expect(playMessages(model).count == before + 2)
         guard case .markdown(let text) = playMessages(model)[before].blocks.first else {
             Issue.record("expected markdown block")
             return
         }
-        #expect(text == "sonda")
+        #expect(text == "probe")
     }
 
     @Test func sendImageAppendsAnImageBlock() async {
@@ -108,7 +142,7 @@ struct SessionModelTests {
         let before = playMessages(model).count
         model.sendImage(
             data: Data([1, 2, 3]),
-            filename: "captura.png",
+            filename: "screenshot.png",
             taskID: "jaum-42",
             sessionID: "jaum-42-play"
         )
@@ -141,14 +175,14 @@ struct SessionModelTests {
 
         let before = playMessages(model).count
         model.attachImage(.success(url), taskID: "jaum-42", sessionID: "jaum-42-play")
-        model.sendText("depois da imagem", taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("after the image", taskID: "jaum-42", sessionID: "jaum-42-play")
         #expect(await waitUntil { self.playMessages(model).count == before + 3 })
         #expect(playMessages(model)[before].blocks.contains(.image(Data([5, 5]))))
         guard case .markdown(let text) = playMessages(model)[before + 1].blocks.first else {
             Issue.record("expected markdown block")
             return
         }
-        #expect(text == "depois da imagem")
+        #expect(text == "after the image")
     }
 
     @Test func attachImageFailuresSurfaceTheError() async {
@@ -170,11 +204,11 @@ struct SessionModelTests {
         let model = await startedModel()
         let before = playMessages(model).count
         model.sendImage(
-            data: Data(), filename: "vazio.png", taskID: "jaum-42", sessionID: "jaum-42-play")
-        model.sendText("sonda", taskID: "jaum-42", sessionID: "jaum-42-play")
+            data: Data(), filename: "empty.png", taskID: "jaum-42", sessionID: "jaum-42-play")
+        model.sendText("probe", taskID: "jaum-42", sessionID: "jaum-42-play")
         _ = await waitUntil { self.playMessages(model).count >= before + 2 }
         #expect(playMessages(model).count == before + 2)
-        #expect(playMessages(model)[before].blocks == [.markdown("sonda")])
+        #expect(playMessages(model)[before].blocks == [.markdown("probe")])
     }
 
     @Test func chatToUnknownTaskOrSessionIsDropped() async {
@@ -265,8 +299,8 @@ struct SessionModelTests {
     @Test func selectedDocFallsBackToTheFirst() async {
         let model = await startedModel()
         #expect(model.selectedDoc?.name == "conventions.md")
-        model.selectedDocID = "arquitetura.md"
-        #expect(model.selectedDoc?.name == "arquitetura.md")
+        model.selectedDocID = "architecture.md"
+        #expect(model.selectedDoc?.name == "architecture.md")
         model.selectedDocID = "nope.md"
         #expect(model.selectedDoc?.name == "conventions.md")
     }
@@ -309,7 +343,7 @@ struct SessionModelTests {
         let model = await startedModel()
         let before = playMessages(model).count
         for index in 1...4 {
-            model.sendText("mensagem \(index)", taskID: "jaum-42", sessionID: "jaum-42-play")
+            model.sendText("message \(index)", taskID: "jaum-42", sessionID: "jaum-42-play")
         }
         #expect(await waitUntil { self.playMessages(model).count == before + 8 })
         let userTexts = playMessages(model).suffix(8)
@@ -318,7 +352,7 @@ struct SessionModelTests {
                 if case .markdown(let text) = message.blocks.first { return text }
                 return nil
             }
-        #expect(userTexts == ["mensagem 1", "mensagem 2", "mensagem 3", "mensagem 4"])
+        #expect(userTexts == ["message 1", "message 2", "message 3", "message 4"])
     }
 
     @Test func taskDerivedFieldsForTheList() async {
@@ -332,18 +366,18 @@ struct SessionModelTests {
     }
 
     @Test func displayNamesAreExposedForTheUI() {
-        #expect(TaskStatus.wip.displayName == "Em progresso")
+        #expect(TaskStatus.wip.displayName == "In progress")
         #expect(TaskStatus.review.displayName == "Review")
-        #expect(TaskStatus.ready.displayName == "Pronto")
+        #expect(TaskStatus.ready.displayName == "Ready")
         #expect(TaskStatus.backlog.displayName == "Backlog")
         #expect(TaskStatus.merged.displayName == "Merged")
         #expect(TaskKind.spike.displayName == "Spike")
-        #expect(TaskKind.implementation.displayName == "Implementação")
+        #expect(TaskKind.implementation.displayName == "Implementation")
         #expect(SessionKind.play.displayName == "Play")
         #expect(SessionKind.review.displayName == "Review")
-        #expect(ConnectionState.connecting.displayName == "Conectando")
-        #expect(ConnectionState.connected.displayName == "Conectado")
-        #expect(ConnectionState.disconnected.displayName == "Desconectado")
+        #expect(ConnectionState.connecting.displayName == "Connecting")
+        #expect(ConnectionState.connected.displayName == "Connected")
+        #expect(ConnectionState.disconnected.displayName == "Disconnected")
         #expect(TaskStatus.allCases.map(\.id) == ["wip", "review", "ready", "backlog", "merged"])
     }
 

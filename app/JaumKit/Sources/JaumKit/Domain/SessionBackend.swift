@@ -20,6 +20,9 @@ public enum SessionEvent: Hashable, Sendable {
     case permissionResolved(id: String, approved: Bool)
     case connection(ConnectionState)
     case latency(milliseconds: Double)
+    /// The daemon's CI watch changed a task's review state (capture started,
+    /// verdict persisted, re-review pending or blocked by red CI).
+    case reviewState(taskID: String, state: ReviewState)
 }
 
 /// Source of domain events for one daemon connection. The wire protocol does
