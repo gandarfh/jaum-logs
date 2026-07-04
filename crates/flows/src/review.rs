@@ -8,12 +8,21 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use jaum_adapters::{ExecFlags, Executor, Gh, Git, Session};
 use jaum_core::{Enforce, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// Current Unix time in seconds (0 if the clock predates the epoch).
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Verdict of a semantic constraint in the review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +113,10 @@ impl Finding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewReport {
     pub task: String,
+    /// Unix time (seconds) the capture was written. Absent on reports produced
+    /// before this was recorded; the UI just omits the "when" then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<u64>,
     #[serde(default)]
     pub findings: Vec<Finding>,
     #[serde(default)]
@@ -485,6 +498,7 @@ the diff can't tell.\n\n",
 
         let report = ReviewReport {
             task: id.to_string(),
+            reviewed_at: Some(now_unix_secs()),
             findings,
             constraints,
             criteria,

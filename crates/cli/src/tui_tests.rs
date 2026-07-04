@@ -302,17 +302,30 @@ fn board_tags_the_reviewed_commit() {
     );
     let mut a = app_with(&dir, &[]);
     a.refresh().unwrap();
-    write_review(&dir, "TASK-001", &clean_review_md("TASK-001"));
+    // a review captured two hours ago
+    let two_h_ago = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 7200;
+    write_review(
+        &dir,
+        "TASK-001",
+        &format!(
+            "---\ntask: TASK-001\nreviewed_at: {two_h_ago}\nfindings: []\nconstraints: []\ncriteria: []\n---\nok\n"
+        ),
+    );
     a.selected = 0;
 
-    // middle-column detail carries the short reviewed hash next to the verdict
+    // middle-column detail carries the short reviewed hash + relative time
     let s = buf_string(&draw(&a, 120, 40));
     assert!(
         s.contains("review CLEAN · @c93e38d"),
         "reviewed tag in detail"
     );
+    assert!(s.contains("2h ago"), "relative review time in detail");
 
-    // the verdict panel repeats it as "reviewed @<sha>"
+    // the verdict panel repeats it as "reviewed @<sha> · <when>"
     a.card_selected = a
         .task_cards()
         .iter()
@@ -320,9 +333,28 @@ fn board_tags_the_reviewed_commit() {
         .unwrap();
     let s = buf_string(&draw(&a, 120, 40));
     assert!(
-        s.contains("reviewed @c93e38d"),
-        "reviewed tag in verdict panel"
+        s.contains("reviewed @c93e38d") && s.contains("2h ago"),
+        "reviewed tag + time in verdict panel"
     );
+}
+
+#[test]
+fn review_when_is_relative_then_absolute() {
+    // relative buckets
+    assert_eq!(tui::fmt_review_when(30, 0), "just now");
+    assert_eq!(tui::fmt_review_when(300, 0), "5min ago");
+    assert_eq!(tui::fmt_review_when(7200, 0), "2h ago");
+    assert_eq!(tui::fmt_review_when(2 * 86400, 0), "2d ago");
+    // beyond a week falls back to an absolute local date/time
+    let abs = tui::fmt_review_when(10 * 86400, 1_700_000_000);
+    // shape YYYY-MM-DD HH:MM, timezone-independent assertion
+    let bytes = abs.as_bytes();
+    assert_eq!(abs.len(), 16, "{abs}");
+    assert_eq!(bytes[4], b'-');
+    assert_eq!(bytes[7], b'-');
+    assert_eq!(bytes[10], b' ');
+    assert_eq!(bytes[13], b':');
+    assert!(abs.starts_with("202"), "{abs}");
 }
 
 #[test]

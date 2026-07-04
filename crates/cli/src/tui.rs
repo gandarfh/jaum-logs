@@ -946,6 +946,53 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
+/// Current Unix time in seconds (0 if the clock predates the epoch).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Human "when" for a review taken at `reviewed_at` (Unix seconds): relative
+/// ("5min ago") until a week out, then the absolute local date/time.
+fn review_when(reviewed_at: u64) -> String {
+    fmt_review_when(now_unix_secs().saturating_sub(reviewed_at), reviewed_at)
+}
+
+/// Pure formatter split out for tests: `elapsed` drives the relative buckets;
+/// `reviewed_at` is only used for the absolute fallback beyond a week.
+fn fmt_review_when(elapsed: u64, reviewed_at: u64) -> String {
+    match elapsed {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}min ago", elapsed / 60),
+        3600..=86399 => format!("{}h ago", elapsed / 3600),
+        86400..=604_799 => format!("{}d ago", elapsed / 86400),
+        _ => local_datetime(reviewed_at),
+    }
+}
+
+/// Absolute local date/time `YYYY-MM-DD HH:MM` for a Unix timestamp, via libc's
+/// `localtime_r` (no date-library dependency).
+fn local_datetime(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    // SAFETY: localtime_r fills a caller-owned `tm`; we zero it first and only
+    // read scalar fields it populates.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    if !ok {
+        return format!("@{secs}");
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
 /// Short hash(es) the task's review was taken against, from the persisted
 /// `reviewed_sha` per PR link. `None` when nothing was reviewed yet; distinct
 /// shas (multi-PR tasks) are joined so the tag says which commits it covers.
@@ -1334,6 +1381,10 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             if let Some(tag) = reviewed_tag(t) {
                 txt.push_str(&format!(" · @{tag}"));
             }
+            // and when the capture ran.
+            if let Some(at) = r.reviewed_at {
+                txt.push_str(&format!(" · {}", review_when(at)));
+            }
             detail(
                 &mut items,
                 Line::from(Span::styled(txt, Style::default().fg(c))),
@@ -1590,15 +1641,16 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
         ),
         Style::default().fg(SUBTLE),
     )));
-    // which commit this verdict was taken against.
+    // which commit this verdict was taken against, and when it ran.
     if let Some(tag) = id
         .and_then(|i| app.tasks.iter().find(|t| t.id == i))
         .and_then(reviewed_tag)
     {
-        lines.push(Line::from(Span::styled(
-            format!("reviewed @{tag}"),
-            Style::default().fg(SUBTLE),
-        )));
+        let mut line = format!("reviewed @{tag}");
+        if let Some(at) = r.reviewed_at {
+            line.push_str(&format!(" · {}", review_when(at)));
+        }
+        lines.push(Line::from(Span::styled(line, Style::default().fg(SUBTLE))));
     }
     if !clean {
         lines.push(Line::from(Span::styled(
