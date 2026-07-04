@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use jaum_core::MergeState;
+use jaum_core::{CiStatus, MergeState, PrCi};
 
 /// `gh` adapter via shell-out. GitHub is downstream: the tool creates PRs and
 /// **reads** the number and merge state, never merges.
@@ -90,6 +90,49 @@ impl Gh {
         })
     }
 
+    /// PR state + aggregated CI checks + head commit, in one gh call.
+    /// `pr == 0` short-circuits to `NotCreated`/`Unknown` without calling gh.
+    pub fn pr_ci(&self, dir: &Path, pr: u64) -> Result<PrCi> {
+        if pr == 0 {
+            return Ok(PrCi {
+                state: MergeState::NotCreated,
+                checks: CiStatus::Unknown,
+                head_sha: String::new(),
+            });
+        }
+        let out = self.run(
+            dir,
+            &[
+                "pr",
+                "view",
+                &pr.to_string(),
+                "--json",
+                "state,headRefOid,statusCheckRollup",
+            ],
+        )?;
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_default();
+        let state = match v.get("state").and_then(|s| s.as_str()).unwrap_or("") {
+            "MERGED" => MergeState::Merged,
+            "OPEN" => MergeState::Open,
+            "CLOSED" => MergeState::Closed,
+            _ => MergeState::Unknown,
+        };
+        let head_sha = v
+            .get("headRefOid")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let checks = match v.get("statusCheckRollup").and_then(|r| r.as_array()) {
+            Some(items) => aggregate_checks(items),
+            None => CiStatus::Unknown,
+        };
+        Ok(PrCi {
+            state,
+            checks,
+            head_sha,
+        })
+    }
+
     /// PR diff (by number), pulled from GitHub. Empty if `pr == 0`.
     pub fn pr_diff(&self, dir: &Path, pr: u64) -> Result<String> {
         if pr == 0 {
@@ -126,6 +169,51 @@ impl Gh {
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// Folds the `statusCheckRollup` entries into one status. Each entry is either
+/// a CheckRun (`status`/`conclusion`) or a StatusContext (`state`); failures
+/// dominate, then pending, then unrecognized payloads.
+fn aggregate_checks(items: &[serde_json::Value]) -> CiStatus {
+    if items.is_empty() {
+        return CiStatus::NoChecks;
+    }
+    let mut agg = CiStatus::Passing;
+    for item in items {
+        let one = classify_check(item);
+        agg = match (agg, one) {
+            (_, CiStatus::Failing) | (CiStatus::Failing, _) => CiStatus::Failing,
+            (_, CiStatus::Pending) | (CiStatus::Pending, _) => CiStatus::Pending,
+            (_, CiStatus::Unknown) | (CiStatus::Unknown, _) => CiStatus::Unknown,
+            _ => CiStatus::Passing,
+        };
+    }
+    agg
+}
+
+/// Status of a single rollup entry.
+fn classify_check(item: &serde_json::Value) -> CiStatus {
+    let get = |k: &str| item.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    // StatusContext (commit status API) carries `state` directly.
+    if item.get("state").is_some() {
+        return match get("state") {
+            "SUCCESS" => CiStatus::Passing,
+            "PENDING" | "EXPECTED" => CiStatus::Pending,
+            "FAILURE" | "ERROR" => CiStatus::Failing,
+            _ => CiStatus::Unknown,
+        };
+    }
+    // CheckRun: anything not COMPLETED is still running/queued.
+    if get("status") != "COMPLETED" {
+        return CiStatus::Pending;
+    }
+    match get("conclusion") {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CiStatus::Passing,
+        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            CiStatus::Failing
+        }
+        _ => CiStatus::Unknown,
     }
 }
 

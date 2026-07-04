@@ -62,6 +62,7 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![project],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -136,6 +137,7 @@ fn fake_job(
         app::Job {
             kind: app::JobKind::Ingest,
             title: "ingest".into(),
+            task: None,
             logs: logs.iter().map(|s| s.to_string()).collect(),
             rx,
             finished,
@@ -235,6 +237,124 @@ fn board_shows_review_badges_and_parallel_glyphs() {
     let s = buf_string(&draw(&a, 120, 40));
     assert!(s.contains("‖ parallel ok"));
     assert!(s.contains("review CLEAN"));
+}
+
+#[test]
+fn board_shows_in_flight_review_glyph_and_statusline() {
+    let dir = TmpDir::new("reviewing-glyph");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+    // no review running: no spinner anywhere
+    assert!(!buf_string(&draw(&a, 120, 40)).contains("⟳"));
+
+    // a review capture in flight on TASK-001: spinner in the list + statusline
+    let (job, _tx) = fake_job(&[], false, true, 0);
+    let mut job = job;
+    job.kind = app::JobKind::Review;
+    job.task = Some("TASK-001".into());
+    a.job = Some(job);
+    a.selected = 0;
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("⟳"), "in-flight review spinner in the list");
+    assert!(s.contains("⟳ review TASK-001"), "statusline indicator");
+}
+
+#[test]
+fn board_shows_pending_re_review_glyphs_from_ci() {
+    use jaum_core::{CiStatus, MergeState, PrCi};
+    let obs = |checks| {
+        vec![(
+            "org/x".to_string(),
+            PrCi {
+                state: MergeState::Open,
+                checks,
+                head_sha: "newsha".to_string(),
+            },
+        )]
+    };
+
+    // CI still running on a new commit: hourglass + "re-review pending" line
+    let dir = TmpDir::new("pending-ci");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+    a.ci_obs.insert("TASK-001".into(), obs(CiStatus::Pending));
+    a.selected = 0;
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("◷"), "awaiting-CI glyph in the list");
+    assert!(s.contains("re-review pending"), "detail line");
+
+    // CI red on the new commit: cross + "blocked" line
+    let dir2 = TmpDir::new("failed-ci");
+    let mut b = app_with(&dir2, &[("TASK-001", "wip")]);
+    b.ci_obs.insert("TASK-001".into(), obs(CiStatus::Failing));
+    b.selected = 0;
+    let s = buf_string(&draw(&b, 120, 40));
+    assert!(s.contains("✗"), "CI-failed glyph in the list");
+    assert!(s.contains("review blocked"), "detail line");
+}
+
+#[test]
+fn board_tags_the_reviewed_commit() {
+    let dir = TmpDir::new("reviewed-tag");
+    // a task whose PR link records the reviewed commit
+    write_task(
+        &dir,
+        "TASK-001",
+        "---\nid: TASK-001\ntype: impl\nstatus: review\nprs:\n  - repo: org/x\n    pr: 7\n    branch: feat/x\n    reviewed_sha: c93e38d24f6bb1a703026358d83f2184da7c416d\n---\n\n## Objective\nx\n",
+    );
+    let mut a = app_with(&dir, &[]);
+    a.refresh().unwrap();
+    // a review captured two hours ago
+    let two_h_ago = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 7200;
+    write_review(
+        &dir,
+        "TASK-001",
+        &format!(
+            "---\ntask: TASK-001\nreviewed_at: {two_h_ago}\nfindings: []\nconstraints: []\ncriteria: []\n---\nok\n"
+        ),
+    );
+    a.selected = 0;
+
+    // middle-column detail carries the short reviewed hash + relative time
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(
+        s.contains("review CLEAN · @c93e38d"),
+        "reviewed tag in detail"
+    );
+    assert!(s.contains("2h ago"), "relative review time in detail");
+
+    // the verdict panel repeats it as "reviewed @<sha> · <when>"
+    a.card_selected = a
+        .task_cards()
+        .iter()
+        .position(|c| *c == BoardCard::Verdict)
+        .unwrap();
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(
+        s.contains("reviewed @c93e38d") && s.contains("2h ago"),
+        "reviewed tag + time in verdict panel"
+    );
+}
+
+#[test]
+fn review_when_is_relative_then_absolute() {
+    // relative buckets
+    assert_eq!(tui::fmt_review_when(30, 0), "just now");
+    assert_eq!(tui::fmt_review_when(300, 0), "5min ago");
+    assert_eq!(tui::fmt_review_when(7200, 0), "2h ago");
+    assert_eq!(tui::fmt_review_when(2 * 86400, 0), "2d ago");
+    // beyond a week falls back to an absolute local date/time
+    let abs = tui::fmt_review_when(10 * 86400, 1_700_000_000);
+    // shape YYYY-MM-DD HH:MM, timezone-independent assertion
+    let bytes = abs.as_bytes();
+    assert_eq!(abs.len(), 16, "{abs}");
+    assert_eq!(bytes[4], b'-');
+    assert_eq!(bytes[7], b'-');
+    assert_eq!(bytes[10], b' ');
+    assert_eq!(bytes[13], b':');
+    assert!(abs.starts_with("202"), "{abs}");
 }
 
 #[test]
@@ -489,6 +609,7 @@ fn picker_overlay_lists_projects() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -535,6 +656,20 @@ fn job_overlay_renders_log_styles_running_and_done() {
     let s = buf_string(&draw(&a, 100, 30));
     assert!(s.contains("ingest · done"));
     assert!(s.contains("G live"), "paused hint offers going live");
+}
+
+#[test]
+fn verdict_key_is_gone_and_footer_points_to_the_review_chat() {
+    let dir = TmpDir::new("no-verdict-key");
+    let mut a = app_with(&dir, &[("TASK-001", "review")]);
+    let before = a.status_msg.clone();
+    tui::handle_key(&mut a, ch('r'));
+    assert!(a.job.is_none(), "'r' must not start the verdict job");
+    assert_eq!(a.status_msg, before, "'r' must be a no-op");
+
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("R review"), "footer advertises the review chat");
+    assert!(!s.contains("r review"), "old verdict key gone from footer");
 }
 
 #[test]
@@ -730,6 +865,7 @@ fn picker_keys_navigate_and_close() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
+        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();

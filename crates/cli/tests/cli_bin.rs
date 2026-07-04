@@ -62,6 +62,7 @@ impl Home {
         )
         .unwrap();
         let cfg = Config {
+            ci_poll_secs: None,
             projects: vec![Project {
                 name: "proj".into(),
                 root: root.clone(),

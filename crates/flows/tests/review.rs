@@ -145,6 +145,7 @@ fn read_only_flags_block_all_writes() {
 fn report(findings: Vec<Finding>, constraints: Vec<ConstraintResult>) -> ReviewReport {
     ReviewReport {
         task: "TASK-001".into(),
+        reviewed_at: None,
         findings,
         constraints,
         criteria: Vec::new(),

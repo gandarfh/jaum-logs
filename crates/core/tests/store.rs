@@ -236,6 +236,40 @@ fn set_pr_updates_number_of_correct_repo() {
 }
 
 #[test]
+fn mark_reviewed_persists_sha_per_repo_and_survives_reparse() {
+    let dir = TmpDir::new("markreviewed");
+    let store = seed_fixture(&dir);
+    assert_eq!(store.get("TASK-012").unwrap().prs[0].reviewed_sha, None);
+
+    store
+        .mark_reviewed(
+            "TASK-012",
+            &[
+                ("tono-lang/parser".to_string(), "abc123".to_string()),
+                ("unknown/repo".to_string(), "zzz".to_string()),
+            ],
+        )
+        .unwrap();
+    let t = store.get("TASK-012").unwrap();
+    assert_eq!(t.prs[0].reviewed_sha.as_deref(), Some("abc123"));
+    assert_eq!(t.prs[1].reviewed_sha, None, "unlisted link untouched");
+    assert_eq!(t.prs.len(), 2, "unknown repo must not create a link");
+
+    // a new SHA overwrites the marker
+    store
+        .mark_reviewed(
+            "TASK-012",
+            &[("tono-lang/parser".to_string(), "def456".to_string())],
+        )
+        .unwrap();
+    let t = store.get("TASK-012").unwrap();
+    assert_eq!(t.prs[0].reviewed_sha.as_deref(), Some("def456"));
+
+    let raw = fs::read_to_string(dir.0.join("TASK-012.md")).unwrap();
+    assert!(raw.contains("reviewed_sha: def456"), "{raw}");
+}
+
+#[test]
 fn set_pr_on_unlinked_repo_fails() {
     let dir = TmpDir::new("setpr-fail");
     let store = seed_fixture(&dir);

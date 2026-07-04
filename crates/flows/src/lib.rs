@@ -4,7 +4,7 @@
 
 /// Claude model used in interactive play/review/setup sessions.
 /// Centralized here so it can be swapped in one place.
-pub const AGENT_MODEL: &str = "claude-fable-5";
+pub const AGENT_MODEL: &str = "claude-opus-4-8";
 
 pub mod conflict;
 pub mod finish;

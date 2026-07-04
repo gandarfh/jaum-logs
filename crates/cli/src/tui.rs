@@ -14,7 +14,9 @@ use ratatui::widgets::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, BoardCard, BoardFocus, InputKind, SessionKind, Tab, status_label};
+use crate::app::{
+    App, BoardCard, BoardFocus, InputKind, ReviewProgress, SessionKind, Tab, status_label,
+};
 use jaum_flows::review::{ConstraintResult, ConstraintVerdict};
 
 // --- theme (Charm/Lipgloss aesthetic) -------------------------------------
@@ -464,7 +466,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('z') => app.chat_fullscreen = !app.chat_fullscreen,
         KeyCode::Char('p') => app.play_selected(),
-        KeyCode::Char('r') => app.start_review_job(),
         KeyCode::Char('R') => app.review_selected(),
         KeyCode::Char('H') => app.handoff_selected(),
         KeyCode::Char('f') => app.finish_selected(),
@@ -486,7 +487,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     // that fails the same way shows the error again instead of going silent.
     if matches!(
         key.code,
-        KeyCode::Char('p' | 'r' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
+        KeyCode::Char('p' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
     ) {
         app.rearm_toast();
     }
@@ -940,6 +941,74 @@ fn overlay_panel(title: &str) -> Block<'static> {
 }
 
 /// Content lines of a task (metadata + markdown body). Reused by the Board
+/// Short (7-char) commit hash, git-style.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// Current Unix time in seconds (0 if the clock predates the epoch).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Human "when" for a review taken at `reviewed_at` (Unix seconds): relative
+/// ("5min ago") until a week out, then the absolute local date/time.
+fn review_when(reviewed_at: u64) -> String {
+    fmt_review_when(now_unix_secs().saturating_sub(reviewed_at), reviewed_at)
+}
+
+/// Pure formatter split out for tests: `elapsed` drives the relative buckets;
+/// `reviewed_at` is only used for the absolute fallback beyond a week.
+fn fmt_review_when(elapsed: u64, reviewed_at: u64) -> String {
+    match elapsed {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}min ago", elapsed / 60),
+        3600..=86399 => format!("{}h ago", elapsed / 3600),
+        86400..=604_799 => format!("{}d ago", elapsed / 86400),
+        _ => local_datetime(reviewed_at),
+    }
+}
+
+/// Absolute local date/time `YYYY-MM-DD HH:MM` for a Unix timestamp, via libc's
+/// `localtime_r` (no date-library dependency).
+fn local_datetime(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    // SAFETY: localtime_r fills a caller-owned `tm`; we zero it first and only
+    // read scalar fields it populates.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    if !ok {
+        return format!("@{secs}");
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
+/// Short hash(es) the task's review was taken against, from the persisted
+/// `reviewed_sha` per PR link. `None` when nothing was reviewed yet; distinct
+/// shas (multi-PR tasks) are joined so the tag says which commits it covers.
+fn reviewed_tag(t: &jaum_core::Task) -> Option<String> {
+    let mut shas: Vec<String> = Vec::new();
+    for link in &t.prs {
+        if let Some(sha) = &link.reviewed_sha {
+            let s = short_sha(sha);
+            if !shas.contains(&s) {
+                shas.push(s);
+            }
+        }
+    }
+    (!shas.is_empty()).then(|| shas.join(", "))
+}
+
 /// preview and the detail overlay.
 fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -1195,6 +1264,15 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
         {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
+        // review progress: running now, or a newer commit still owing a review.
+        if let Some(p) = app.review_progress(t) {
+            let (g, c) = match p {
+                ReviewProgress::Running => ("⟳", Color::Yellow),
+                ReviewProgress::AwaitingCi => ("◷", Color::Yellow),
+                ReviewProgress::CiFailed => ("✗", Color::Red),
+            };
+            spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
+        }
         // review verdict (if there's a `.review.md`).
         if let Some(n) = app.review_badge(&t.id) {
             let (g, c) = if n == 0 {
@@ -1291,13 +1369,33 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         if let Some(r) = app.load_review(&t.id) {
-            let (txt, c) = if r.is_clean() {
+            let (mut txt, c) = if r.is_clean() {
                 ("review CLEAN".to_string(), Color::Green)
             } else {
                 (
                     format!("review DIRTY · {} pending", r.unmet_count()),
                     Color::Red,
                 )
+            };
+            // tag the commit the verdict was taken against (short reviewed SHA).
+            if let Some(tag) = reviewed_tag(t) {
+                txt.push_str(&format!(" · @{tag}"));
+            }
+            // and when the capture ran.
+            if let Some(at) = r.reviewed_at {
+                txt.push_str(&format!(" · {}", review_when(at)));
+            }
+            detail(
+                &mut items,
+                Line::from(Span::styled(txt, Style::default().fg(c))),
+            );
+        }
+        // pending/in-flight review state (new commit not yet reviewed).
+        if let Some(p) = app.review_progress(t) {
+            let (txt, c) = match p {
+                ReviewProgress::Running => ("⟳ review running", Color::Yellow),
+                ReviewProgress::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
+                ReviewProgress::CiFailed => ("✗ review blocked · CI red", Color::Red),
             };
             detail(
                 &mut items,
@@ -1349,7 +1447,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
         detail(
             &mut items,
             Line::from(Span::styled(
-                "  (none) — p play · R review · r verdict",
+                "  (none) — p play · R review chat",
                 Style::default().fg(SUBTLE),
             )),
         );
@@ -1514,7 +1612,7 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let Some(r) = report else {
         lines.push(Line::from(
-            "No review yet. `r` runs the verdict (writes the report); `R` opens the review chat.",
+            "No review yet. The verdict runs by itself when every PR check turns green; `R` opens the review chat.",
         ));
         return lines;
     };
@@ -1543,6 +1641,17 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
         ),
         Style::default().fg(SUBTLE),
     )));
+    // which commit this verdict was taken against, and when it ran.
+    if let Some(tag) = id
+        .and_then(|i| app.tasks.iter().find(|t| t.id == i))
+        .and_then(reviewed_tag)
+    {
+        let mut line = format!("reviewed @{tag}");
+        if let Some(at) = r.reviewed_at {
+            line.push_str(&format!(" · {}", review_when(at)));
+        }
+        lines.push(Line::from(Span::styled(line, Style::default().fg(SUBTLE))));
+    }
     if !clean {
         lines.push(Line::from(Span::styled(
             "`H` sends the open items to the play session to fix",
@@ -1742,7 +1851,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
     // statusline (left) + key caps (right)
     let keys = [
         ("p", "play"),
-        ("r", "review"),
+        ("R", "review"),
         ("f", "finish"),
         ("a", "parallel"),
         ("S", "setup"),

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -12,7 +12,7 @@ use jaum_adapters::{ClaudeExecutor, Gh, Git, Session};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config as GlobalConfig;
-use jaum_core::{Status, Store, Task};
+use jaum_core::{CiStatus, MergeState, PrCi, Repo, Status, Store, Task};
 use jaum_flows::conflict::Conflict;
 use jaum_flows::finish::Finish;
 use jaum_flows::ingest::Ingest;
@@ -89,6 +89,19 @@ pub enum BoardFocus {
 pub enum BoardCard {
     Session(usize),
     Verdict,
+}
+
+/// In-flight/pending state of a task's automatic review, for the board glyphs.
+/// The persisted verdict badge (`✓`/`⚑`) covers the "done" case; this covers
+/// what is still owed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReviewProgress {
+    /// Capture running right now.
+    Running,
+    /// A new commit exists whose CI is still running; re-review is due once green.
+    AwaitingCi,
+    /// A new commit exists whose CI is red; the review stays blocked until it passes.
+    CiFailed,
 }
 
 /// Canonical display order of statuses on the board.
@@ -389,6 +402,9 @@ pub enum JobMsg {
 pub struct Job {
     pub kind: JobKind,
     pub title: String,
+    /// Task the job acts on, when it has one (review). Drives the in-flight
+    /// indicators (statusline + list glyph) while it runs.
+    pub task: Option<String>,
     pub logs: Vec<String>,
     pub rx: Receiver<JobMsg>,
     pub finished: bool,
@@ -501,6 +517,18 @@ pub struct App {
     last_pr_sync: Instant,
     pr_sync_running: Arc<AtomicBool>,
 
+    /// CI watch: polls the PRs of eligible tasks and, when every check is green,
+    /// dispatches the structured review capture automatically. Observations come
+    /// back on `ci_rx`; `ci_tx` is cloned into the polling thread.
+    last_ci_poll: Instant,
+    ci_poll_interval: Duration,
+    ci_poll_running: Arc<AtomicBool>,
+    ci_tx: Sender<(String, Vec<(Repo, PrCi)>)>,
+    ci_rx: Receiver<(String, Vec<(Repo, PrCi)>)>,
+    /// Latest CI observation per task id, kept so the board can show whether a
+    /// re-review is still pending (new commit whose CI is running or red).
+    pub(crate) ci_obs: HashMap<String, Vec<(Repo, PrCi)>>,
+
     /// Binaries used by background jobs (their threads build their own adapters);
     /// tests point these at stubs so no real `claude`/`gh` is ever spawned.
     claude_bin: String,
@@ -520,6 +548,8 @@ impl App {
             .context("invalid project index")?;
         let conventions_path = project.conventions_path();
         let conventions = std::fs::read_to_string(&conventions_path).unwrap_or_default();
+        let ci_poll_interval = Duration::from_secs(config.ci_poll_secs.unwrap_or(30));
+        let (ci_tx, ci_rx) = channel();
         let mut app = Self {
             git: Git::new(),
             gh: Gh::new(),
@@ -565,6 +595,12 @@ impl App {
             job_overlay: false,
             last_pr_sync: Instant::now(),
             pr_sync_running: Arc::new(AtomicBool::new(false)),
+            last_ci_poll: Instant::now(),
+            ci_poll_interval,
+            ci_poll_running: Arc::new(AtomicBool::new(false)),
+            ci_tx,
+            ci_rx,
+            ci_obs: HashMap::new(),
             claude_bin: "claude".into(),
             gh_bin: "gh".into(),
             load_config: GlobalConfig::load,
@@ -996,6 +1032,10 @@ impl App {
     /// Status line: tab/focus, selected task/branch and navigation hint.
     pub fn statusline(&self) -> String {
         let mut s = format!("[{}]", self.tab.title());
+        // in-flight review first, so the narrow footer never truncates it away.
+        if let Some(id) = self.reviewing_task_id() {
+            s.push_str(&format!(" ⟳ review {id}"));
+        }
         if self.project_selected {
             s.push_str(" · project");
         } else if let Some(t) = self.selected_task() {
@@ -1215,6 +1255,16 @@ impl App {
         self.job.as_ref().is_some_and(|j| !j.finished)
     }
 
+    /// Task whose review capture is running right now, if any. Drives the
+    /// in-flight indicators (statusline label + list glyph) so the background
+    /// auto-review isn't invisible once the "review started" toast fades.
+    pub fn reviewing_task_id(&self) -> Option<&str> {
+        self.job
+            .as_ref()
+            .filter(|j| !j.finished && j.kind == JobKind::Review)
+            .and_then(|j| j.task.as_deref())
+    }
+
     /// Path of the current project's `.backlog/` (to build a Store in the thread).
     fn backlog_path(&self) -> PathBuf {
         self.config
@@ -1237,6 +1287,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Ingest,
             title: "ingest".into(),
+            task: None,
             logs: vec!["scanning docs and repos with claude…".into()],
             rx,
             finished: false,
@@ -1263,13 +1314,16 @@ impl App {
         });
     }
 
-    /// Runs the structured review capture of the selected task in background:
-    /// a read-only `claude -p` that writes the `.review.md` (findings + verdicts).
-    pub fn start_review_job(&mut self) {
-        let Some(id) = self.target_task_id() else {
-            self.status_msg = "no task selected".into();
-            return;
-        };
+    /// Runs the structured review capture of a task in background: a read-only
+    /// `claude -p` that writes the `.review.md` (findings + verdicts). Dispatched
+    /// by the CI watch when every PR check turns green — not by a keybinding —
+    /// so it does NOT steal the screen with the job overlay.
+    ///
+    /// `markers` are the `(repo, head_sha)` to stamp as reviewed, applied ONLY
+    /// after the capture succeeds: a failed run (claude error, rate limit) leaves
+    /// the SHA unmarked so the next poll retries instead of skipping it forever.
+    pub fn start_review_job_for(&mut self, id: &str, markers: Vec<(Repo, String)>) {
+        let id = id.to_string();
         if self.job_running() {
             return;
         }
@@ -1283,13 +1337,14 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Review,
             title: format!("review {id}"),
+            task: Some(id.clone()),
             logs: vec![format!("reviewing {id} against docs and constraints…")],
             rx,
             finished: false,
             scroll: 0,
             follow: true,
         });
-        self.job_overlay = true;
+        self.status_msg = format!("CI green on {id} — review started");
         std::thread::spawn(move || {
             let store = Store::new(&backlog);
             let git = Git::new();
@@ -1300,11 +1355,15 @@ impl App {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
             };
             let done = match review.capture_logged(&id, &mut on_line) {
-                Ok(r) => Ok(format!(
-                    "review {id}: {} finding(s), {}",
-                    r.findings.len(),
-                    if r.is_clean() { "CLEAN" } else { "DIRTY" }
-                )),
+                Ok(r) => {
+                    // stamp the reviewed SHAs only now that the report exists.
+                    let _ = store.mark_reviewed(&id, &markers);
+                    Ok(format!(
+                        "review {id}: {} finding(s), {}",
+                        r.findings.len(),
+                        if r.is_clean() { "CLEAN" } else { "DIRTY" }
+                    ))
+                }
                 Err(e) => Err(format!("review failed: {e}")),
             };
             let _ = tx.send(JobMsg::Done(done));
@@ -1326,6 +1385,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Parallel,
             title: "parallelism analysis".into(),
+            task: None,
             logs: vec!["analyzing which tasks collide…".into()],
             rx,
             finished: false,
@@ -1374,6 +1434,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Capture,
             title: "capture (claude investigates)".into(),
+            task: None,
             logs: vec![format!("investigating: {hint}")],
             rx,
             finished: false,
@@ -1415,6 +1476,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Init,
             title: format!("init {path}"),
+            task: None,
             logs: vec![format!("detecting repos in {}", root.display())],
             rx,
             finished: false,
@@ -1617,6 +1679,141 @@ impl App {
             }
             flag.store(false, Ordering::Relaxed);
         });
+    }
+
+    // --- CI watch (auto review on green checks) ----------------------------
+
+    /// `(id, [(repo, pr)])` of the tasks whose CI is worth polling: every link
+    /// already has a PR (`pr != 0`) and the task is not merged/spike. Openness
+    /// is confirmed by the poll itself (it comes back in the same gh call).
+    pub fn ci_watch_targets(&self) -> Vec<(String, Vec<(Repo, u64)>)> {
+        self.tasks
+            .iter()
+            .filter(|t| {
+                !t.is_spike()
+                    && t.status != Status::Merged
+                    && !t.prs.is_empty()
+                    && t.prs.iter().all(|l| l.pr != 0)
+            })
+            .map(|t| {
+                let prs = t.prs.iter().map(|l| (l.repo.clone(), l.pr)).collect();
+                (t.id.clone(), prs)
+            })
+            .collect()
+    }
+
+    /// Polls, in background, the CI of the eligible tasks' PRs (throttled by
+    /// `ci_poll_interval`) and dispatches the automatic review for whatever
+    /// turned green. A gh failure downgrades that PR to `Unknown`, which never
+    /// triggers. Called every frame by the daemon loop.
+    pub fn tick_ci_watch(&mut self) {
+        self.drain_ci_results();
+        if self.ci_poll_running.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.last_ci_poll.elapsed() < self.ci_poll_interval {
+            return;
+        }
+        self.last_ci_poll = Instant::now();
+
+        let targets = self.ci_watch_targets();
+        if targets.is_empty() {
+            return;
+        }
+
+        let repos = self.repos.clone();
+        let gh_bin = self.gh_bin.clone();
+        let tx = self.ci_tx.clone();
+        let flag = self.ci_poll_running.clone();
+        flag.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let gh = Gh::with_bin(gh_bin);
+            for (id, prs) in targets {
+                let observed: Vec<(Repo, PrCi)> = prs
+                    .into_iter()
+                    .map(|(repo, pr)| {
+                        let ci = repos
+                            .get(&repo)
+                            .map(|dir| gh.pr_ci(dir, pr))
+                            .and_then(Result::ok)
+                            .unwrap_or(PrCi {
+                                state: MergeState::Unknown,
+                                checks: CiStatus::Unknown,
+                                head_sha: String::new(),
+                            });
+                        (repo, ci)
+                    })
+                    .collect();
+                if tx.send((id, observed)).is_err() {
+                    break;
+                }
+            }
+            flag.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Applies the CI observations queued by the polling thread: records the
+    /// observation (for the board's pending-review indicator), re-reads the task
+    /// from disk (the source of truth may have moved), asks the trigger and
+    /// starts the review job with the SHAs to stamp on success. With a job
+    /// already running the observation is dropped — the SHA stays unmarked, so
+    /// the next poll re-arms the trigger.
+    fn drain_ci_results(&mut self) {
+        let pending: Vec<(String, Vec<(Repo, PrCi)>)> = self.ci_rx.try_iter().collect();
+        for (id, observed) in pending {
+            self.ci_obs.insert(id.clone(), observed.clone());
+            let Ok(task) = self.store.get(&id) else {
+                continue;
+            };
+            let Some(markers) = task.review_trigger(&observed) else {
+                continue;
+            };
+            if self.job_running() {
+                continue;
+            }
+            self.start_review_job_for(&id, markers);
+        }
+    }
+
+    /// Review status of a task, for the board indicators. Derived from the last
+    /// CI observation vs the persisted `reviewed_sha`: a re-review is due when an
+    /// open PR's head moved past what was reviewed. `Running` wins (a capture is
+    /// in flight); otherwise the aggregate CI of the unreviewed heads decides.
+    pub fn review_progress(&self, task: &Task) -> Option<ReviewProgress> {
+        if self.reviewing_task_id() == Some(task.id.as_str()) {
+            return Some(ReviewProgress::Running);
+        }
+        let obs = self.ci_obs.get(&task.id)?;
+        let mut pending_review = false;
+        let mut agg = CiStatus::Passing;
+        for link in &task.prs {
+            let Some((_, ci)) = obs.iter().find(|(repo, _)| *repo == link.repo) else {
+                continue;
+            };
+            if ci.state != MergeState::Open || ci.head_sha.is_empty() {
+                continue;
+            }
+            // this PR carries a commit that has not been reviewed yet.
+            if link.reviewed_sha.as_deref() != Some(ci.head_sha.as_str()) {
+                pending_review = true;
+                agg = match (agg, ci.checks) {
+                    (_, CiStatus::Failing) | (CiStatus::Failing, _) => CiStatus::Failing,
+                    (_, CiStatus::Pending) | (CiStatus::Pending, _) => CiStatus::Pending,
+                    (_, CiStatus::Unknown) | (CiStatus::Unknown, _) => CiStatus::Unknown,
+                    _ => CiStatus::Passing,
+                };
+            }
+        }
+        if !pending_review {
+            return None;
+        }
+        match agg {
+            // all green: the trigger fires on the next tick, so this is transient.
+            CiStatus::Passing => None,
+            CiStatus::Pending => Some(ReviewProgress::AwaitingCi),
+            CiStatus::Failing => Some(ReviewProgress::CiFailed),
+            CiStatus::Unknown | CiStatus::NoChecks => None,
+        }
     }
 
     // --- toast (temporary snackbar) ---------------------------------------

@@ -76,6 +76,7 @@ fn app_from(dir: &TmpDir, tasks: &[(&str, &str)], repos: Vec<RepoMap>) -> App {
         write_task(&backlog, id, status, &format!("feat/{}", id.to_lowercase()));
     }
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(dir.path(), repos)],
     };
     App::new(cfg, 0).unwrap()
@@ -193,6 +194,7 @@ fn fake_job(kind: JobKind) -> (std::sync::mpsc::Sender<JobMsg>, Job) {
         Job {
             kind,
             title: "fake".into(),
+            task: None,
             logs: Vec::new(),
             rx,
             finished: false,
@@ -466,6 +468,7 @@ fn sort_sessions_short_list_is_noop() {
 #[test]
 fn new_fails_on_invalid_project_index() {
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: Vec::new(),
     };
     assert!(App::new(cfg, 0).is_err());
@@ -625,6 +628,7 @@ fn load_project_switches_and_stops_sessions() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "second".into();
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     fs::create_dir_all(dir1.path().join(".backlog")).unwrap();
@@ -653,6 +657,7 @@ fn picker_navigation_and_confirm() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "two".into();
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     let mut app = App::new(cfg, 0).unwrap();
@@ -1031,6 +1036,7 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/nice-work");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -1168,6 +1174,7 @@ fn handoff_opens_play_when_none_is_live() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "review", "feat/handoff-work");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -1243,7 +1250,7 @@ fn job_running_and_guards_against_concurrent_jobs() {
     assert!(app.job_running());
 
     app.start_ingest_job();
-    app.start_review_job();
+    app.start_review_job_for("TASK-001", Vec::new());
     app.start_parallel_job();
     app.start_capture_job("hint");
     app.start_init_job("/tmp");
@@ -1287,40 +1294,82 @@ fn ingest_job_reports_failure() {
 }
 
 #[test]
-fn review_job_writes_report_and_handles_missing_task() {
-    let dir = TmpDir::new("job-review");
-    let mut empty = app_with(&dir, &[]);
-    empty.start_review_job();
-    assert_eq!(empty.status_msg, "no task selected");
-
-    let dir2 = TmpDir::new("job-review-ok");
-    let mut app = app_with(&dir2, &[("TASK-001", "review")]);
+fn review_job_writes_report_without_opening_the_overlay() {
+    let dir = TmpDir::new("job-review-ok");
+    let mut app = app_with(&dir, &[("TASK-001", "review")]);
     app.claude_bin = stub_claude(
-        dir2.path(),
+        dir.path(),
         r#"{"findings":[{"file":"src/x.rs","message":"bug","severity":"major"}],"constraints":[],"criteria":[]}"#,
     );
-    app.start_review_job();
+    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
+    assert!(
+        !app.job_overlay,
+        "auto-dispatched review must not steal the screen"
+    );
+    assert!(
+        app.status_msg.contains("review started"),
+        "{}",
+        app.status_msg
+    );
     wait_job(&mut app);
     assert!(
         app.status_msg.contains("review TASK-001: 1 finding(s)"),
         "{}",
         app.status_msg
     );
-    assert!(dir2.path().join(".backlog/TASK-001.review.md").exists());
+    assert!(dir.path().join(".backlog/TASK-001.review.md").exists());
+    // the reviewed SHA is stamped only after a successful capture
+    assert_eq!(
+        app.store.get("TASK-001").unwrap().prs[0]
+            .reviewed_sha
+            .as_deref(),
+        Some("abc")
+    );
 }
 
 #[test]
-fn review_job_reports_failure() {
+fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
     let dir = TmpDir::new("job-review-err");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     app.claude_bin = "false".into();
-    app.start_review_job();
+    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
     wait_job(&mut app);
     assert!(
         app.status_msg.contains("review failed"),
         "{}",
         app.status_msg
     );
+    // a failed capture must NOT stamp the SHA: the next poll has to retry it
+    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
+}
+
+#[test]
+fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
+    let dir = TmpDir::new("reviewing-id");
+    let mut app = app_with(&dir, &[("TASK-001", "review")]);
+    assert_eq!(app.reviewing_task_id(), None);
+
+    // a non-review job in flight does not count as a running review
+    let (_tx, mut job) = fake_job(JobKind::Ingest);
+    job.task = Some("TASK-001".into());
+    app.job = Some(job);
+    assert_eq!(app.reviewing_task_id(), None);
+
+    // a running review job exposes its task and shows in the statusline
+    let (_tx2, mut rjob) = fake_job(JobKind::Review);
+    rjob.task = Some("TASK-001".into());
+    app.job = Some(rjob);
+    app.selected = 0;
+    assert_eq!(app.reviewing_task_id(), Some("TASK-001"));
+    assert!(
+        app.statusline().contains("⟳ review TASK-001"),
+        "{}",
+        app.statusline()
+    );
+
+    // a finished review no longer counts
+    app.job.as_mut().unwrap().finished = true;
+    assert_eq!(app.reviewing_task_id(), None);
 }
 
 #[test]
@@ -1414,6 +1463,7 @@ fn init_ok_no_repos(root: &Path, _explicit: &[PathBuf]) -> Result<Project> {
 
 fn load_config_empty() -> Result<GlobalConfig> {
     Ok(GlobalConfig {
+        ci_poll_secs: None,
         projects: Vec::new(),
     })
 }
@@ -1431,6 +1481,7 @@ fn load_config_with_init_project() -> Result<GlobalConfig> {
     fs::create_dir_all(base.join(".backlog"))?;
     fs::create_dir_all(base.join("docs"))?;
     Ok(GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![Project {
             name: "proj-init".into(),
             root: base.clone(),
@@ -1744,6 +1795,7 @@ fn tick_pr_sync_throttles_and_persists_discovered_numbers() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "wip", "feat/sync-me");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -1789,6 +1841,318 @@ fn tick_pr_sync_throttles_and_persists_discovered_numbers() {
     });
     wait_until(|| !app.pr_sync_running.load(Ordering::Relaxed));
     app.stop_all_sessions();
+}
+
+// --- CI watch (auto review on green checks) ----------------------------------
+
+/// Task markdown with an explicit PR number (and optional reviewed marker).
+fn write_task_with_pr(backlog: &Path, id: &str, status: &str, pr: u64, reviewed: Option<&str>) {
+    let marker = reviewed
+        .map(|s| format!("\n    reviewed_sha: {s}"))
+        .unwrap_or_default();
+    fs::create_dir_all(backlog).unwrap();
+    fs::write(
+        backlog.join(format!("{id}.md")),
+        format!(
+            "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: org/x\n    pr: {pr}\n    branch: feat/x{marker}\n---\n\n## Objective\nx\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn green(sha: &str) -> Vec<(String, PrCi)> {
+    obs(MergeState::Open, CiStatus::Passing, sha)
+}
+
+fn obs(state: MergeState, checks: CiStatus, sha: &str) -> Vec<(String, PrCi)> {
+    vec![(
+        "org/x".to_string(),
+        PrCi {
+            state,
+            checks,
+            head_sha: sha.to_string(),
+        },
+    )]
+}
+
+#[test]
+fn review_progress_reflects_pending_reviews_from_ci_observations() {
+    let dir = TmpDir::new("review-progress");
+    let backlog = dir.path().join(".backlog");
+    // already reviewed the commit "old"
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, Some("old"));
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    let task = app.store.get("TASK-001").unwrap();
+
+    // no observation yet: nothing to show
+    assert_eq!(app.review_progress(&task), None);
+
+    // a new commit "new" whose CI is still running: re-review pending
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Pending, "new"),
+    );
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::AwaitingCi));
+
+    // the new commit's CI went red: review blocked
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Failing, "new"),
+    );
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::CiFailed));
+
+    // new commit green: transient (the trigger fires next tick), so no glyph
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Passing, "new"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // CI still on the reviewed commit "old": nothing pending
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Pending, "old"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // a merged/closed PR never shows a pending review
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Merged, CiStatus::Pending, "new"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // a running capture wins over everything
+    let (_tx, mut rjob) = fake_job(JobKind::Review);
+    rjob.task = Some("TASK-001".into());
+    app.job = Some(rjob);
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::Running));
+}
+
+#[test]
+fn ci_watch_targets_need_created_prs_on_open_impl_tasks() {
+    let dir = TmpDir::new("ci-targets");
+    let backlog = dir.path().join(".backlog");
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    write_task_with_pr(&backlog, "TASK-002", "wip", 0, None); // PR not created
+    write_task_with_pr(&backlog, "TASK-003", "merged", 9, None); // already merged
+    write_unlinked_task(&backlog, "TASK-004", "backlog"); // no PR links
+    fs::write(
+        backlog.join("TASK-005.md"),
+        "---\nid: TASK-005\ntype: spike\nstatus: wip\nprs:\n  - repo: org/x\n    pr: 8\n    branch: feat/s\n---\n\n## Objective\nx\n",
+    )
+    .unwrap();
+
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let app = App::new(cfg, 0).unwrap();
+    assert_eq!(
+        app.ci_watch_targets(),
+        vec![("TASK-001".to_string(), vec![("org/x".to_string(), 7)])]
+    );
+}
+
+#[test]
+fn ci_green_observation_marks_sha_and_starts_review_once() {
+    let dir = TmpDir::new("ci-trigger");
+    let backlog = dir.path().join(".backlog");
+    fs::create_dir_all(dir.path().join("docs")).unwrap();
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    app.claude_bin = stub_claude(
+        dir.path(),
+        r#"{"findings":[],"constraints":[],"criteria":[]}"#,
+    );
+
+    // green CI on a fresh SHA: review job dispatched; the SHA is stamped only
+    // once the capture succeeds (background thread).
+    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
+    app.tick_ci_watch();
+    assert!(app.job_running(), "review job should have started");
+    assert_eq!(app.job.as_ref().unwrap().title, "review TASK-001");
+    wait_job(&mut app);
+    assert!(backlog.join("TASK-001.review.md").exists());
+    assert_eq!(
+        app.store.get("TASK-001").unwrap().prs[0]
+            .reviewed_sha
+            .as_deref(),
+        Some("abc")
+    );
+
+    // same SHA green again: idempotent, no new job
+    app.job = None;
+    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
+    app.tick_ci_watch();
+    assert!(app.job.is_none(), "same commit must not re-trigger");
+
+    // a new push that turns green re-arms the trigger
+    app.ci_tx.send(("TASK-001".into(), green("def"))).unwrap();
+    app.tick_ci_watch();
+    assert!(app.job_running(), "new commit should re-trigger");
+    wait_job(&mut app);
+    assert_eq!(
+        app.store.get("TASK-001").unwrap().prs[0]
+            .reviewed_sha
+            .as_deref(),
+        Some("def")
+    );
+}
+
+#[test]
+fn ci_observations_that_are_not_fully_green_never_trigger() {
+    let dir = TmpDir::new("ci-notgreen");
+    let backlog = dir.path().join(".backlog");
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+
+    for checks in [
+        CiStatus::Pending,
+        CiStatus::Failing,
+        CiStatus::NoChecks,
+        CiStatus::Unknown,
+    ] {
+        let observed = vec![(
+            "org/x".to_string(),
+            PrCi {
+                state: MergeState::Open,
+                checks,
+                head_sha: "abc".into(),
+            },
+        )];
+        app.ci_tx.send(("TASK-001".into(), observed)).unwrap();
+    }
+    // a task that vanished from the backlog is skipped gracefully
+    app.ci_tx.send(("TASK-404".into(), green("abc"))).unwrap();
+    app.tick_ci_watch();
+    assert!(app.job.is_none(), "nothing should trigger");
+    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
+}
+
+#[test]
+fn ci_trigger_defers_while_another_job_runs() {
+    let dir = TmpDir::new("ci-defer");
+    let backlog = dir.path().join(".backlog");
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+
+    let (_tx, job) = fake_job(JobKind::Ingest);
+    app.job = Some(job);
+    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
+    app.tick_ci_watch();
+    // dropped without marking: the next green poll re-arms the trigger
+    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
+    assert_eq!(app.job.as_ref().unwrap().title, "fake");
+}
+
+#[test]
+fn tick_ci_watch_polls_gh_and_dispatches_the_review() {
+    let dir = TmpDir::new("ci-poll");
+    let repo_dir = dir.path().join("repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+    fs::create_dir_all(dir.path().join("docs")).unwrap();
+    let backlog = dir.path().join(".backlog");
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    let cfg = GlobalConfig {
+        ci_poll_secs: Some(120),
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo_dir,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    assert_eq!(app.ci_poll_interval, Duration::from_secs(120));
+    app.gh_bin = write_script(
+        dir.path(),
+        "gh-ci-stub",
+        "#!/bin/sh\necho '{\"state\":\"OPEN\",\"headRefOid\":\"abc\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'\n",
+    );
+    app.claude_bin = stub_claude(
+        dir.path(),
+        r#"{"findings":[],"constraints":[],"criteria":[]}"#,
+    );
+
+    // while a pass is flagged as running, nothing starts
+    app.ci_poll_running.store(true, Ordering::Relaxed);
+    let before = app.last_ci_poll;
+    app.tick_ci_watch();
+    assert!(app.last_ci_poll == before);
+    app.ci_poll_running.store(false, Ordering::Relaxed);
+
+    // throttled while the last pass is recent
+    app.last_ci_poll = Instant::now();
+    app.tick_ci_watch();
+    assert!(!app.ci_poll_running.load(Ordering::Relaxed));
+
+    // due: polls gh in background, then the next tick applies the observation
+    // and dispatches the review; the SHA is stamped once the capture succeeds.
+    app.last_ci_poll = past(121);
+    app.tick_ci_watch();
+    wait_until(|| !app.ci_poll_running.load(Ordering::Relaxed));
+    app.tick_ci_watch();
+    wait_job(&mut app);
+    assert!(backlog.join("TASK-001.review.md").exists());
+    assert_eq!(
+        app.store.get("TASK-001").unwrap().prs[0]
+            .reviewed_sha
+            .as_deref(),
+        Some("abc")
+    );
+}
+
+#[test]
+fn tick_ci_watch_gh_failure_is_unknown_and_never_triggers() {
+    let dir = TmpDir::new("ci-poll-err");
+    let repo_dir = dir.path().join("repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+    let backlog = dir.path().join(".backlog");
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
+    // a second PR whose repo is not mapped locally also degrades to Unknown
+    fs::write(
+        backlog.join("TASK-002.md"),
+        "---\nid: TASK-002\ntype: impl\nstatus: wip\nprs:\n  - repo: org/unmapped\n    pr: 9\n    branch: feat/y\n---\n\n## Objective\nx\n",
+    )
+    .unwrap();
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo_dir,
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    app.gh_bin = "false".into();
+
+    app.last_ci_poll = past(31);
+    app.tick_ci_watch();
+    wait_until(|| !app.ci_poll_running.load(Ordering::Relaxed));
+    app.tick_ci_watch();
+    assert!(app.job.is_none(), "gh failure must not trigger a review");
+    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
+    assert_eq!(app.store.get("TASK-002").unwrap().prs[0].reviewed_sha, None);
 }
 
 #[test]

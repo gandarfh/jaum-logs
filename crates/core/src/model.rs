@@ -40,6 +40,11 @@ pub struct PrLink {
     #[serde(default)]
     pub pr: u64,
     pub branch: String,
+    /// Head SHA whose CI-green state already triggered the automatic review.
+    /// Not PR state (that stays in gh): it records OUR last review dispatch,
+    /// so the trigger is idempotent per commit and re-fires on new pushes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_sha: Option<String>,
 }
 
 /// A "don't do X" directive attached to a task, classified by how it's enforced.
@@ -126,6 +131,32 @@ pub enum MergeState {
     Unknown,
 }
 
+/// Aggregated CI status of a PR's checks, **read** from `gh` — never mirrored
+/// in the markdown. `NoChecks` (repo without CI) is kept distinct from
+/// `Passing`: right after a push the rollup is briefly empty, so treating it
+/// as green would fire the review before CI even starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiStatus {
+    /// Every check concluded successfully.
+    Passing,
+    /// At least one check still queued or running.
+    Pending,
+    /// At least one check concluded in failure.
+    Failing,
+    /// The PR has no checks configured (empty rollup).
+    NoChecks,
+    /// Status could not be determined (gh error or unrecognized payload).
+    Unknown,
+}
+
+/// One PR's CI observation (state + checks + head commit), as read from `gh`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCi {
+    pub state: MergeState,
+    pub checks: CiStatus,
+    pub head_sha: String,
+}
+
 /// A task from `.backlog/`. Fields without `skip` are exactly the YAML
 /// frontmatter; `body` and `path` are filled in by the store after parsing and
 /// are not serialized back.
@@ -201,6 +232,36 @@ impl Task {
             }
         }
         out
+    }
+
+    /// Decides whether the CI-green observations warrant an automatic review.
+    /// Returns the `(repo, head_sha)` markers to persist when it fires, `None`
+    /// otherwise. Fires only when EVERY linked PR exists (`pr != 0`), is open,
+    /// and has all checks passing — and at least one head moved past its
+    /// `reviewed_sha` (idempotence per commit; new pushes re-arm the trigger).
+    pub fn review_trigger(&self, observed: &[(Repo, PrCi)]) -> Option<Vec<(Repo, String)>> {
+        if self.is_spike() || self.prs.is_empty() {
+            return None;
+        }
+        let mut markers = Vec::new();
+        let mut moved = false;
+        for link in &self.prs {
+            if link.pr == 0 {
+                return None;
+            }
+            let (_, ci) = observed.iter().find(|(repo, _)| *repo == link.repo)?;
+            if ci.state != MergeState::Open
+                || ci.checks != CiStatus::Passing
+                || ci.head_sha.is_empty()
+            {
+                return None;
+            }
+            if link.reviewed_sha.as_deref() != Some(ci.head_sha.as_str()) {
+                moved = true;
+            }
+            markers.push((link.repo.clone(), ci.head_sha.clone()));
+        }
+        moved.then_some(markers)
     }
 
     /// Repos linked via PRs, deduplicated preserving order.

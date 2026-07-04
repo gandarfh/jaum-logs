@@ -264,6 +264,7 @@ impl Daemon {
         self.app.poll_job();
         self.app.tick_reload();
         self.app.tick_pr_sync();
+        self.app.tick_ci_watch();
         self.app.tick_toast();
         let (w, h) = {
             let b = self.term.backend().buffer();
@@ -373,6 +374,7 @@ mod tests {
         };
         App::new(
             Config {
+                ci_poll_secs: None,
                 projects: vec![project],
             },
             0,
