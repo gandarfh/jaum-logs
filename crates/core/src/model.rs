@@ -52,17 +52,21 @@ pub struct PrLink {
 pub struct Constraint {
     pub text: String,
     pub enforce: Enforce,
-    /// Regex the PreToolUse hook uses to block (`enforce: hook`). When absent,
-    /// [`Constraint::hook_pattern`] derives a heuristic from `text`.
+    /// Regex the session tool guard applies to block (`enforce: hook`). When
+    /// absent, [`Constraint::hook_pattern`] derives a heuristic from `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 }
 
 impl Constraint {
-    /// Pattern (extended regex, used with `grep -iE` in the hook) to block this
-    /// constraint. Uses an explicit `pattern` if present; otherwise derives from
-    /// `text`: prefers a path-like token (`src/legacy/`), falling back to the
-    /// significant words (dropping stopwords) as an alternation.
+    /// Pattern that blocks this constraint, matched case-insensitively by the
+    /// session tool guard against the tool target (command or file path).
+    /// Written as POSIX ERE: the guard translates the POSIX character classes
+    /// (`[[:space:]]` and friends) to its own regex dialect and fails closed
+    /// on any pattern it cannot compile. Uses an explicit `pattern` if
+    /// present; otherwise derives from `text`: prefers a path-like token
+    /// (`src/legacy/`), falling back to the significant words (dropping
+    /// stopwords) as an alternation.
     pub fn hook_pattern(&self) -> String {
         if let Some(p) = &self.pattern {
             return p.clone();

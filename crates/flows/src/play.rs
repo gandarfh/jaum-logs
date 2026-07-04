@@ -49,12 +49,18 @@ pub struct GuardSpec {
     pub model: String,
 }
 
-/// Builds the guard spec of a task: conventions + constraints in the system
-/// prompt, merge disallowed, and one guard pattern per `enforce: hook`
-/// constraint.
-pub fn guard_spec(task: &Task, conventions: &str) -> GuardSpec {
+/// Builds the guard spec of a task: conventions + constraints + repo map in
+/// the system prompt, merge disallowed, and one guard pattern per
+/// `enforce: hook` constraint.
+pub fn guard_spec(task: &Task, conventions: &str, repos: &HashMap<String, PathBuf>) -> GuardSpec {
+    let mut append = reinjection_text(task, conventions);
+    let repo_map = repo_map_text(task, repos);
+    if !repo_map.is_empty() {
+        append.push_str("\n\n");
+        append.push_str(&repo_map);
+    }
     GuardSpec {
-        system_prompt_append: reinjection_text(task, conventions),
+        system_prompt_append: append,
         disallowed_tools: merge_disallowed(),
         guard_patterns: task
             .constraints_by(Enforce::Hook)
@@ -66,6 +72,31 @@ pub fn guard_spec(task: &Task, conventions: &str) -> GuardSpec {
             .collect(),
         model: crate::AGENT_MODEL.to_string(),
     }
+}
+
+/// Compact map of the project's repositories for the system prompt, so the
+/// agent knows which slug lives where; repos linked to the task carry their
+/// branch. Sorted by slug for a stable prompt.
+pub fn repo_map_text(task: &Task, repos: &HashMap<String, PathBuf>) -> String {
+    if repos.is_empty() {
+        return String::new();
+    }
+    let mut slugs: Vec<&String> = repos.keys().collect();
+    slugs.sort();
+    let mut t = String::from("Repository map (slug: local path):\n");
+    for slug in slugs {
+        let path = repos[slug].display();
+        match task.prs.iter().find(|p| &p.repo == slug) {
+            Some(link) => {
+                t.push_str(&format!(
+                    "- {slug}: {path} (this task, branch {})\n",
+                    link.branch
+                ));
+            }
+            None => t.push_str(&format!("- {slug}: {path}\n")),
+        }
+    }
+    t
 }
 
 /// Tight session prompt: objective + context (RFCs/ADRs) + constraints + scope
@@ -215,7 +246,7 @@ impl<'a> Play<'a> {
             prompt: build_prompt(&task, &self.conventions),
             cwd: worktrees[0].1.clone(),
             worktrees,
-            guards: guard_spec(&task, &self.conventions),
+            guards: guard_spec(&task, &self.conventions, &self.repos),
         })
     }
 
@@ -223,7 +254,7 @@ impl<'a> Play<'a> {
     /// constraint block, recomputed so edits to the task or conventions apply.
     pub fn resume_spec(&self, id: &str) -> Result<GuardSpec> {
         let task = self.store.get(id)?;
-        Ok(guard_spec(&task, &self.conventions))
+        Ok(guard_spec(&task, &self.conventions, &self.repos))
     }
 
     /// Removes the worktrees of a launched session. The branch stays in the

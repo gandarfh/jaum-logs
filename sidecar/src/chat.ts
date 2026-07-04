@@ -105,7 +105,7 @@ export function createSidecar(deps: SidecarDeps) {
   >();
   let permissionCounter = 0;
 
-  function buildOptions(cmd: ChatCommand) {
+  function buildOptions(cmd: ChatCommand, turnPermissions: Set<string>) {
     const options: Record<string, unknown> = {
       permissionMode: "default",
       includePartialMessages: true,
@@ -129,6 +129,7 @@ export function createSidecar(deps: SidecarDeps) {
           return { behavior: "deny" as const, message: verdict.reason };
         }
         const permissionId = `perm_${++permissionCounter}`;
+        turnPermissions.add(permissionId);
         send({
           type: "permission_request",
           request_id: cmd.request_id,
@@ -194,13 +195,17 @@ export function createSidecar(deps: SidecarDeps) {
     // tool_use ids seen in THIS turn: resumed sessions replay old user
     // messages, and their tool_results must not be re-emitted.
     const seenToolUses = new Set<string>();
+    // permission ids created by THIS turn: a query that dies with a request
+    // still pending (stream error, no abort signal) must not leave its
+    // resolver in the shared map forever.
+    const turnPermissions = new Set<string>();
     let doneSent = false;
     let deltaSeen = false;
 
     try {
       const q = queryFn({
         prompt: singleMessageStream(toUserContent(cmd.content), inputDone),
-        options: buildOptions(cmd),
+        options: buildOptions(cmd, turnPermissions),
       });
       activeQueries.set(request_id, q);
 
@@ -339,6 +344,9 @@ export function createSidecar(deps: SidecarDeps) {
     } finally {
       releaseInput();
       activeQueries.delete(request_id);
+      for (const id of turnPermissions) {
+        pendingPermissions.delete(id);
+      }
     }
   }
 

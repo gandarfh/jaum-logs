@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkGuards, guardTarget } from "../src/guard.js";
+import { checkGuards, guardTarget, posixClassesToJs } from "../src/guard.js";
 
 describe("merge guard", () => {
   test.each([
@@ -15,6 +15,10 @@ describe("merge guard", () => {
     "gh pr --repo owner/name merge 42",
     "gh api -X PUT repos/owner/name/pulls/42/merge",
     "gh api graphql -f query='mutation { mergePullRequest(input: {}) }'",
+    'git "merge" main',
+    "git 'merge' main",
+    String.raw`git mer\ge main`,
+    'gh "pr" \'merge\' 42',
   ])("blocks %p", (command) => {
     const v = checkGuards("Bash", { command }, []);
     expect(v.blocked).toBe(true);
@@ -74,25 +78,59 @@ describe("constraint patterns", () => {
     );
   });
 
-  test("skips uncompilable patterns instead of blocking everything", () => {
+  test("an uncompilable pattern fails closed with a clear reason", () => {
     const logs: string[] = [];
     const v = checkGuards(
       "Bash",
       { command: "echo hi" },
-      [{ pattern: "[[:space:]](", reason: "bad" }],
+      [{ pattern: "(unclosed", reason: "bad" }],
       (m) => logs.push(m),
     );
-    expect(v.blocked).toBe(false);
+    expect(v).toEqual({
+      blocked: true,
+      reason:
+        "constraint (enforce: hook): pattern does not compile ((unclosed); fix the constraint",
+    });
     expect(logs.length).toBe(1);
   });
 
-  test("matches case-insensitively like the old grep -iE hook", () => {
+  test("matches case-insensitively like grep -iE", () => {
     const v = checkGuards(
       "Bash",
       { command: "cat SRC/LEGACY/a" },
       [{ pattern: "src/legacy/", reason: "legacy" }],
     );
     expect(v.blocked).toBe(true);
+  });
+
+  test("quoting in the command does not dodge a constraint pattern", () => {
+    const v = checkGuards(
+      "Bash",
+      { command: 'rm -rf src/"legacy"/x' },
+      [{ pattern: "src/legacy/", reason: "no legacy" }],
+    );
+    expect(v.blocked).toBe(true);
+  });
+
+  test("POSIX character classes match like the ERE contract", () => {
+    const patterns = [{ pattern: "rm[[:space:]]+-rf", reason: "no rm -rf" }];
+    expect(
+      checkGuards("Bash", { command: "rm  -rf src/x" }, patterns).blocked,
+    ).toBe(true);
+    expect(
+      checkGuards("Bash", { command: "rm src/x" }, patterns).blocked,
+    ).toBe(false);
+    expect(posixClassesToJs("a[[:digit:][:upper:]]b")).toBe("a[0-9A-Z]b");
+    // unknown classes are not rewritten; checkGuards fails closed on them
+    // instead of letting JS reinterpret the brackets as another set
+    expect(posixClassesToJs("[[:nope:]]")).toBe("[[:nope:]]");
+    const v = checkGuards("Bash", { command: "echo hi" }, [
+      { pattern: "[[:nope:]]", reason: "x" },
+    ]);
+    expect(v.blocked).toBe(true);
+    if (v.blocked) {
+      expect(v.reason).toContain("does not compile");
+    }
   });
 });
 

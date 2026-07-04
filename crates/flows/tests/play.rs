@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,6 +8,7 @@ use jaum_adapters::Git;
 use jaum_core::{Status, Store, Task};
 use jaum_flows::play::{
     GuardSpec, HookGuard, Play, build_prompt, guard_spec, merge_disallowed, reinjection_text,
+    repo_map_text,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -74,7 +76,7 @@ fn build_prompt_includes_objective_context_and_constraints() {
 
 #[test]
 fn guard_spec_blocks_merge_and_injects_constraints() {
-    let g = guard_spec(&task(), "");
+    let g = guard_spec(&task(), "", &HashMap::new());
     assert!(g.disallowed_tools.iter().any(|t| t.contains("git merge")));
     assert!(g.disallowed_tools.iter().any(|t| t.contains("gh pr merge")));
     assert_eq!(g.disallowed_tools, merge_disallowed());
@@ -84,8 +86,29 @@ fn guard_spec_blocks_merge_and_injects_constraints() {
 }
 
 #[test]
+fn guard_spec_embeds_the_repo_map_in_the_system_prompt() {
+    let repos = HashMap::from([
+        ("myorg/repo".to_string(), PathBuf::from("/code/repo")),
+        ("myorg/other".to_string(), PathBuf::from("/code/other")),
+    ]);
+    let g = guard_spec(&task(), "", &repos);
+    let map = repo_map_text(&task(), &repos);
+    assert!(g.system_prompt_append.ends_with(&map));
+    // sorted by slug; the task-linked repo carries its branch
+    let other = map.find("myorg/other: /code/other").unwrap();
+    let linked = map
+        .find("myorg/repo: /code/repo (this task, branch feat/task-001)")
+        .unwrap();
+    assert!(other < linked);
+    // no repos mapped: no empty section is appended
+    assert_eq!(repo_map_text(&task(), &HashMap::new()), "");
+    let bare = guard_spec(&task(), "", &HashMap::new());
+    assert!(!bare.system_prompt_append.contains("Repository map"));
+}
+
+#[test]
 fn guard_spec_derives_one_pattern_per_hook_constraint() {
-    let g = guard_spec(&task(), "");
+    let g = guard_spec(&task(), "", &HashMap::new());
     assert_eq!(
         g.guard_patterns,
         vec![
@@ -196,7 +219,7 @@ fn launch_creates_worktree_marks_wip_and_returns_the_guarded_turn() {
     );
     assert_eq!(
         launch.guards,
-        guard_spec(&fx.store.get("TASK-001").unwrap(), "")
+        guard_spec(&fx.store.get("TASK-001").unwrap(), "", &fx.repos)
     );
 
     play.cleanup("TASK-001", &launch.worktrees).unwrap();

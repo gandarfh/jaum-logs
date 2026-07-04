@@ -48,7 +48,10 @@ export function runSidecar(proc: SidecarProcess): { closed: Promise<void> } {
   delete proc.env.ANTHROPIC_API_KEY;
   delete proc.env.ANTHROPIC_AUTH_TOKEN;
 
+  // The channel secret must not be visible to the agent the guards contain:
+  // the claude subprocess (and every tool it runs) inherits this env.
   const secret = proc.env.SIDECAR_HMAC_SECRET || undefined;
+  delete proc.env.SIDECAR_HMAC_SECRET;
 
   function send(event: Event): void {
     proc.output.write(encodeLine(event, secret) + "\n");

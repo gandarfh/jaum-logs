@@ -20,6 +20,40 @@ const MERGE_RE = new RegExp(
   "i",
 );
 
+// Shell quoting must not hide a guarded token: `git "merge"` or `git mer\ge`
+// reach git as plain `merge` after the shell strips quotes and escapes, so
+// every guard also runs against the stripped text.
+function stripShellQuoting(command: string): string {
+  return command.replace(/["'\\]/g, "");
+}
+
+// Constraint patterns follow the POSIX ERE dialect (the documented contract
+// of `Constraint.pattern`); JS RegExp does not know POSIX classes and either
+// fails to compile or silently matches a different set, so the standard
+// classes are translated before compiling.
+const POSIX_CLASSES: Record<string, string> = {
+  "[:alnum:]": "0-9A-Za-z",
+  "[:alpha:]": "A-Za-z",
+  "[:blank:]": " \\t",
+  "[:cntrl:]": "\\x00-\\x1f\\x7f",
+  "[:digit:]": "0-9",
+  "[:graph:]": "!-~",
+  "[:lower:]": "a-z",
+  "[:print:]": " -~",
+  "[:punct:]": "!-/:-@\\[-`{-~",
+  "[:space:]": " \\t\\r\\n\\v\\f",
+  "[:upper:]": "A-Z",
+  "[:word:]": "0-9A-Za-z_",
+  "[:xdigit:]": "0-9A-Fa-f",
+};
+
+export function posixClassesToJs(pattern: string): string {
+  return pattern.replace(
+    /\[:(?:alnum|alpha|blank|cntrl|digit|graph|lower|print|punct|space|upper|word|xdigit):\]/g,
+    (cls) => POSIX_CLASSES[cls] ?? cls,
+  );
+}
+
 // Input fields that carry the target a pattern is matched against: command
 // for Bash, paths for the file tools.
 const TARGET_FIELDS = ["command", "file_path", "path", "notebook_path"];
@@ -43,23 +77,37 @@ export function checkGuards(
   log: (msg: string) => void = () => {},
 ): GuardVerdict {
   const target = guardTarget(input);
-  if (toolName === "Bash" && MERGE_RE.test(target)) {
+  const stripped = stripShellQuoting(target);
+  if (toolName === "Bash" && (MERGE_RE.test(target) || MERGE_RE.test(stripped))) {
     return {
       blocked: true,
       reason: "merge blocked by the tool (PR-only; merge is your command)",
     };
   }
   for (const { pattern, reason } of patterns) {
-    let re: RegExp;
-    try {
-      re = new RegExp(pattern, "i");
-    } catch {
-      // Fail-open on an uncompilable pattern: blocking every tool over one
-      // bad constraint regex would brick the session instead of one rule.
-      log(`skipping invalid guard pattern: ${pattern}`);
-      continue;
+    const translated = posixClassesToJs(pattern);
+    let re: RegExp | null = null;
+    // A leftover [:name:] is a POSIX class this table does not know: JS
+    // would compile it as an ordinary character class and silently match
+    // a different set, so it is treated as uncompilable.
+    if (!/\[:[a-z]+:\]/i.test(translated)) {
+      try {
+        re = new RegExp(translated, "i");
+      } catch {
+        re = null;
+      }
     }
-    if (target !== "" && re.test(target)) {
+    if (re === null) {
+      // enforce: hook is a hard guarantee: an unusable pattern fails
+      // closed. A loudly blocked session gets its constraint fixed; a
+      // silently skipped one ships the violation.
+      log(`guard pattern does not compile, failing closed: ${pattern}`);
+      return {
+        blocked: true,
+        reason: `constraint (enforce: hook): pattern does not compile (${pattern}); fix the constraint`,
+      };
+    }
+    if (target !== "" && (re.test(target) || re.test(stripped))) {
       return { blocked: true, reason: `constraint (enforce: hook): ${reason}` };
     }
   }

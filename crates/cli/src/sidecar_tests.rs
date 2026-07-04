@@ -597,6 +597,24 @@ fn key_and_hmac_variables_never_reach_the_sidecar() {
 }
 
 #[test]
+fn send_does_not_block_when_the_sidecar_stops_reading() {
+    // Stub that never reads stdin: with a direct blocking write, one turn
+    // larger than the pipe buffer would freeze the caller forever.
+    let path = std::env::temp_dir().join(format!("jaum-sidecar-noread-{}.js", std::process::id()));
+    fs::write(&path, "setTimeout(() => process.exit(0), 30000);\n").unwrap();
+    let mut client = SidecarClient::spawn("node", &path, None).unwrap();
+    let big = "x".repeat(4 * 1024 * 1024);
+    let started = std::time::Instant::now();
+    let _rx = client.chat(turn("req-big", &big)).expect("queued send");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "send blocked on a full pipe"
+    );
+    client.kill();
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn kill_makes_the_client_dead_and_sends_fail() {
     let mut client = spawn_stub();
     assert!(client.is_alive());

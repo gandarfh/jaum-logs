@@ -657,9 +657,11 @@ pub struct App {
     /// In-flight permission requests waiting for a decision.
     pub permissions: PermissionTracker,
     /// When true, permission requests wait for a client decision (denied by
-    /// default after the timeout). While no client can answer (the structured
-    /// chat panel is pending), the daemon routes the request into the log and
-    /// auto-allows: the mechanical guards already ran in the sidecar.
+    /// default after the timeout). SECURITY, deliberate and temporary: while
+    /// no client surface can answer a prompt, this stays false and the daemon
+    /// logs the request and auto-allows it, trusting only the mechanical
+    /// guards that already ran in the sidecar. Flipping it on is the whole
+    /// switch to interactive approvals once a client can present them.
     pub route_permissions: bool,
 
     /// Binaries used by background jobs (their threads build their own adapters);
@@ -825,8 +827,8 @@ impl App {
         e
     }
 
-    /// Relaunches claude with `--resume` for the record, per kind (PTY kinds:
-    /// review and setup migrate to the sidecar in a later phase).
+    /// Relaunches claude with `--resume` for the record, per kind. Review and
+    /// setup still run on the PTY executor; only play is sidecar-backed.
     fn resume_session(&self, rec: &SessionRecord) -> Result<Session> {
         match rec.kind {
             SessionKind::Play => unreachable!("play resumes over the sidecar"),
@@ -1431,6 +1433,7 @@ impl App {
         let mut to_track: Vec<(String, String)> = Vec::new();
         let mut to_send: Vec<(usize, String)> = Vec::new();
         let mut to_unregister: Vec<String> = Vec::new();
+        let mut to_drop_perms: Vec<(usize, String)> = Vec::new();
         let mut changed = false;
 
         for idx in 0..self.sessions.len() {
@@ -1497,7 +1500,9 @@ impl App {
             }
             if disconnected {
                 // The sidecar died (or was restarted) mid-turn: the failure
-                // must be visible in the log and in the panel.
+                // must be visible in the log and in the panel, and any routed
+                // permission still pending belongs to a turn that no longer
+                // exists (its deadline must not block the session later).
                 let event = SessionEvent::Error {
                     category: "sidecar".into(),
                     message: "sidecar disconnected before the turn finished".into(),
@@ -1506,6 +1511,7 @@ impl App {
                     let _ = chat.log.append(&event);
                 }
                 e.render_event(&event);
+                to_drop_perms.push((idx, e.claude_session_id.clone()));
             }
             let chat = e.chat.as_mut().expect("drained a chat session");
             if turn_done {
@@ -1546,6 +1552,23 @@ impl App {
         }
         for (session_id, permission_id) in to_track {
             self.permissions.track(&session_id, &permission_id);
+        }
+        for (idx, session_id) in to_drop_perms {
+            for pending in self.permissions.clear_session(&session_id) {
+                // No response goes to the sidecar (it is gone); the log still
+                // records the resolution so a replay never shows it pending.
+                let event = SessionEvent::PermissionDecision {
+                    permission_id: pending.permission_id,
+                    behavior: "deny".into(),
+                    message: Some("sidecar disconnected before a decision".into()),
+                };
+                if let Some(e) = self.sessions.get_mut(idx) {
+                    if let Some(chat) = &e.chat {
+                        let _ = chat.log.append(&event);
+                    }
+                    e.render_event(&event);
+                }
+            }
         }
         for (idx, text) in to_send {
             if let Err(e) = self.send_chat_turn(idx, text) {
@@ -2561,6 +2584,9 @@ impl App {
             .and_then(|e| e.chat.as_mut())
             .and_then(|chat| {
                 chat.rx = None;
+                // a queued follow-up must not fire after the user gave up on
+                // the turn it was waiting for
+                chat.queued.clear();
                 chat.request_id.take()
             });
         let dropped = self.permissions.clear_session(&session_id);

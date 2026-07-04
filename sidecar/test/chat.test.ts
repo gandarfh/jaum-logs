@@ -485,6 +485,33 @@ describe("canUseTool", () => {
     });
     expect(sidecar.pendingPermissionCount()).toBe(0);
   });
+
+  test("a turn that ends with a pending permission does not leak it", async () => {
+    // The query fires a permission request mid-stream and then ends without
+    // the abort signal ever firing (like a stream that dies on an error).
+    const sent: Event[] = [];
+    const queryFn: QueryFn = (params) => ({
+      interrupt: async () => {},
+      async *[Symbol.asyncIterator]() {
+        const canUseTool = params.options["canUseTool"] as (
+          t: string,
+          i: Record<string, unknown>,
+          o: { signal: AbortSignal },
+        ) => Promise<unknown>;
+        void canUseTool(
+          "Write",
+          { file_path: "/tmp/x" },
+          { signal: new AbortController().signal },
+        );
+        await Bun.sleep(0);
+        yield { type: "result", subtype: "success" } as SdkMessageLike;
+      },
+    });
+    const sidecar = createSidecar({ queryFn, send: (e) => sent.push(e) });
+    await sidecar.handleChat(chatCommand());
+    expect(sent.some((e) => e.type === "permission_request")).toBe(true);
+    expect(sidecar.pendingPermissionCount()).toBe(0);
+  });
 });
 
 describe("abort and ping", () => {

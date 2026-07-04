@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -273,7 +273,11 @@ fn append_diag(path: Option<&Path>, line: &str) {
 /// process (sessions survive: the log and the claude session id are on disk).
 pub struct SidecarClient {
     child: Child,
-    stdin: Arc<Mutex<ChildStdin>>,
+    /// Queue to the dedicated stdin writer thread. The daemon thread never
+    /// writes to the pipe itself: a hung sidecar with a full pipe (64KB)
+    /// would freeze the whole TUI and starve the very health check that
+    /// kills hung processes.
+    writer: Sender<String>,
     router: Router,
     pongs: Receiver<()>,
 }
@@ -303,6 +307,23 @@ impl SidecarClient {
 
         let router: Router = Arc::new(Mutex::new(HashMap::new()));
         let (pong_tx, pongs) = channel::<()>();
+
+        // Writer thread: commands queue in memory and this thread absorbs
+        // the pipe blocking. It exits on the first write error (dead or
+        // hung-then-killed process), which makes later sends fail fast.
+        let (writer, write_rx) = channel::<String>();
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            while let Ok(line) = write_rx.recv() {
+                if stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         let reader_router = router.clone();
         let stdout_diag = diag.clone();
@@ -345,21 +366,20 @@ impl SidecarClient {
 
         Ok(Self {
             child,
-            stdin: Arc::new(Mutex::new(stdin)),
+            writer,
             router,
             pongs,
         })
     }
 
-    /// Writes one command as a JSONL line.
+    /// Queues one command as a JSONL line. Never blocks on the pipe; fails
+    /// once the writer thread died (the process is gone or was killed).
     pub fn send(&self, cmd: &SidecarCommand) -> Result<()> {
         let mut line = serde_json::to_string(cmd).context("serializing sidecar command")?;
         line.push('\n');
-        let mut stdin = self.stdin.lock().unwrap();
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-            .context("writing to the sidecar stdin")
+        self.writer
+            .send(line)
+            .map_err(|_| anyhow::anyhow!("sidecar stdin writer is gone (process died)"))
     }
 
     /// Registers a receiver for a request's events and sends the turn.

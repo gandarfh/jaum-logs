@@ -111,6 +111,8 @@ describe("runSidecar", () => {
   test("with a secret, only signed lines are accepted and output is enveloped", async () => {
     const secret = "s3cret";
     const loop = startLoop({ SIDECAR_HMAC_SECRET: secret });
+    // the secret never reaches the claude subprocess environment
+    expect(loop.env.SIDECAR_HMAC_SECRET).toBeUndefined();
     // plain command: rejected
     loop.input.write('{"type":"ping"}\n');
     await settle();

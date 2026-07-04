@@ -2487,10 +2487,21 @@ fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
 
     app.play_selected();
     assert!(drain_until(&mut app, |a| a.permissions.pending_count() == 1));
+    // a follow-up queued behind the aborted turn must die with it
+    app.sessions[0]
+        .chat
+        .as_mut()
+        .unwrap()
+        .queued
+        .push_back("stale follow-up".into());
 
     app.abort_chat_turn(0);
     assert_eq!(app.permissions.pending_count(), 0);
     assert!(!app.sessions[0].turn_active());
+    assert!(
+        app.sessions[0].chat.as_ref().unwrap().queued.is_empty(),
+        "queued turn survived the abort"
+    );
     let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
     assert!(
         events.iter().any(|e| matches!(
@@ -2633,9 +2644,18 @@ fn disconnected_sidecar_surfaces_an_error_and_closes_the_turn() {
         chat.request_id = Some("s-disc#1".into());
         chat.turn_seq = 1;
     }
+    // a routed permission still pending when the sidecar dies belongs to a
+    // turn that no longer exists
+    app.route_permissions = true;
+    app.permissions.track("s-disc", "perm-disc");
     drop(tx);
     app.drain_sidecar();
     assert!(!app.sessions[idx].turn_active(), "turn must close");
+    assert_eq!(
+        app.permissions.pending_count(),
+        0,
+        "pending permission survived the disconnect"
+    );
     let events = app.sessions[idx].chat.as_ref().unwrap().log.replay();
     assert!(
         events.iter().any(|e| matches!(
@@ -2645,6 +2665,17 @@ fn disconnected_sidecar_surfaces_an_error_and_closes_the_turn() {
         )),
         "disconnect not logged: {events:?}"
     );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PermissionDecision { permission_id, behavior, .. }
+                if permission_id == "perm-disc" && behavior == "deny"
+        )),
+        "dropped permission not resolved in the log: {events:?}"
+    );
+    // no deadline left behind: nothing expires and the session stays unblocked
+    app.tick_permissions();
+    assert!(!app.sessions[idx].blocked);
     let text = app.sessions[idx].parser.screen().contents();
     assert!(text.contains("disconnected"), "not rendered: {text}");
 }
@@ -2718,15 +2749,15 @@ fn render_event_clips_multibyte_text_without_panicking() {
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
     let idx = open_sidecar_play(&mut app, "TASK-001", "s-clip", dir.path());
     // 200 two-byte chars: a byte-indexed truncate(120) would split one in half
-    let acentos = "çãé".repeat(70);
+    let accented = "çãé".repeat(70);
     app.sessions[idx].render_event(&SessionEvent::ToolUse {
         tool_use_id: "tu".into(),
         name: "Bash".into(),
-        input: serde_json::json!({ "command": acentos.clone() }),
+        input: serde_json::json!({ "command": accented.clone() }),
     });
     app.sessions[idx].render_event(&SessionEvent::ToolResult {
         tool_use_id: "tu".into(),
-        content: vec![ContentBlock::Text { text: acentos }],
+        content: vec![ContentBlock::Text { text: accented }],
         is_error: false,
     });
     assert!(
