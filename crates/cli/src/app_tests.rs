@@ -1861,14 +1861,76 @@ fn write_task_with_pr(backlog: &Path, id: &str, status: &str, pr: u64, reviewed:
 }
 
 fn green(sha: &str) -> Vec<(String, PrCi)> {
+    obs(MergeState::Open, CiStatus::Passing, sha)
+}
+
+fn obs(state: MergeState, checks: CiStatus, sha: &str) -> Vec<(String, PrCi)> {
     vec![(
         "org/x".to_string(),
         PrCi {
-            state: MergeState::Open,
-            checks: CiStatus::Passing,
+            state,
+            checks,
             head_sha: sha.to_string(),
         },
     )]
+}
+
+#[test]
+fn review_progress_reflects_pending_reviews_from_ci_observations() {
+    let dir = TmpDir::new("review-progress");
+    let backlog = dir.path().join(".backlog");
+    // already reviewed the commit "old"
+    write_task_with_pr(&backlog, "TASK-001", "wip", 7, Some("old"));
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir.path(), Vec::new())],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    let task = app.store.get("TASK-001").unwrap();
+
+    // no observation yet: nothing to show
+    assert_eq!(app.review_progress(&task), None);
+
+    // a new commit "new" whose CI is still running: re-review pending
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Pending, "new"),
+    );
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::AwaitingCi));
+
+    // the new commit's CI went red: review blocked
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Failing, "new"),
+    );
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::CiFailed));
+
+    // new commit green: transient (the trigger fires next tick), so no glyph
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Passing, "new"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // CI still on the reviewed commit "old": nothing pending
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Open, CiStatus::Pending, "old"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // a merged/closed PR never shows a pending review
+    app.ci_obs.insert(
+        "TASK-001".into(),
+        obs(MergeState::Merged, CiStatus::Pending, "new"),
+    );
+    assert_eq!(app.review_progress(&task), None);
+
+    // a running capture wins over everything
+    let (_tx, mut rjob) = fake_job(JobKind::Review);
+    rjob.task = Some("TASK-001".into());
+    app.job = Some(rjob);
+    assert_eq!(app.review_progress(&task), Some(ReviewProgress::Running));
 }
 
 #[test]

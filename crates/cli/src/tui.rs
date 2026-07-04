@@ -14,7 +14,9 @@ use ratatui::widgets::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, BoardCard, BoardFocus, InputKind, SessionKind, Tab, status_label};
+use crate::app::{
+    App, BoardCard, BoardFocus, InputKind, ReviewProgress, SessionKind, Tab, status_label,
+};
 use jaum_flows::review::{ConstraintResult, ConstraintVerdict};
 
 // --- theme (Charm/Lipgloss aesthetic) -------------------------------------
@@ -1194,9 +1196,14 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
         {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
-        // review capture in flight on this task (auto-dispatched on green CI).
-        if app.reviewing_task_id() == Some(t.id.as_str()) {
-            spans.push(Span::styled(" ⟳", Style::default().fg(Color::Yellow)));
+        // review progress: running now, or a newer commit still owing a review.
+        if let Some(p) = app.review_progress(t) {
+            let (g, c) = match p {
+                ReviewProgress::Running => ("⟳", Color::Yellow),
+                ReviewProgress::AwaitingCi => ("◷", Color::Yellow),
+                ReviewProgress::CiFailed => ("✗", Color::Red),
+            };
+            spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
         }
         // review verdict (if there's a `.review.md`).
         if let Some(n) = app.review_badge(&t.id) {
@@ -1301,6 +1308,18 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
                     format!("review DIRTY · {} pending", r.unmet_count()),
                     Color::Red,
                 )
+            };
+            detail(
+                &mut items,
+                Line::from(Span::styled(txt, Style::default().fg(c))),
+            );
+        }
+        // pending/in-flight review state (new commit not yet reviewed).
+        if let Some(p) = app.review_progress(t) {
+            let (txt, c) = match p {
+                ReviewProgress::Running => ("⟳ review running", Color::Yellow),
+                ReviewProgress::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
+                ReviewProgress::CiFailed => ("✗ review blocked · CI red", Color::Red),
             };
             detail(
                 &mut items,

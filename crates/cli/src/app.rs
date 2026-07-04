@@ -91,6 +91,19 @@ pub enum BoardCard {
     Verdict,
 }
 
+/// In-flight/pending state of a task's automatic review, for the board glyphs.
+/// The persisted verdict badge (`✓`/`⚑`) covers the "done" case; this covers
+/// what is still owed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReviewProgress {
+    /// Capture running right now.
+    Running,
+    /// A new commit exists whose CI is still running; re-review is due once green.
+    AwaitingCi,
+    /// A new commit exists whose CI is red; the review stays blocked until it passes.
+    CiFailed,
+}
+
 /// Canonical display order of statuses on the board.
 pub const STATUS_ORDER: [Status; 5] = [
     Status::Wip,
@@ -512,6 +525,9 @@ pub struct App {
     ci_poll_running: Arc<AtomicBool>,
     ci_tx: Sender<(String, Vec<(Repo, PrCi)>)>,
     ci_rx: Receiver<(String, Vec<(Repo, PrCi)>)>,
+    /// Latest CI observation per task id, kept so the board can show whether a
+    /// re-review is still pending (new commit whose CI is running or red).
+    pub(crate) ci_obs: HashMap<String, Vec<(Repo, PrCi)>>,
 
     /// Binaries used by background jobs (their threads build their own adapters);
     /// tests point these at stubs so no real `claude`/`gh` is ever spawned.
@@ -584,6 +600,7 @@ impl App {
             ci_poll_running: Arc::new(AtomicBool::new(false)),
             ci_tx,
             ci_rx,
+            ci_obs: HashMap::new(),
             claude_bin: "claude".into(),
             gh_bin: "gh".into(),
             load_config: GlobalConfig::load,
@@ -1735,14 +1752,16 @@ impl App {
         });
     }
 
-    /// Applies the CI observations queued by the polling thread: re-reads the
-    /// task from disk (the source of truth may have moved), asks the trigger and
+    /// Applies the CI observations queued by the polling thread: records the
+    /// observation (for the board's pending-review indicator), re-reads the task
+    /// from disk (the source of truth may have moved), asks the trigger and
     /// starts the review job with the SHAs to stamp on success. With a job
     /// already running the observation is dropped — the SHA stays unmarked, so
     /// the next poll re-arms the trigger.
     fn drain_ci_results(&mut self) {
         let pending: Vec<(String, Vec<(Repo, PrCi)>)> = self.ci_rx.try_iter().collect();
         for (id, observed) in pending {
+            self.ci_obs.insert(id.clone(), observed.clone());
             let Ok(task) = self.store.get(&id) else {
                 continue;
             };
@@ -1753,6 +1772,47 @@ impl App {
                 continue;
             }
             self.start_review_job_for(&id, markers);
+        }
+    }
+
+    /// Review status of a task, for the board indicators. Derived from the last
+    /// CI observation vs the persisted `reviewed_sha`: a re-review is due when an
+    /// open PR's head moved past what was reviewed. `Running` wins (a capture is
+    /// in flight); otherwise the aggregate CI of the unreviewed heads decides.
+    pub fn review_progress(&self, task: &Task) -> Option<ReviewProgress> {
+        if self.reviewing_task_id() == Some(task.id.as_str()) {
+            return Some(ReviewProgress::Running);
+        }
+        let obs = self.ci_obs.get(&task.id)?;
+        let mut pending_review = false;
+        let mut agg = CiStatus::Passing;
+        for link in &task.prs {
+            let Some((_, ci)) = obs.iter().find(|(repo, _)| *repo == link.repo) else {
+                continue;
+            };
+            if ci.state != MergeState::Open || ci.head_sha.is_empty() {
+                continue;
+            }
+            // this PR carries a commit that has not been reviewed yet.
+            if link.reviewed_sha.as_deref() != Some(ci.head_sha.as_str()) {
+                pending_review = true;
+                agg = match (agg, ci.checks) {
+                    (_, CiStatus::Failing) | (CiStatus::Failing, _) => CiStatus::Failing,
+                    (_, CiStatus::Pending) | (CiStatus::Pending, _) => CiStatus::Pending,
+                    (_, CiStatus::Unknown) | (CiStatus::Unknown, _) => CiStatus::Unknown,
+                    _ => CiStatus::Passing,
+                };
+            }
+        }
+        if !pending_review {
+            return None;
+        }
+        match agg {
+            // all green: the trigger fires on the next tick, so this is transient.
+            CiStatus::Passing => None,
+            CiStatus::Pending => Some(ReviewProgress::AwaitingCi),
+            CiStatus::Failing => Some(ReviewProgress::CiFailed),
+            CiStatus::Unknown | CiStatus::NoChecks => None,
         }
     }
 

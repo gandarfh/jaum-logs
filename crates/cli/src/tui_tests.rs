@@ -259,6 +259,39 @@ fn board_shows_in_flight_review_glyph_and_statusline() {
 }
 
 #[test]
+fn board_shows_pending_re_review_glyphs_from_ci() {
+    use jaum_core::{CiStatus, MergeState, PrCi};
+    let obs = |checks| {
+        vec![(
+            "org/x".to_string(),
+            PrCi {
+                state: MergeState::Open,
+                checks,
+                head_sha: "newsha".to_string(),
+            },
+        )]
+    };
+
+    // CI still running on a new commit: hourglass + "re-review pending" line
+    let dir = TmpDir::new("pending-ci");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+    a.ci_obs.insert("TASK-001".into(), obs(CiStatus::Pending));
+    a.selected = 0;
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("◷"), "awaiting-CI glyph in the list");
+    assert!(s.contains("re-review pending"), "detail line");
+
+    // CI red on the new commit: cross + "blocked" line
+    let dir2 = TmpDir::new("failed-ci");
+    let mut b = app_with(&dir2, &[("TASK-001", "wip")]);
+    b.ci_obs.insert("TASK-001".into(), obs(CiStatus::Failing));
+    b.selected = 0;
+    let s = buf_string(&draw(&b, 120, 40));
+    assert!(s.contains("✗"), "CI-failed glyph in the list");
+    assert!(s.contains("review blocked"), "detail line");
+}
+
+#[test]
 fn board_project_row_shows_setup_state() {
     let dir = TmpDir::new("projrow");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
