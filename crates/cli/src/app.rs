@@ -1283,7 +1283,11 @@ impl App {
     /// `claude -p` that writes the `.review.md` (findings + verdicts). Dispatched
     /// by the CI watch when every PR check turns green — not by a keybinding —
     /// so it does NOT steal the screen with the job overlay.
-    pub fn start_review_job_for(&mut self, id: &str) {
+    ///
+    /// `markers` are the `(repo, head_sha)` to stamp as reviewed, applied ONLY
+    /// after the capture succeeds: a failed run (claude error, rate limit) leaves
+    /// the SHA unmarked so the next poll retries instead of skipping it forever.
+    pub fn start_review_job_for(&mut self, id: &str, markers: Vec<(Repo, String)>) {
         let id = id.to_string();
         if self.job_running() {
             return;
@@ -1315,11 +1319,15 @@ impl App {
                 let _ = tx.send(JobMsg::Log(s.to_string()));
             };
             let done = match review.capture_logged(&id, &mut on_line) {
-                Ok(r) => Ok(format!(
-                    "review {id}: {} finding(s), {}",
-                    r.findings.len(),
-                    if r.is_clean() { "CLEAN" } else { "DIRTY" }
-                )),
+                Ok(r) => {
+                    // stamp the reviewed SHAs only now that the report exists.
+                    let _ = store.mark_reviewed(&id, &markers);
+                    Ok(format!(
+                        "review {id}: {} finding(s), {}",
+                        r.findings.len(),
+                        if r.is_clean() { "CLEAN" } else { "DIRTY" }
+                    ))
+                }
                 Err(e) => Err(format!("review failed: {e}")),
             };
             let _ = tx.send(JobMsg::Done(done));
@@ -1706,10 +1714,10 @@ impl App {
     }
 
     /// Applies the CI observations queued by the polling thread: re-reads the
-    /// task from disk (the source of truth may have moved), asks the trigger,
-    /// persists the reviewed SHAs and starts the review job. With a job already
-    /// running the observation is dropped — the SHA stays unmarked, so the next
-    /// poll re-arms the trigger.
+    /// task from disk (the source of truth may have moved), asks the trigger and
+    /// starts the review job with the SHAs to stamp on success. With a job
+    /// already running the observation is dropped — the SHA stays unmarked, so
+    /// the next poll re-arms the trigger.
     fn drain_ci_results(&mut self) {
         let pending: Vec<(String, Vec<(Repo, PrCi)>)> = self.ci_rx.try_iter().collect();
         for (id, observed) in pending {
@@ -1722,9 +1730,7 @@ impl App {
             if self.job_running() {
                 continue;
             }
-            if self.store.mark_reviewed(&id, &markers).is_ok() {
-                self.start_review_job_for(&id);
-            }
+            self.start_review_job_for(&id, markers);
         }
     }
 

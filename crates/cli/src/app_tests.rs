@@ -1249,7 +1249,7 @@ fn job_running_and_guards_against_concurrent_jobs() {
     assert!(app.job_running());
 
     app.start_ingest_job();
-    app.start_review_job_for("TASK-001");
+    app.start_review_job_for("TASK-001", Vec::new());
     app.start_parallel_job();
     app.start_capture_job("hint");
     app.start_init_job("/tmp");
@@ -1300,7 +1300,7 @@ fn review_job_writes_report_without_opening_the_overlay() {
         dir.path(),
         r#"{"findings":[{"file":"src/x.rs","message":"bug","severity":"major"}],"constraints":[],"criteria":[]}"#,
     );
-    app.start_review_job_for("TASK-001");
+    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
     assert!(
         !app.job_overlay,
         "auto-dispatched review must not steal the screen"
@@ -1317,20 +1317,29 @@ fn review_job_writes_report_without_opening_the_overlay() {
         app.status_msg
     );
     assert!(dir.path().join(".backlog/TASK-001.review.md").exists());
+    // the reviewed SHA is stamped only after a successful capture
+    assert_eq!(
+        app.store.get("TASK-001").unwrap().prs[0]
+            .reviewed_sha
+            .as_deref(),
+        Some("abc")
+    );
 }
 
 #[test]
-fn review_job_reports_failure() {
+fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
     let dir = TmpDir::new("job-review-err");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     app.claude_bin = "false".into();
-    app.start_review_job_for("TASK-001");
+    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
     wait_job(&mut app);
     assert!(
         app.status_msg.contains("review failed"),
         "{}",
         app.status_msg
     );
+    // a failed capture must NOT stamp the SHA: the next poll has to retry it
+    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
 }
 
 #[test]
@@ -1873,19 +1882,20 @@ fn ci_green_observation_marks_sha_and_starts_review_once() {
         r#"{"findings":[],"constraints":[],"criteria":[]}"#,
     );
 
-    // green CI on a fresh SHA: marker persisted + review job dispatched
+    // green CI on a fresh SHA: review job dispatched; the SHA is stamped only
+    // once the capture succeeds (background thread).
     app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
     app.tick_ci_watch();
+    assert!(app.job_running(), "review job should have started");
+    assert_eq!(app.job.as_ref().unwrap().title, "review TASK-001");
+    wait_job(&mut app);
+    assert!(backlog.join("TASK-001.review.md").exists());
     assert_eq!(
         app.store.get("TASK-001").unwrap().prs[0]
             .reviewed_sha
             .as_deref(),
         Some("abc")
     );
-    assert!(app.job_running(), "review job should have started");
-    assert_eq!(app.job.as_ref().unwrap().title, "review TASK-001");
-    wait_job(&mut app);
-    assert!(backlog.join("TASK-001.review.md").exists());
 
     // same SHA green again: idempotent, no new job
     app.job = None;
@@ -1897,13 +1907,13 @@ fn ci_green_observation_marks_sha_and_starts_review_once() {
     app.ci_tx.send(("TASK-001".into(), green("def"))).unwrap();
     app.tick_ci_watch();
     assert!(app.job_running(), "new commit should re-trigger");
+    wait_job(&mut app);
     assert_eq!(
         app.store.get("TASK-001").unwrap().prs[0]
             .reviewed_sha
             .as_deref(),
         Some("def")
     );
-    wait_job(&mut app);
 }
 
 #[test]
@@ -2003,18 +2013,19 @@ fn tick_ci_watch_polls_gh_and_dispatches_the_review() {
     assert!(!app.ci_poll_running.load(Ordering::Relaxed));
 
     // due: polls gh in background, then the next tick applies the observation
+    // and dispatches the review; the SHA is stamped once the capture succeeds.
     app.last_ci_poll = past(121);
     app.tick_ci_watch();
     wait_until(|| !app.ci_poll_running.load(Ordering::Relaxed));
     app.tick_ci_watch();
+    wait_job(&mut app);
+    assert!(backlog.join("TASK-001.review.md").exists());
     assert_eq!(
         app.store.get("TASK-001").unwrap().prs[0]
             .reviewed_sha
             .as_deref(),
         Some("abc")
     );
-    wait_job(&mut app);
-    assert!(backlog.join("TASK-001.review.md").exists());
 }
 
 #[test]
