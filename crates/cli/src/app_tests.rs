@@ -194,6 +194,7 @@ fn fake_job(kind: JobKind) -> (std::sync::mpsc::Sender<JobMsg>, Job) {
         Job {
             kind,
             title: "fake".into(),
+            task: None,
             logs: Vec::new(),
             rx,
             finished: false,
@@ -1340,6 +1341,35 @@ fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
     );
     // a failed capture must NOT stamp the SHA: the next poll has to retry it
     assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
+}
+
+#[test]
+fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
+    let dir = TmpDir::new("reviewing-id");
+    let mut app = app_with(&dir, &[("TASK-001", "review")]);
+    assert_eq!(app.reviewing_task_id(), None);
+
+    // a non-review job in flight does not count as a running review
+    let (_tx, mut job) = fake_job(JobKind::Ingest);
+    job.task = Some("TASK-001".into());
+    app.job = Some(job);
+    assert_eq!(app.reviewing_task_id(), None);
+
+    // a running review job exposes its task and shows in the statusline
+    let (_tx2, mut rjob) = fake_job(JobKind::Review);
+    rjob.task = Some("TASK-001".into());
+    app.job = Some(rjob);
+    app.selected = 0;
+    assert_eq!(app.reviewing_task_id(), Some("TASK-001"));
+    assert!(
+        app.statusline().contains("⟳ review TASK-001"),
+        "{}",
+        app.statusline()
+    );
+
+    // a finished review no longer counts
+    app.job.as_mut().unwrap().finished = true;
+    assert_eq!(app.reviewing_task_id(), None);
 }
 
 #[test]

@@ -389,6 +389,9 @@ pub enum JobMsg {
 pub struct Job {
     pub kind: JobKind,
     pub title: String,
+    /// Task the job acts on, when it has one (review). Drives the in-flight
+    /// indicators (statusline + list glyph) while it runs.
+    pub task: Option<String>,
     pub logs: Vec<String>,
     pub rx: Receiver<JobMsg>,
     pub finished: bool,
@@ -1012,6 +1015,10 @@ impl App {
     /// Status line: tab/focus, selected task/branch and navigation hint.
     pub fn statusline(&self) -> String {
         let mut s = format!("[{}]", self.tab.title());
+        // in-flight review first, so the narrow footer never truncates it away.
+        if let Some(id) = self.reviewing_task_id() {
+            s.push_str(&format!(" ⟳ review {id}"));
+        }
         if self.project_selected {
             s.push_str(" · project");
         } else if let Some(t) = self.selected_task() {
@@ -1231,6 +1238,16 @@ impl App {
         self.job.as_ref().is_some_and(|j| !j.finished)
     }
 
+    /// Task whose review capture is running right now, if any. Drives the
+    /// in-flight indicators (statusline label + list glyph) so the background
+    /// auto-review isn't invisible once the "review started" toast fades.
+    pub fn reviewing_task_id(&self) -> Option<&str> {
+        self.job
+            .as_ref()
+            .filter(|j| !j.finished && j.kind == JobKind::Review)
+            .and_then(|j| j.task.as_deref())
+    }
+
     /// Path of the current project's `.backlog/` (to build a Store in the thread).
     fn backlog_path(&self) -> PathBuf {
         self.config
@@ -1253,6 +1270,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Ingest,
             title: "ingest".into(),
+            task: None,
             logs: vec!["scanning docs and repos with claude…".into()],
             rx,
             finished: false,
@@ -1302,6 +1320,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Review,
             title: format!("review {id}"),
+            task: Some(id.clone()),
             logs: vec![format!("reviewing {id} against docs and constraints…")],
             rx,
             finished: false,
@@ -1349,6 +1368,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Parallel,
             title: "parallelism analysis".into(),
+            task: None,
             logs: vec!["analyzing which tasks collide…".into()],
             rx,
             finished: false,
@@ -1397,6 +1417,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Capture,
             title: "capture (claude investigates)".into(),
+            task: None,
             logs: vec![format!("investigating: {hint}")],
             rx,
             finished: false,
@@ -1438,6 +1459,7 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Init,
             title: format!("init {path}"),
+            task: None,
             logs: vec![format!("detecting repos in {}", root.display())],
             rx,
             finished: false,

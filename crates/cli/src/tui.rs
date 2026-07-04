@@ -1194,6 +1194,10 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
         {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
+        // review capture in flight on this task (auto-dispatched on green CI).
+        if app.reviewing_task_id() == Some(t.id.as_str()) {
+            spans.push(Span::styled(" ⟳", Style::default().fg(Color::Yellow)));
+        }
         // review verdict (if there's a `.review.md`).
         if let Some(n) = app.review_badge(&t.id) {
             let (g, c) = if n == 0 {

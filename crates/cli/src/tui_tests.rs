@@ -137,6 +137,7 @@ fn fake_job(
         app::Job {
             kind: app::JobKind::Ingest,
             title: "ingest".into(),
+            task: None,
             logs: logs.iter().map(|s| s.to_string()).collect(),
             rx,
             finished,
@@ -236,6 +237,25 @@ fn board_shows_review_badges_and_parallel_glyphs() {
     let s = buf_string(&draw(&a, 120, 40));
     assert!(s.contains("‖ parallel ok"));
     assert!(s.contains("review CLEAN"));
+}
+
+#[test]
+fn board_shows_in_flight_review_glyph_and_statusline() {
+    let dir = TmpDir::new("reviewing-glyph");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+    // no review running: no spinner anywhere
+    assert!(!buf_string(&draw(&a, 120, 40)).contains("⟳"));
+
+    // a review capture in flight on TASK-001: spinner in the list + statusline
+    let (job, _tx) = fake_job(&[], false, true, 0);
+    let mut job = job;
+    job.kind = app::JobKind::Review;
+    job.task = Some("TASK-001".into());
+    a.job = Some(job);
+    a.selected = 0;
+    let s = buf_string(&draw(&a, 120, 40));
+    assert!(s.contains("⟳"), "in-flight review spinner in the list");
+    assert!(s.contains("⟳ review TASK-001"), "statusline indicator");
 }
 
 #[test]
