@@ -42,7 +42,7 @@ struct TaskViewsTests {
         renderInWindow(TaskDetailView(session: session, task: task))
         session.selectedTab = .session("jaum-42-play")
         renderInWindow(TaskDetailView(session: session, task: task))
-        session.selectedTab = .session("desconhecida")
+        session.selectedTab = .session("unknown")
         renderInWindow(TaskDetailView(session: session, task: task))
     }
 
@@ -58,7 +58,7 @@ struct TaskViewsTests {
     @Test func detailTabViewHandlesEmptyAndFilledTasks() async {
         let session = await startedSession()
         renderInWindow(DetailTabView(task: sampleTask(session, "jaum-42")))
-        renderInWindow(DetailTabView(task: TaskItem(id: "vazia", title: "Sem nada")))
+        renderInWindow(DetailTabView(task: TaskItem(id: "empty", title: "Nothing here")))
     }
 
     @Test func reviewSessionViewHandlesEmptyFindings() async {
@@ -75,7 +75,7 @@ struct TaskViewsTests {
         renderInWindow(
             SessionTabButton(title: "Play", isLive: true, isSelected: true) {})
         renderInWindow(
-            SessionTabButton(title: "Detalhe", isLive: false, isSelected: false) {})
+            SessionTabButton(title: "Detail", isLive: false, isSelected: false) {})
     }
 
     @Test func sessionTabButtonActionSwitchesTheTab() async {

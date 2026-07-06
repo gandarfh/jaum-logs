@@ -124,6 +124,18 @@ public actor PreviewBackend: SessionBackend {
         Date(timeIntervalSince1970: 1_700_000_000 + Double(counter))
     }
 
+    /// Projects derived from the scripted tasks so counts always match the
+    /// list, in first-seen order.
+    private static func projects(from tasks: [TaskItem]) -> [ProjectItem] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for task in tasks where !task.projectID.isEmpty {
+            if counts[task.projectID] == nil { order.append(task.projectID) }
+            counts[task.projectID, default: 0] += 1
+        }
+        return order.map { ProjectItem(id: $0, name: $0, taskCount: counts[$0] ?? 0) }
+    }
+
     private static let initialEvents: [SessionEvent] = {
         let base = Date(timeIntervalSince1970: 1_700_000_000)
         let reviewedAt = Date().addingTimeInterval(-5 * 60)
@@ -172,6 +184,7 @@ public actor PreviewBackend: SessionBackend {
         let tasks: [TaskItem] = [
             TaskItem(
                 id: "jaum-42",
+                projectID: "jaum-logs",
                 title: "Domain protocol + headless daemon",
                 status: .wip,
                 objective:
@@ -203,6 +216,7 @@ public actor PreviewBackend: SessionBackend {
             ),
             TaskItem(
                 id: "jaum-39",
+                projectID: "jaum-logs",
                 title: "Migrate the TUI client to the snapshot",
                 status: .wip,
                 objective: "The TUI client renders from the DomainSnapshot.",
@@ -216,6 +230,7 @@ public actor PreviewBackend: SessionBackend {
             ),
             TaskItem(
                 id: "jaum-31",
+                projectID: "jaum-logs",
                 title: "TCP transport + token",
                 status: .review,
                 objective: "Remote connection with a pairing token over Headscale.",
@@ -252,6 +267,7 @@ public actor PreviewBackend: SessionBackend {
             ),
             TaskItem(
                 id: "jaum-28",
+                projectID: "jaum-logs",
                 title: "macOS app MVP",
                 status: .ready,
                 objective: "macOS target with a window invisible to screen sharing.",
@@ -260,17 +276,34 @@ public actor PreviewBackend: SessionBackend {
             ),
             TaskItem(
                 id: "jaum-44",
+                projectID: "jaum-logs",
                 title: "Embedded editor",
                 status: .backlog,
                 objective: "In-app file editing replacing the external $EDITOR."
             ),
             TaskItem(
                 id: "jaum-8",
+                projectID: "jaum-logs",
                 title: "Golden protocol fixtures",
                 status: .merged,
                 prCount: 1
             ),
+            TaskItem(
+                id: "site-3",
+                projectID: "new-site",
+                title: "Landing hero section",
+                status: .wip,
+                objective: "Build the hero with the approved copy and art."
+            ),
+            TaskItem(
+                id: "site-1",
+                projectID: "new-site",
+                title: "Set up the static pipeline",
+                status: .merged,
+                prCount: 1
+            ),
         ]
+        let projects = PreviewBackend.projects(from: tasks)
         let docs: [DocItem] = [
             DocItem(
                 name: "conventions.md",
@@ -310,10 +343,7 @@ public actor PreviewBackend: SessionBackend {
             .latency(milliseconds: 26),
             .latency(milliseconds: 21),
             .latency(milliseconds: 24),
-            .projects([
-                ProjectItem(id: "jaum-logs", name: "jaum-logs", taskCount: tasks.count),
-                ProjectItem(id: "new-site", name: "new-site", taskCount: 9),
-            ]),
+            .projects(projects),
             .docs(docs),
             .tasks(tasks),
             // The daemon's CI watch finishes jaum-39's capture: the spinner

@@ -41,18 +41,26 @@ public final class SessionModel {
         self.backend = backend
     }
 
-    /// Task list sections in the fixed status order, honoring the sidebar
-    /// status filter; empty groups are omitted like in the approved mock.
+    /// Tasks in the selected project (all of them when nothing is selected).
+    private var projectTasks: [TaskItem] {
+        guard let projectID = selectedProjectID else { return tasks }
+        return tasks.filter { $0.projectID == projectID }
+    }
+
+    /// Task list sections in the fixed status order, scoped to the selected
+    /// project and honoring the sidebar status filter; empty groups are
+    /// omitted like in the approved mock.
     public var sections: [TaskListSection] {
-        TaskStatus.allCases.compactMap { status in
+        let scoped = projectTasks
+        return TaskStatus.allCases.compactMap { status in
             if let filter = statusFilter, filter != status { return nil }
-            let grouped = tasks.filter { $0.status == status }
+            let grouped = scoped.filter { $0.status == status }
             return grouped.isEmpty ? nil : TaskListSection(status: status, tasks: grouped)
         }
     }
 
     public func taskCount(for status: TaskStatus) -> Int {
-        tasks.filter { $0.status == status }.count
+        projectTasks.filter { $0.status == status }.count
     }
 
     public var selectedTask: TaskItem? {

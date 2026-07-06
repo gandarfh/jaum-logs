@@ -20,7 +20,7 @@ struct ChatAndRootTests {
         let session = await startedSession()
         session.sendImage(
             data: Data([1, 2, 3]),
-            filename: "quebrada.png",
+            filename: "broken.png",
             taskID: "jaum-42",
             sessionID: "jaum-42-play"
         )
@@ -38,7 +38,7 @@ struct ChatAndRootTests {
     }
 
     @Test func chatBlockViewRendersEveryCase() {
-        renderInWindow(ChatBlockView(block: .markdown("**oi**")))
+        renderInWindow(ChatBlockView(block: .markdown("**hi**")))
         renderInWindow(ChatBlockView(block: .image(Data([0, 1]))))
         renderInWindow(ChatBlockView(block: .tool(ToolCall(id: "t", name: "Read", summary: "x"))))
     }
@@ -47,12 +47,12 @@ struct ChatAndRootTests {
         let base = Date(timeIntervalSince1970: 0)
         renderInWindow(
             ChatEntryView(
-                message: ChatMessage(id: "u", role: .user, blocks: [.markdown("oi")], timestamp: base)
+                message: ChatMessage(id: "u", role: .user, blocks: [.markdown("hi")], timestamp: base)
             ))
         renderInWindow(
             ChatEntryView(
                 message: ChatMessage(
-                    id: "a", role: .assistant, blocks: [.markdown("resposta")], timestamp: base)
+                    id: "a", role: .assistant, blocks: [.markdown("reply")], timestamp: base)
             ))
     }
 
@@ -124,7 +124,7 @@ struct ChatAndRootTests {
         session.selectedTaskID = "jaum-31"
         renderInWindow(TasksSplitView(session: session))
         renderInWindow(DocsSplitView(session: session))
-        session.selectedDocID = "arquitetura.md"
+        session.selectedDocID = "architecture.md"
         renderInWindow(DocsSplitView(session: session))
     }
 
@@ -143,7 +143,7 @@ struct ChatAndRootTests {
 
     @Test func editorSheetRendersAndSyncsContent() async {
         let terminal = TerminalModel(transport: UnixSocketTransport(path: "/tmp/jaum-nada.sock"))
-        let request = EditorRequest(path: "/tmp/conventions.md", content: "# titulo")
+        let request = EditorRequest(path: "/tmp/conventions.md", content: "# title")
         renderInWindow(EditorSheet(terminal: terminal, request: request))
     }
 

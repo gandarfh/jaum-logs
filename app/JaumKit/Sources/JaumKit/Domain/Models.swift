@@ -144,6 +144,7 @@ public struct TaskSession: Identifiable, Hashable, Sendable {
 /// A backlog task as shown in the grouped list and the detail pane.
 public struct TaskItem: Identifiable, Hashable, Sendable {
     public var id: String
+    public var projectID: String
     public var title: String
     public var kind: TaskKind
     public var status: TaskStatus
@@ -160,6 +161,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
 
     public init(
         id: String,
+        projectID: String = "",
         title: String,
         kind: TaskKind = .implementation,
         status: TaskStatus = .backlog,
@@ -175,6 +177,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         reviewState: ReviewState = .idle
     ) {
         self.id = id
+        self.projectID = projectID
         self.title = title
         self.kind = kind
         self.status = status

@@ -26,7 +26,7 @@ struct HandlerTests {
 
     @Test func editorSaveFailureKeepsTheSheetAlive() async {
         let model = terminal()
-        let request = EditorRequest(path: "/diretorio/inexistente/arquivo.md", content: "x")
+        let request = EditorRequest(path: "/nonexistent/directory/file.md", content: "x")
         model.editorRequest = request
         let sheet = EditorSheet(terminal: model, request: request)
         await sheet.save()
@@ -43,7 +43,7 @@ struct HandlerTests {
     }
 
     @Test func editorSheetRendersErrorAndFileName() {
-        let request = EditorRequest(path: "/tmp/pasta/conventions.md", content: "corpo")
+        let request = EditorRequest(path: "/tmp/folder/conventions.md", content: "body")
         let sheet = EditorSheet(
             terminal: terminal(), request: request, saveError: "no disk space")
         #expect(sheet.fileName == "conventions.md")

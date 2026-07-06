@@ -9,9 +9,12 @@ public enum WireFraming {
 
     public static func encode(_ message: some Encodable) throws -> Data {
         let payload = try JSONEncoder().encode(message)
-        // Mirror the Rust side (u32::try_from at protocol.rs): a payload past
-        // 4 GiB is an error, not a silent overflow.
-        guard let length = UInt32(exactly: payload.count) else {
+        // Cap the encoder at the same limit the decoder enforces: a frame this
+        // client could not itself decode must never go on the wire (and this
+        // also mirrors the Rust u32::try_from guard against overflow).
+        guard let length = UInt32(exactly: payload.count),
+            length <= WireFrameDecoder.maxFrameLength
+        else {
             throw EncodeError.payloadTooLarge(count: payload.count)
         }
         var data = Data(count: 4)

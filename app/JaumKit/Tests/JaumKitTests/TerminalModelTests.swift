@@ -72,7 +72,7 @@ struct TerminalModelTests {
             .appendingPathComponent("jaumkit-unreadable-\(getpid())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let file = dir.appendingPathComponent("secreto.md")
+        let file = dir.appendingPathComponent("secret.md")
         try "content".write(to: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
 

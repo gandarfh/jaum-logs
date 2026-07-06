@@ -17,9 +17,36 @@ struct SessionModelTests {
         #expect(model.connection == .connected)
         #expect(model.projects.count == 2)
         #expect(model.selectedProjectID == "jaum-logs")
-        #expect(model.tasks.count == 6)
+        #expect(model.tasks.count == 8)
         #expect(model.docs.count == 2)
         #expect(model.pendingPermission?.toolName == "git push")
+    }
+
+    @Test func projectCountsMatchTheScriptedTasks() async {
+        let model = await startedModel()
+        let counts = Dictionary(
+            uniqueKeysWithValues: model.projects.map { ($0.id, $0.taskCount) })
+        #expect(counts["jaum-logs"] == 6)
+        #expect(counts["new-site"] == 2)
+        for project in model.projects {
+            let actual = model.tasks.filter { $0.projectID == project.id }.count
+            #expect(project.taskCount == actual)
+        }
+    }
+
+    @Test func selectingAProjectScopesTheSectionsAndCounts() async {
+        let model = await startedModel()
+        // Defaults to the first project.
+        #expect(model.sections.flatMap { $0.tasks }.allSatisfy { $0.projectID == "jaum-logs" })
+        #expect(model.taskCount(for: .wip) == 2)
+
+        model.selectedProjectID = "new-site"
+        let scoped = model.sections.flatMap { $0.tasks }
+        #expect(!scoped.isEmpty)
+        #expect(scoped.allSatisfy { $0.projectID == "new-site" })
+        #expect(scoped.map(\.id).sorted() == ["site-1", "site-3"])
+        #expect(model.taskCount(for: .wip) == 1)
+        #expect(model.taskCount(for: .merged) == 1)
     }
 
     /// A duplicated stream would double every echo; probing with a real
@@ -233,9 +260,9 @@ struct SessionModelTests {
     @Test func chatWithKnownIDReplacesTheMessage() async {
         let model = await startedModel()
         var updated = playMessages(model)[0]
-        updated.blocks = [.markdown("editado")]
+        updated.blocks = [.markdown("edited")]
         model.apply(.chat(taskID: "jaum-42", sessionID: "jaum-42-play", message: updated))
-        #expect(playMessages(model)[0].blocks == [.markdown("editado")])
+        #expect(playMessages(model)[0].blocks == [.markdown("edited")])
     }
 
     @Test func approvingResolvesThePermissionAndLogsAToolCard() async {

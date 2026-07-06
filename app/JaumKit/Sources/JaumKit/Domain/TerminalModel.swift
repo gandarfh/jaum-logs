@@ -92,6 +92,11 @@ public final class TerminalModel {
         editorRequest = nil
     }
 
+    /// Cancel answers with the same `EditorDone` as save, only without a write.
+    /// The current wire protocol has no distinct cancel signal, so the daemon
+    /// cannot tell the two apart; it just resumes. If cancel ever needs to
+    /// differ (for example, to skip a post-edit reload), the protocol needs a
+    /// dedicated message.
     public func cancelEditing() async throws {
         guard editorRequest != nil else { return }
         try await client.send(.editorDone)
