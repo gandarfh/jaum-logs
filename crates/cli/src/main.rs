@@ -4,6 +4,8 @@ mod config;
 mod daemon;
 mod keymap;
 mod protocol;
+mod session_event;
+mod sidecar;
 mod snapshot;
 mod tui;
 

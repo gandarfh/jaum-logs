@@ -121,6 +121,9 @@ impl Daemon {
     /// panel is a placeholder on socket clients.
     pub fn tick(&mut self) {
         self.app.drain_pty();
+        self.app.drain_sidecar();
+        self.app.tick_permissions();
+        self.app.tick_sidecar_health();
         self.app.poll_job();
         self.app.tick_reload();
         self.app.tick_pr_sync();

@@ -1,0 +1,20 @@
+{
+  "allowed_tools": [
+    "Read"
+  ],
+  "content": [
+    {
+      "text": "follow up",
+      "type": "text"
+    }
+  ],
+  "cwd": null,
+  "disallowed_tools": [],
+  "guard_patterns": [],
+  "model": null,
+  "request_id": "11111111-1111-4111-8111-111111111111#2",
+  "resume": "11111111-1111-4111-8111-111111111111",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "system_prompt_append": null,
+  "type": "chat"
+}

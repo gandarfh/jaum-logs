@@ -1,0 +1,5 @@
+{
+  "category": "permission_timeout",
+  "message": "permission perm_1 denied by default after the deadline",
+  "type": "error"
+}

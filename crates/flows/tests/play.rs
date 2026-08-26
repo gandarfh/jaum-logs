@@ -1,13 +1,15 @@
-use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use jaum_adapters::{ClaudeExecutor, ExecFlags, Executor, Git, Session};
+use jaum_adapters::Git;
 use jaum_core::{Status, Store, Task};
-use jaum_flows::play::{Play, build_prompt, guard_flags, pretool_hook_script, reinjection_text};
+use jaum_flows::play::{
+    GuardSpec, HookGuard, Play, build_prompt, guard_spec, merge_disallowed, reinjection_text,
+    repo_map_text,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -73,14 +75,54 @@ fn build_prompt_includes_objective_context_and_constraints() {
 }
 
 #[test]
-fn guard_flags_blocks_merge_and_injects_constraints() {
-    let f = guard_flags(&task(), "");
-    assert!(f.disallowed_tools.iter().any(|t| t.contains("git merge")));
-    assert!(f.disallowed_tools.iter().any(|t| t.contains("gh pr merge")));
-    let sys = f.append_system_prompt.unwrap();
-    assert!(sys.contains("do not touch src/legacy/"));
-    assert!(sys.contains("keep API stable"));
-    assert_eq!(f.model.as_deref(), Some(jaum_flows::AGENT_MODEL));
+fn guard_spec_blocks_merge_and_injects_constraints() {
+    let g = guard_spec(&task(), "", &HashMap::new());
+    assert!(g.disallowed_tools.iter().any(|t| t.contains("git merge")));
+    assert!(g.disallowed_tools.iter().any(|t| t.contains("gh pr merge")));
+    assert_eq!(g.disallowed_tools, merge_disallowed());
+    assert!(g.system_prompt_append.contains("do not touch src/legacy/"));
+    assert!(g.system_prompt_append.contains("keep API stable"));
+    assert_eq!(g.model, jaum_flows::AGENT_MODEL);
+}
+
+#[test]
+fn guard_spec_embeds_the_repo_map_in_the_system_prompt() {
+    let repos = HashMap::from([
+        ("myorg/repo".to_string(), PathBuf::from("/code/repo")),
+        ("myorg/other".to_string(), PathBuf::from("/code/other")),
+    ]);
+    let g = guard_spec(&task(), "", &repos);
+    let map = repo_map_text(&task(), &repos);
+    assert!(g.system_prompt_append.ends_with(&map));
+    // sorted by slug; the task-linked repo carries its branch
+    let other = map.find("myorg/other: /code/other").unwrap();
+    let linked = map
+        .find("myorg/repo: /code/repo (this task, branch feat/task-001)")
+        .unwrap();
+    assert!(other < linked);
+    // no repos mapped: no empty section is appended
+    assert_eq!(repo_map_text(&task(), &HashMap::new()), "");
+    let bare = guard_spec(&task(), "", &HashMap::new());
+    assert!(!bare.system_prompt_append.contains("Repository map"));
+}
+
+#[test]
+fn guard_spec_derives_one_pattern_per_hook_constraint() {
+    let g = guard_spec(&task(), "", &HashMap::new());
+    assert_eq!(
+        g.guard_patterns,
+        vec![
+            HookGuard {
+                pattern: "src/legacy/".into(),
+                reason: "do not touch src/legacy/".into(),
+            },
+            HookGuard {
+                pattern: "migration".into(),
+                reason: "do not run migration".into(),
+            },
+        ],
+        "enforce: review constraints never become guard patterns"
+    );
 }
 
 #[test]
@@ -109,118 +151,7 @@ fn reinjection_defines_repo_output_conventions() {
     assert!(t.contains("Generated with Claude Code")); // forbids AI attribution
 }
 
-#[test]
-fn settings_disables_ai_co_author() {
-    use std::path::Path;
-    let s = jaum_flows::play::settings_json(Path::new("/p/pre.sh"), Path::new("/p/re.txt"));
-    assert_eq!(s["includeCoAuthoredBy"], serde_json::json!(false));
-}
-
-// --- real PreToolUse hook execution ---------------------------------------
-
-fn run_hook(script: &str, stdin_json: &str) -> String {
-    let dir = TmpDir::new("hook");
-    let path = dir.0.join("pretool.sh");
-    fs::write(&path, script).unwrap();
-    let mut child = Command::new("bash")
-        .arg(&path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin_json.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-#[test]
-fn hook_blocks_merge_always() {
-    let s = pretool_hook_script(&task());
-    let out = run_hook(
-        &s,
-        r#"{"tool_name":"Bash","tool_input":{"command":"git merge main"}}"#,
-    );
-    assert!(
-        out.contains("\"permissionDecision\":\"deny\""),
-        "out: {out}"
-    );
-    assert!(out.contains("merge"));
-}
-
-#[test]
-fn hook_blocks_path_constraint() {
-    let s = pretool_hook_script(&task());
-    let out = run_hook(
-        &s,
-        r#"{"tool_name":"Edit","tool_input":{"file_path":"src/legacy/foo.rs"}}"#,
-    );
-    assert!(out.contains("deny"), "should block src/legacy/; out: {out}");
-    assert!(out.contains("src/legacy/"));
-}
-
-#[test]
-fn hook_blocks_keyword_constraint() {
-    let s = pretool_hook_script(&task());
-    let out = run_hook(
-        &s,
-        r#"{"tool_name":"Bash","tool_input":{"command":"npm run migration"}}"#,
-    );
-    assert!(out.contains("deny"), "should block migration; out: {out}");
-}
-
-#[test]
-fn hook_allows_action_that_matches_no_constraint() {
-    let s = pretool_hook_script(&task());
-    let out = run_hook(
-        &s,
-        r#"{"tool_name":"Edit","tool_input":{"file_path":"src/main.rs"}}"#,
-    );
-    assert!(
-        out.trim().is_empty(),
-        "should not block src/main.rs; out: {out}"
-    );
-}
-
-#[test]
-fn hook_does_not_block_enforce_review_constraint() {
-    // "keep API stable" is enforce: review -> hook does NOT catch it (detected in review)
-    let s = pretool_hook_script(&task());
-    let out = run_hook(
-        &s,
-        r#"{"tool_name":"Edit","tool_input":{"file_path":"src/api.rs"}}"#,
-    );
-    assert!(
-        out.trim().is_empty(),
-        "review constraints don't go through the hook; out: {out}"
-    );
-}
-
-// --- start (fake executor over `cat` + git fixture) -----------------------
-
-struct Rec {
-    calls: RefCell<Vec<(String, ExecFlags)>>,
-}
-impl Executor for Rec {
-    fn spawn_oneshot(&self, prompt: &str, flags: &ExecFlags) -> anyhow::Result<String> {
-        self.calls
-            .borrow_mut()
-            .push((prompt.to_string(), flags.clone()));
-        Ok(String::new())
-    }
-    fn spawn_interactive(&self, prompt: &str, flags: &ExecFlags) -> anyhow::Result<Session> {
-        self.calls
-            .borrow_mut()
-            .push((prompt.to_string(), flags.clone()));
-        // real session over `cat`, just to return a valid Session
-        ClaudeExecutor::with_bin("cat").spawn_interactive("", &ExecFlags::default())
-    }
-}
+// --- launch (git fixture, no executor) -------------------------------------
 
 fn git_init(repo: &Path) {
     let run = |args: &[&str]| {
@@ -243,113 +174,70 @@ fn git_init(repo: &Path) {
     run(&["commit", "-qm", "init"]);
 }
 
-#[test]
-fn start_creates_worktree_installs_hooks_and_marks_wip() {
-    let root = TmpDir::new("start");
+struct LaunchFixture {
+    _root: TmpDir,
+    store: Store,
+    repos: std::collections::HashMap<String, PathBuf>,
+}
+
+fn launch_fixture(tag: &str, task_md: &str) -> LaunchFixture {
+    let root = TmpDir::new(tag);
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
-    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
+    fs::write(backlog.join("TASK-001.md"), task_md).unwrap();
     let repos_root = root.0.join("repos");
     git_init(&repos_root.join("repo"));
-
-    let store = Store::new(&backlog);
-    let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
-    let repos =
-        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    let play = Play::new(
-        &store,
-        &git,
-        &rec,
-        root.0.join(".jaum"),
-        repos,
-        String::new(),
-    );
-
-    let mut ps = play.start("TASK-001").unwrap();
-
-    // worktree and artifacts on disk
-    assert!(ps.worktrees[0].1.exists(), "worktree not created");
-    assert!(ps.artifacts.settings_path.exists());
-    assert!(ps.artifacts.pretool_path.exists());
-
-    // status became wip
-    assert_eq!(store.get("TASK-001").unwrap().status, Status::Wip);
-
-    // correct flags and prompt reached the executor
-    let calls = rec.calls.borrow();
-    let (prompt, flags) = &calls[0];
-    assert!(prompt.contains("Implement an open enum"));
-    assert!(
-        flags
-            .disallowed_tools
-            .iter()
-            .any(|t| t.contains("git merge"))
-    );
-    assert!(flags.settings.is_some(), "hook (--settings) not applied");
-    assert!(flags.cwd.is_some(), "cwd (worktree) not applied");
-    drop(calls);
-
-    play.stop(&mut ps).unwrap();
-    assert!(!ps.worktrees[0].1.exists(), "worktree not removed on stop");
+    LaunchFixture {
+        store: Store::new(&backlog),
+        repos: std::collections::HashMap::from([(
+            "myorg/repo".to_string(),
+            repos_root.join("repo"),
+        )]),
+        _root: root,
+    }
 }
 
 #[test]
-fn start_injects_session_id_and_resume_resumes_without_prompt() {
-    let root = TmpDir::new("resume");
-    let backlog = root.0.join(".backlog");
-    fs::create_dir_all(&backlog).unwrap();
-    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
-    let repos_root = root.0.join("repos");
-    git_init(&repos_root.join("repo"));
-
-    let store = Store::new(&backlog);
+fn launch_creates_worktree_marks_wip_and_returns_the_guarded_turn() {
+    let fx = launch_fixture("launch", FIXTURE);
     let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
-    let repos =
-        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
-    let play = Play::new(
-        &store,
-        &git,
-        &rec,
-        root.0.join(".jaum"),
-        repos,
-        String::new(),
+    let play = Play::new(&fx.store, &git, fx.repos.clone(), String::new());
+
+    let launch = play.launch("TASK-001").unwrap();
+
+    assert!(launch.worktrees[0].1.exists(), "worktree not created");
+    assert_eq!(launch.cwd, launch.worktrees[0].1);
+    assert_eq!(fx.store.get("TASK-001").unwrap().status, Status::Wip);
+    assert!(launch.prompt.contains("Implement an open enum"));
+    assert_eq!(launch.id, "TASK-001");
+    // the session uuid keys the log and the claude session id
+    assert_eq!(
+        uuid::Uuid::parse_str(&launch.session_id)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert_eq!(
+        launch.guards,
+        guard_spec(&fx.store.get("TASK-001").unwrap(), "", &fx.repos)
     );
 
-    let ps = play.start("TASK-001").unwrap();
-    // start injects --session-id with the returned uuid (not --resume)
-    {
-        let calls = rec.calls.borrow();
-        let (_prompt, flags) = &calls[0];
-        assert_eq!(
-            flags.session_id.as_deref(),
-            Some(ps.claude_session_id.as_str())
-        );
-        assert!(flags.resume.is_none(), "start must not use --resume");
-    }
+    play.cleanup("TASK-001", &launch.worktrees).unwrap();
+    assert!(
+        !launch.worktrees[0].1.exists(),
+        "worktree not removed on cleanup"
+    );
+}
 
-    // resume injects --resume <uuid>, no positional prompt, no session_id
-    let cwd = ps.worktrees[0].1.clone();
-    let _ = play
-        .resume("TASK-001", &ps.claude_session_id, &cwd)
-        .unwrap();
-    let calls = rec.calls.borrow();
-    let (prompt, flags) = calls.last().unwrap();
-    assert!(
-        prompt.is_empty(),
-        "resume does not resend the initial prompt"
-    );
-    assert_eq!(flags.resume.as_deref(), Some(ps.claude_session_id.as_str()));
-    assert!(
-        flags.session_id.is_none(),
-        "resume does not use --session-id"
-    );
-    assert!(flags.cwd.is_some(), "resume keeps the worktree cwd");
+#[test]
+fn resume_spec_recomputes_the_guards_from_disk() {
+    let fx = launch_fixture("respec", FIXTURE);
+    let git = Git::new();
+    let play = Play::new(&fx.store, &git, fx.repos.clone(), "- new convention");
+    let spec: GuardSpec = play.resume_spec("TASK-001").unwrap();
+    assert!(spec.system_prompt_append.contains("new convention"));
+    assert!(spec.system_prompt_append.contains("do not run migration"));
+    assert!(!spec.guard_patterns.is_empty());
 }
 
 const FIXTURE_BARE: &str = r#"---
@@ -381,7 +269,7 @@ fn build_prompt_without_refs_or_constraints_skips_sections() {
 }
 
 #[test]
-fn start_rejects_task_without_linked_prs() {
+fn launch_rejects_task_without_linked_prs() {
     let root = TmpDir::new("noprs");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
@@ -389,19 +277,14 @@ fn start_rejects_task_without_linked_prs() {
 
     let store = Store::new(&backlog);
     let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
     let play = Play::new(
         &store,
         &git,
-        &rec,
-        root.0.join(".jaum"),
         std::collections::HashMap::new(),
         String::new(),
     );
 
-    let err = match play.start("TASK-002") {
+    let err = match play.launch("TASK-002") {
         Ok(_) => panic!("should reject a task without prs"),
         Err(e) => e,
     };
@@ -409,73 +292,60 @@ fn start_rejects_task_without_linked_prs() {
 }
 
 #[test]
-fn reinject_pushes_constraints_into_the_session() {
-    use std::io::Read as _;
-    let root = TmpDir::new("reinject");
+fn launch_rejects_spike() {
+    let root = TmpDir::new("spike");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
-    fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
-    let repos_root = root.0.join("repos");
-    git_init(&repos_root.join("repo"));
+    let spike = FIXTURE.replace("type: impl", "type: spike");
+    fs::write(backlog.join("TASK-001.md"), spike).unwrap();
 
     let store = Store::new(&backlog);
     let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
-    let repos =
-        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
     let play = Play::new(
         &store,
         &git,
-        &rec,
-        root.0.join(".jaum"),
-        repos,
+        std::collections::HashMap::new(),
         String::new(),
     );
 
-    let mut ps = play.start("TASK-001").unwrap();
-    let mut reader = ps.session.reader().unwrap();
-
-    play.reinject(&mut ps).unwrap();
-    ps.session.write_input(&[0x04]).unwrap(); // EOF
-
-    let mut buf = String::new();
-    reader.read_to_string(&mut buf).unwrap();
-    assert!(
-        buf.contains("do not run migration"),
-        "reinject did not inject the constraints:\n{buf}"
-    );
-    play.stop(&mut ps).unwrap();
+    let err = match play.launch("TASK-001") {
+        Ok(_) => panic!("should reject spike"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("spike"));
 }
 
 #[test]
-fn stop_skips_worktree_whose_link_was_removed() {
-    let root = TmpDir::new("stopgone");
+fn launch_rejects_unmapped_repo() {
+    let root = TmpDir::new("unmapped");
     let backlog = root.0.join(".backlog");
     fs::create_dir_all(&backlog).unwrap();
     fs::write(backlog.join("TASK-001.md"), FIXTURE).unwrap();
-    let repos_root = root.0.join("repos");
-    git_init(&repos_root.join("repo"));
 
     let store = Store::new(&backlog);
     let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
-    let repos =
-        std::collections::HashMap::from([("myorg/repo".to_string(), repos_root.join("repo"))]);
     let play = Play::new(
         &store,
         &git,
-        &rec,
-        root.0.join(".jaum"),
-        repos,
+        std::collections::HashMap::new(),
         String::new(),
     );
 
-    let mut ps = play.start("TASK-001").unwrap();
-    // the task loses its prs link before stop: nothing to remove for that repo
+    let err = match play.launch("TASK-001") {
+        Ok(_) => panic!("should reject an unmapped repo"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("not mapped"));
+}
+
+#[test]
+fn cleanup_skips_worktree_whose_link_was_removed() {
+    let fx = launch_fixture("cleanupgone", FIXTURE);
+    let git = Git::new();
+    let play = Play::new(&fx.store, &git, fx.repos.clone(), String::new());
+    let launch = play.launch("TASK-001").unwrap();
+
+    // the task loses its prs link before cleanup: nothing to remove for that repo
     let unlinked = FIXTURE.replace("status: ready", "status: wip");
     let unlinked = unlinked
         .lines()
@@ -487,40 +357,11 @@ fn stop_skips_worktree_whose_link_was_removed() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(backlog.join("TASK-001.md"), unlinked).unwrap();
+    fs::write(fx.store.get("TASK-001").unwrap().path.unwrap(), unlinked).unwrap();
 
-    play.stop(&mut ps).unwrap();
+    play.cleanup("TASK-001", &launch.worktrees).unwrap();
     assert!(
-        ps.worktrees[0].1.exists(),
+        launch.worktrees[0].1.exists(),
         "worktree stays when the link is gone"
     );
-}
-
-#[test]
-fn start_rejects_spike() {
-    let root = TmpDir::new("spike");
-    let backlog = root.0.join(".backlog");
-    fs::create_dir_all(&backlog).unwrap();
-    let spike = FIXTURE.replace("type: impl", "type: spike");
-    fs::write(backlog.join("TASK-001.md"), spike).unwrap();
-
-    let store = Store::new(&backlog);
-    let git = Git::new();
-    let rec = Rec {
-        calls: RefCell::new(Vec::new()),
-    };
-    let play = Play::new(
-        &store,
-        &git,
-        &rec,
-        root.0.join(".jaum"),
-        std::collections::HashMap::new(),
-        String::new(),
-    );
-
-    let err = match play.start("TASK-001") {
-        Ok(_) => panic!("should reject spike"),
-        Err(e) => e,
-    };
-    assert!(err.to_string().contains("spike"));
 }

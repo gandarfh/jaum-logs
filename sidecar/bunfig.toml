@@ -1,0 +1,6 @@
+[test]
+coverage = true
+coverageSkipTestFiles = true
+# The gate itself is enforced from the lcov report (CI and make sidecar-test):
+# bun's inline-table coverageThreshold is inconsistent across versions.
+coverageReporter = ["text", "lcov"]

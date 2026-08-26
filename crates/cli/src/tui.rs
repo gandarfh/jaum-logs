@@ -105,6 +105,9 @@ pub fn run(mut app: App) -> Result<()> {
 fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         app.drain_pty();
+        app.drain_sidecar();
+        app.tick_permissions();
+        app.tick_sidecar_health();
         app.poll_job();
         app.tick_reload();
         app.tick_pr_sync();
