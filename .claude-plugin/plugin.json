@@ -1,0 +1,7 @@
+{
+  "name": "jaum-logs",
+  "description": "Deterministic backlog task creation for jaum-managed projects.",
+  "version": "0.1.0",
+  "author": { "name": "gandarfh" },
+  "repository": "https://github.com/gandarfh/jaum-logs"
+}
