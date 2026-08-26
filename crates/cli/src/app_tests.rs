@@ -209,24 +209,14 @@ fn fake_job(kind: JobKind) -> (std::sync::mpsc::Sender<JobMsg>, Job) {
 #[test]
 fn tab_navigation_and_labels() {
     assert_eq!(Tab::all().len(), 2);
-    assert_eq!(Tab::Board.title(), "Board");
-    assert_eq!(Tab::Docs.title(), "Docs");
     assert_eq!(Tab::Board.index(), 0);
     assert_eq!(Tab::from_index(9), Tab::Docs);
     assert_eq!(Tab::Board.next(), Tab::Docs);
     assert_eq!(Tab::Docs.next(), Tab::Board);
-    assert_eq!(Tab::Board.prev(), Tab::Docs);
-    assert_eq!(Tab::Docs.prev(), Tab::Board);
 }
 
 #[test]
 fn status_labels_and_board_order() {
-    assert_eq!(status_label(Status::Backlog), "backlog");
-    assert_eq!(status_label(Status::Ready), "ready");
-    assert_eq!(status_label(Status::Wip), "wip");
-    assert_eq!(status_label(Status::Review), "review");
-    assert_eq!(status_label(Status::Merged), "merged");
-
     let mk = |id: &str, status: Status| Task {
         id: id.into(),
         task_type: jaum_core::TaskType::Impl,
@@ -491,8 +481,11 @@ fn refresh_clamps_selection_and_docs_cursor() {
 fn refresh_reports_overlap_between_wip_tasks_in_same_repo() {
     let dir = TmpDir::new("overlap");
     let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
-    assert!(!app.overlaps.is_empty());
-    assert!(app.statusline().contains("overlap"));
+    let (a, b, repo) = app.overlaps.first().expect("overlap detected");
+    assert_eq!(
+        (a.as_str(), b.as_str(), repo.as_str()),
+        ("TASK-001", "TASK-002", "org/x")
+    );
 }
 
 #[test]
@@ -825,42 +818,18 @@ fn selection_moves_through_project_row_and_bounds() {
 }
 
 #[test]
-fn review_badge_counts_findings_and_unmet_items() {
+fn load_review_counts_findings_and_unmet_items() {
     let dir = TmpDir::new("badge");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     assert!(app.load_review("TASK-001").is_none());
-    assert!(app.review_badge("TASK-001").is_none());
     fs::write(
         dir.path().join(".backlog/TASK-001.review.md"),
         "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n",
     )
     .unwrap();
     app.refresh().unwrap();
-    assert_eq!(app.review_badge("TASK-001"), Some(2));
-}
-
-#[test]
-fn statusline_reflects_selection_focus_and_tab() {
-    let dir = TmpDir::new("statusline");
-    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
-    let s = app.statusline();
-    assert!(s.contains("[Board]"));
-    assert!(s.contains("TASK-001"));
-    assert!(s.contains("feat/task-001"));
-    assert!(s.contains("focus"));
-
-    app.board_focus = BoardFocus::Cards;
-    assert!(app.statusline().contains("Enter chat"));
-    app.board_focus = BoardFocus::Chat;
-    assert!(app.statusline().contains("Ctrl+G"));
-
-    app.project_selected = true;
-    assert!(app.statusline().contains("· project"));
-
-    app.tab = Tab::Docs;
-    let s = app.statusline();
-    assert!(s.contains("[Docs]"));
-    assert!(!s.contains("focus"));
+    let r = app.load_review("TASK-001").unwrap();
+    assert_eq!(r.findings.len() + r.unmet_count(), 2);
 }
 
 // --- parallelism ----------------------------------------------------------
@@ -1344,7 +1313,7 @@ fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
 }
 
 #[test]
-fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
+fn reviewing_task_id_tracks_the_running_capture() {
     let dir = TmpDir::new("reviewing-id");
     let mut app = app_with(&dir, &[("TASK-001", "review")]);
     assert_eq!(app.reviewing_task_id(), None);
@@ -1355,17 +1324,13 @@ fn reviewing_task_id_tracks_the_running_capture_and_statusline() {
     app.job = Some(job);
     assert_eq!(app.reviewing_task_id(), None);
 
-    // a running review job exposes its task and shows in the statusline
+    // a running review job exposes its task (the snapshot maps it to a
+    // Running review progress, rendered in the statusline; see tui_tests)
     let (_tx2, mut rjob) = fake_job(JobKind::Review);
     rjob.task = Some("TASK-001".into());
     app.job = Some(rjob);
     app.selected = 0;
     assert_eq!(app.reviewing_task_id(), Some("TASK-001"));
-    assert!(
-        app.statusline().contains("⟳ review TASK-001"),
-        "{}",
-        app.statusline()
-    );
 
     // a finished review no longer counts
     app.job.as_mut().unwrap().finished = true;
@@ -1694,13 +1659,19 @@ fn new_task_quick_creates_and_reports_errors() {
 fn input_capture_dispatches_by_kind() {
     let dir = TmpDir::new("input");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
-    app.start_input(InputKind::Defer);
+    app.apply_intent(Intent::StartInput {
+        kind: InputKind::Defer,
+        prefill: String::new(),
+    });
     assert!(matches!(app.input, Some((InputKind::Defer, ref s)) if s.is_empty()));
 
-    app.start_init_input();
+    app.apply_intent(Intent::StartInput {
+        kind: InputKind::InitPath,
+        prefill: "/tmp/somewhere".into(),
+    });
     let (kind, buf) = app.input.clone().unwrap();
     assert!(kind == InputKind::InitPath);
-    assert!(!buf.is_empty());
+    assert_eq!(buf, "/tmp/somewhere");
 
     app.submit_input(InputKind::Defer, "split the migration".into());
     assert!(app.status_msg.contains("deferred"));

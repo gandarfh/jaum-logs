@@ -1,0 +1,23 @@
+{
+  "Pong": {
+    "seq": 7,
+    "status": {
+      "devices": [
+        {
+          "id": 0,
+          "kind": "terminal",
+          "name": "mbp-de-joao",
+          "rtt_ms": 2
+        },
+        {
+          "id": 3,
+          "kind": "iphone",
+          "name": "iphone",
+          "rtt_ms": null
+        }
+      ],
+      "snapshots_per_sec": 2.5,
+      "uptime_ms": 754000
+    }
+  }
+}

@@ -6,15 +6,22 @@ use jaum_core::Status;
 
 // The app/config modules are private to the binary; we re-exercise the pure logic
 // by recompiling them as part of the test crate. (app.rs references
-// `crate::config`, so config must be declared here too.)
+// `crate::config`, `crate::protocol` and `crate::snapshot`, so those must be
+// declared here too.)
 #[path = "../src/app.rs"]
 #[allow(dead_code)]
 mod app;
 #[path = "../src/config.rs"]
 #[allow(dead_code)]
 mod config;
+#[path = "../src/protocol.rs"]
+#[allow(dead_code)]
+mod protocol;
+#[path = "../src/snapshot.rs"]
+#[allow(dead_code)]
+mod snapshot;
 
-use app::{App, STATUS_ORDER, Tab, sort_for_board, status_label};
+use app::{App, STATUS_ORDER, Tab, sort_for_board};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -70,10 +77,7 @@ fn tab_cycles_around() {
 }
 
 #[test]
-fn vim_nav_tab_prev_and_select_first_last() {
-    assert_eq!(Tab::Board.prev(), Tab::Docs);
-    assert_eq!(Tab::Docs.prev(), Tab::Board);
-
+fn vim_nav_select_first_last() {
     let dir = TmpDir::new("vim");
     let mut app = app_with(
         &dir,
@@ -104,7 +108,6 @@ fn sort_for_board_groups_by_canonical_status() {
     let ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["TASK-002", "TASK-003", "TASK-001"]);
     assert_eq!(STATUS_ORDER[0], Status::Wip);
-    assert_eq!(status_label(Status::Wip), "wip");
 }
 
 #[test]
@@ -152,17 +155,6 @@ fn navigation_respects_bounds() {
     assert_eq!(app.selected, 1);
     app.select_next(); // doesn't go past the end
     assert_eq!(app.selected, 1);
-}
-
-#[test]
-fn statusline_shows_tab_and_focus_hint() {
-    let dir = TmpDir::new("status");
-    let app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    let s = app.statusline();
-    assert!(s.contains("[Board]"));
-    // in the Board, the statusline carries the focus navigation hint.
-    assert!(s.contains("focus"));
-    assert!(s.contains("zoom"));
 }
 
 #[test]

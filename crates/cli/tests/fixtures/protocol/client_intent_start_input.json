@@ -1,0 +1,8 @@
+{
+  "Intent": {
+    "StartInput": {
+      "kind": "init_path",
+      "prefill": "/home/u/proj"
+    }
+  }
+}

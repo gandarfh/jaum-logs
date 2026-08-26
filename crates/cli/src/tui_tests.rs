@@ -90,7 +90,16 @@ fn open_cat(a: &mut App, kind: SessionKind, task: Option<&str>, uuid: &str, cwd:
 
 fn draw(a: &App, w: u16, h: u16) -> Terminal<TestBackend> {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| tui::render(f, a)).unwrap();
+    let snap = crate::snapshot::build_snapshot(a);
+    term.draw(|f| tui::render(f, &snap, Some(a))).unwrap();
+    term
+}
+
+/// Renders the way a socket client does: same snapshot, no local `App`.
+fn draw_remote(a: &App, w: u16, h: u16) -> Terminal<TestBackend> {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let snap = crate::snapshot::build_snapshot(a);
+    term.draw(|f| tui::render(f, &snap, None)).unwrap();
     term
 }
 
@@ -527,9 +536,7 @@ fn verdict_panel_renders_clean_report() {
 
 #[test]
 fn verdict_lines_without_review_explains_how_to_run() {
-    let dir = TmpDir::new("verdict-none");
-    let a = app_with(&dir, &[("TASK-001", "wip")]);
-    let lines = tui::verdict_lines(&a, None);
+    let lines = tui::verdict_lines(None);
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter())
@@ -539,24 +546,44 @@ fn verdict_lines_without_review_explains_how_to_run() {
 }
 
 #[test]
-fn card_item_and_render_pty_tolerate_bogus_index() {
+fn session_pane_tolerates_missing_session_and_remote_client() {
     let dir = TmpDir::new("bogus");
     let a = app_with(&dir, &[("TASK-001", "wip")]);
-    // card pointing at a session index that does not exist
-    let item = tui::card_item(&a, BoardCard::Session(42));
-    let list = ratatui::widgets::List::new(vec![item]);
-    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 10, 1));
-    ratatui::widgets::Widget::render(list, Rect::new(0, 0, 10, 1), &mut buf);
-    let row: String = (0..10)
-        .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
-        .collect();
-    assert!(row.contains('?'));
 
-    // render_pty with a missing session falls back to an empty chat panel
+    // local mode with no selected session: empty chat panel, no panic
     let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
-    term.draw(|f| tui::render_pty(f, &a, 99, Rect::new(0, 0, 60, 10), false))
+    term.draw(|f| tui::render_session_pane(f, Some(&a), Rect::new(0, 0, 60, 10), false))
         .unwrap();
     assert!(buf_string(&term).contains("chat"));
+
+    // socket client (no App): explicit placeholder, focused and not
+    let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    term.draw(|f| tui::render_session_pane(f, None, Rect::new(0, 0, 80, 10), true))
+        .unwrap();
+    let s = buf_string(&term);
+    assert!(s.contains("Session panel not available"));
+    assert!(s.contains("Esc back to cards"));
+    let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    term.draw(|f| tui::render_session_pane(f, None, Rect::new(0, 0, 80, 10), false))
+        .unwrap();
+    assert!(buf_string(&term).contains("Session panel not available"));
+}
+
+#[test]
+fn remote_render_shows_placeholder_for_live_session() {
+    let dir = TmpDir::new("remote");
+    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
+    open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u1", &dir);
+    a.sessions[0].parser.process(b"hello-from-pty");
+
+    let s = buf_string(&draw_remote(&a, 120, 40));
+    assert!(
+        !s.contains("hello-from-pty"),
+        "pty content never renders remotely"
+    );
+    assert!(s.contains("Session panel not available"));
+    assert!(s.contains("play"), "session card still listed");
+    a.stop_all_sessions();
 }
 
 // --- render: overlays --------------------------------------------------------
@@ -801,6 +828,48 @@ fn tiny_terminals_render_without_panicking() {
     a.close_detail();
     a.tab = Tab::Docs;
     let _ = draw(&a, 12, 6);
+}
+
+#[test]
+fn statusline_reflects_selection_focus_tab_and_overlap() {
+    let dir = TmpDir::new("statusline");
+    let mut a = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "wip")]);
+    let text = |a: &App| tui::statusline_text(&crate::snapshot::build_snapshot(a));
+
+    let s = text(&a);
+    assert!(s.contains("[Board]"));
+    assert!(s.contains("TASK-001"));
+    assert!(s.contains("feat/TASK-001"));
+    assert!(s.contains("focus"), "tasks focus hint");
+    assert!(s.contains("overlap"), "two wip tasks on the same repo");
+
+    a.board_focus = BoardFocus::Cards;
+    assert!(text(&a).contains("Enter chat"));
+    a.board_focus = BoardFocus::Chat;
+    assert!(text(&a).contains("Ctrl+G"));
+
+    a.project_selected = true;
+    assert!(text(&a).contains("· project"));
+
+    a.tab = Tab::Docs;
+    let s = text(&a);
+    assert!(s.contains("[Docs]"));
+    assert!(!s.contains("focus"), "no board hints on the docs tab");
+}
+
+#[test]
+fn statusline_shows_running_review() {
+    let dir = TmpDir::new("statusline-review");
+    let mut a = app_with(&dir, &[("TASK-001", "review")]);
+    let text = |a: &App| tui::statusline_text(&crate::snapshot::build_snapshot(a));
+    assert!(!text(&a).contains("⟳ review"));
+
+    // a running review capture surfaces as the ⟳ prefix (via review_progress)
+    let (mut rjob, _tx) = fake_job(&[], false, true, 0);
+    rjob.kind = app::JobKind::Review;
+    rjob.task = Some("TASK-001".into());
+    a.job = Some(rjob);
+    assert!(text(&a).contains("⟳ review TASK-001"), "{}", text(&a));
 }
 
 #[test]

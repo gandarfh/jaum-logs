@@ -1,4 +1,6 @@
-//! TUI render (ratatui) and event loop (crossterm).
+//! TUI render (ratatui) and event loop (crossterm). Rendering consumes a
+//! `DomainSnapshot` (the same data a socket client receives); only the live
+//! chat pane needs the local `App` (the PTY screen is not on the wire yet).
 
 use std::time::Duration;
 
@@ -14,10 +16,14 @@ use ratatui::widgets::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{
-    App, BoardCard, BoardFocus, InputKind, ReviewProgress, SessionKind, Tab, status_label,
+use crate::app::{App, BoardFocus, Tab};
+use crate::keymap;
+use crate::protocol::{
+    CardView, CheckVerdict, CheckView, DocsView, DomainSnapshot, EnforceId, FindingView, FocusId,
+    InputKind, ParallelMark, ReviewProgressId, ReviewView, SessionKind, SeverityId, StatusId,
+    TabId, TaskTypeId, TaskView,
 };
-use jaum_flows::review::{ConstraintResult, ConstraintVerdict};
+use crate::snapshot::build_snapshot;
 
 // --- theme (Charm/Lipgloss aesthetic) -------------------------------------
 const ACCENT: Color = Color::Rgb(180, 142, 255); // lavender (Charm signature)
@@ -103,8 +109,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         app.tick_reload();
         app.tick_pr_sync();
         app.tick_toast();
+        // session events feed connected clients; the local TUI reads the PTY
+        // parser directly, so the buffer is just discarded here.
+        let _ = app.take_session_events();
         sync_pty_size(terminal, app);
-        terminal.draw(|f| render(f, app))?;
+        let snap = build_snapshot(app);
+        terminal.draw(|f| render(f, &snap, Some(app)))?;
 
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
@@ -150,9 +160,8 @@ fn sync_pty_size(terminal: &DefaultTerminal, app: &mut App) {
     sync_pty_to(app, size.width, size.height);
 }
 
-/// Like `sync_pty_size`, but from an explicit size (used by the daemon, which
-/// renders to an in-memory backend without a real terminal). Syncs only the
-/// SELECTED (displayed) session with the master-detail terminal pane.
+/// Like `sync_pty_size`, but from an explicit size. Syncs only the SELECTED
+/// (displayed) session with the master-detail terminal pane.
 pub(crate) fn sync_pty_to(app: &mut App, width: u16, height: u16) {
     let (_h, body, _f) = root_layout(Rect::new(0, 0, width, height));
     // the chat is the 3rd Board column (or the whole area in fullscreen).
@@ -196,7 +205,7 @@ pub(crate) fn session_term_area(app: &App, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Handles a mouse event over the Session tab: if claude is in mouse mode
+/// Handles a mouse event over the chat pane: if claude is in mouse mode
 /// (SGR), forwards the event to the PTY; otherwise scrolls the embedded
 /// terminal's scrollback (vt100) with the wheel.
 pub(crate) fn handle_mouse(
@@ -280,81 +289,20 @@ fn encode_mouse_sgr(ev: &crossterm::event::MouseEvent, col: u16, row: u16) -> Op
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
-    // 0) job log overlay (ingest/capture/init)
-    if app.job_overlay {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => app.dismiss_job(),
-            KeyCode::Char('k') | KeyCode::Up => app.job_scroll_up(),
-            KeyCode::Char('j') | KeyCode::Down => app.job_scroll_down(),
-            KeyCode::Char('g') | KeyCode::Home => app.job_scroll_top(),
-            KeyCode::Char('G') | KeyCode::End => app.job_follow(),
-            _ => {}
-        }
-        return;
-    }
+    let overlay_active = app.job_overlay
+        || app.project_picker
+        || app.detail_open
+        || app.doc_open
+        || app.input.is_some();
 
-    // 0) project picker (overlay)
-    if app.project_picker {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => app.close_picker(),
-            KeyCode::Char('j') | KeyCode::Down => app.picker_next(),
-            KeyCode::Char('k') | KeyCode::Up => app.picker_prev(),
-            KeyCode::Enter => app.confirm_picker(),
-            _ => {}
-        }
-        return;
-    }
-
-    // 0.5) task detail overlay
-    if app.detail_open {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.close_detail(),
-            KeyCode::Char('j') | KeyCode::Down => app.detail_scroll_down(),
-            KeyCode::Char('k') | KeyCode::Up => app.detail_scroll_up(),
-            _ => {}
-        }
-        return;
-    }
-
-    // 0.6) doc view overlay (markdown)
-    if app.doc_open {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => app.close_doc(),
-            KeyCode::Char('j') | KeyCode::Down => app.doc_scroll_down(),
-            KeyCode::Char('k') | KeyCode::Up => app.doc_scroll_up(),
-            _ => {}
-        }
-        return;
-    }
-
-    // 1) text capture (defer / convention / new task)
-    if app.input.is_some() {
-        match key.code {
-            KeyCode::Esc => app.input = None,
-            KeyCode::Enter => {
-                if let Some((kind, text)) = app.input.take() {
-                    app.submit_input(kind, text);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some((_, buf)) = app.input.as_mut() {
-                    buf.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some((_, buf)) = app.input.as_mut() {
-                    buf.push(c);
-                }
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // 2) Chat focus (Board): ALL keys go to `claude`. jaum commands via the
-    //    Ctrl+G prefix: Ctrl+G 1-2 tab · q quit · f finish · x remove · z
-    //    fullscreen · n/p card · h back to cards · g sends literal Ctrl+G.
-    if app.tab == Tab::Board && app.board_focus == BoardFocus::Chat && app.selected_card_is_live() {
+    // Chat focus (Board): ALL keys go to `claude` through the local PTY. jaum
+    // commands via the Ctrl+G prefix: Ctrl+G 1-2 tab · q quit · f finish · x
+    // remove · z fullscreen · n/p card · h back to cards · g sends literal Ctrl+G.
+    if !overlay_active
+        && app.tab == Tab::Board
+        && app.board_focus == BoardFocus::Chat
+        && app.selected_card_is_live()
+    {
         if app.pending_prefix {
             app.pending_prefix = false;
             match key.code {
@@ -412,84 +360,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Ctrl+C quits (in raw mode it doesn't become SIGINT; handle it here)
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.should_quit = true;
-        return;
-    }
-
-    // 3) navigation (list focus: Tasks/Cards on the Board, or Docs)
-    match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Tab => app.tab = app.tab.next(),
-        KeyCode::Char(c @ '1'..='2') => {
-            app.tab = Tab::from_index(c as usize - '1' as usize);
-        }
-        // j/k navigate WITHIN the focused panel; h/l move focus (Tasks↔Cards↔Chat).
-        KeyCode::Char('j') | KeyCode::Down => match (app.tab, app.board_focus) {
-            (Tab::Docs, _) => app.docs_next(),
-            (Tab::Board, BoardFocus::Cards) => app.card_next(),
-            (Tab::Board, _) => app.select_next(),
-        },
-        KeyCode::Char('k') | KeyCode::Up => match (app.tab, app.board_focus) {
-            (Tab::Docs, _) => app.docs_prev(),
-            (Tab::Board, BoardFocus::Cards) => app.card_prev(),
-            (Tab::Board, _) => app.select_prev(),
-        },
-        // Shift+J/K scrolls the doc preview without opening the overlay.
-        KeyCode::Char('J') if app.tab == Tab::Docs => app.doc_scroll_down(),
-        KeyCode::Char('K') if app.tab == Tab::Docs => app.doc_scroll_up(),
-        KeyCode::Char('g') | KeyCode::Home => app.select_first(),
-        KeyCode::Char('G') | KeyCode::End => app.select_last(),
-        KeyCode::Char('l') | KeyCode::Right => {
-            if app.tab == Tab::Board {
-                app.focus_right();
-            } else {
-                app.tab = app.tab.next();
-            }
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
-            if app.tab == Tab::Board {
-                app.focus_left();
-            } else {
-                app.tab = app.tab.prev();
-            }
-        }
-        KeyCode::Enter | KeyCode::Char('o') => {
-            if app.tab == Tab::Docs {
-                app.open_doc();
-            } else if app.board_focus == BoardFocus::Cards && app.selected_card_is_live() {
-                app.board_focus = BoardFocus::Chat;
-            } else {
-                app.open_detail();
-            }
-        }
-        KeyCode::Char('z') => app.chat_fullscreen = !app.chat_fullscreen,
-        KeyCode::Char('p') => app.play_selected(),
-        KeyCode::Char('R') => app.review_selected(),
-        KeyCode::Char('H') => app.handoff_selected(),
-        KeyCode::Char('f') => app.finish_selected(),
-        KeyCode::Char('i') => app.start_ingest_job(),
-        KeyCode::Char('I') => app.start_init_input(),
-        KeyCode::Char('a') => app.start_parallel_job(),
-        KeyCode::Char('S') => app.setup_start(),
-        KeyCode::Char('P') => app.open_picker(),
-        KeyCode::Char('e') => app.request_edit_conventions(),
-        // quick capture
-        KeyCode::Char('c') => app.start_input(InputKind::Convention),
-        KeyCode::Char('n') => app.start_input(InputKind::NewTask),
-        KeyCode::Char('N') => app.start_input(InputKind::NewTaskClaude),
-        KeyCode::Char('d') if app.selected_task().is_some() => app.start_input(InputKind::Defer),
-        _ => {}
-    }
-
-    // Action commands re-show the toast (retry feedback): retrying a command
-    // that fails the same way shows the error again instead of going silent.
-    if matches!(
-        key.code,
-        KeyCode::Char('p' | 'R' | 'H' | 'f' | 'i' | 'I' | 'S' | 'a')
-    ) {
-        app.rearm_toast();
+    let ctx = keymap::KeyCtx::from_app(app);
+    if let Some(intent) = keymap::map_key(&ctx, key) {
+        app.apply_intent(keymap::with_local_prefill(intent));
     }
 }
 
@@ -520,38 +393,41 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 
 // --- render ----------------------------------------------------------------
 
-pub(crate) fn render(f: &mut Frame, app: &App) {
+/// Renders a snapshot. `app` gives access to the local PTY screens (chat
+/// pane); socket clients pass `None` and get a placeholder until sessions
+/// stream over the wire.
+pub(crate) fn render(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>) {
     let (header, body, footer) = root_layout(f.area());
 
-    render_header(f, app, header);
-    match app.tab {
-        Tab::Board => render_board(f, app, body),
-        Tab::Docs => render_docs(f, app, body),
+    render_header(f, snap, header);
+    match snap.tab {
+        TabId::Board => render_board(f, snap, app, body),
+        TabId::Docs => render_docs(f, &snap.docs, body),
     }
-    render_statusline(f, app, footer);
+    render_statusline(f, snap, footer);
 
-    if app.detail_open {
-        render_detail(f, app);
+    if snap.board.detail_open {
+        render_detail(f, snap);
     }
-    if app.doc_open {
-        render_doc_view(f, app);
+    if snap.docs.doc_open {
+        render_doc_view(f, &snap.docs);
     }
-    if app.project_picker {
-        render_picker(f, app);
+    if snap.picker.is_some() {
+        render_picker(f, snap);
     }
-    if app.job_overlay {
-        render_job(f, app);
+    if snap.job_overlay {
+        render_job(f, snap);
     }
-    // snackbar por cima de tudo
-    if let Some(msg) = app.active_toast() {
+    // snackbar on top of everything
+    if let Some(msg) = &snap.toast {
         render_toast(f, msg);
     }
 }
 
 /// Live log overlay for a job (ingest/capture/init).
-fn render_job(f: &mut Frame, app: &App) {
+fn render_job(f: &mut Frame, snap: &DomainSnapshot) {
     use ratatui::widgets::Clear;
-    let Some(job) = &app.job else { return };
+    let Some(job) = &snap.job else { return };
 
     let area = centered_rect(82, 72, f.area());
     f.render_widget(Clear, area);
@@ -656,15 +532,39 @@ fn job_log_line(l: &str) -> Line<'static> {
     }
 }
 
-/// Color style per status (board and badges).
-fn status_color(s: jaum_core::Status) -> Color {
-    use jaum_core::Status;
+fn status_name(s: StatusId) -> &'static str {
     match s {
-        Status::Wip => Color::Green,
-        Status::Review => Color::Yellow,
-        Status::Ready => Color::Blue,
-        Status::Backlog => Color::Gray,
-        Status::Merged => Color::DarkGray,
+        StatusId::Backlog => "backlog",
+        StatusId::Ready => "ready",
+        StatusId::Wip => "wip",
+        StatusId::Review => "review",
+        StatusId::Merged => "merged",
+    }
+}
+
+/// Color style per status (board and badges).
+fn status_color(s: StatusId) -> Color {
+    match s {
+        StatusId::Wip => Color::Green,
+        StatusId::Review => Color::Yellow,
+        StatusId::Ready => Color::Blue,
+        StatusId::Backlog => Color::Gray,
+        StatusId::Merged => Color::DarkGray,
+    }
+}
+
+fn task_type_name(t: TaskTypeId) -> &'static str {
+    match t {
+        TaskTypeId::Impl => "Impl",
+        TaskTypeId::Spike => "Spike",
+    }
+}
+
+fn session_kind_label(k: SessionKind) -> &'static str {
+    match k {
+        SessionKind::Play => "play",
+        SessionKind::Review => "review",
+        SessionKind::Setup => "setup",
     }
 }
 
@@ -904,23 +804,17 @@ fn render_table(out: &mut Vec<Line<'static>>, rows: &[&str], width: u16) {
 }
 
 /// Doc view overlay (rendered markdown).
-fn render_doc_view(f: &mut Frame, app: &App) {
+fn render_doc_view(f: &mut Frame, docs: &DocsView) {
     use ratatui::widgets::Clear;
 
     let area = centered_rect(85, 85, f.area());
     f.render_widget(Clear, area);
 
-    let title = app.docs.get(app.docs_selected).cloned().unwrap_or_default();
-    // read fresh each frame: reflects external edits (setup) without close/reopen.
-    let content = app
-        .docs
-        .get(app.docs_selected)
-        .map(|rel| std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default())
-        .unwrap_or_default();
-    let p = Paragraph::new(markdown_lines(&content, area.width.saturating_sub(7)))
+    let title = docs.list.get(docs.selected).cloned().unwrap_or_default();
+    let p = Paragraph::new(markdown_lines(&docs.preview, area.width.saturating_sub(7)))
         .block(overlay_panel(&format!("{title} · j/k scroll · Esc close")))
         .wrap(Wrap { trim: false })
-        .scroll((app.doc_scroll, 0));
+        .scroll((docs.scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -940,7 +834,6 @@ fn overlay_panel(title: &str) -> Block<'static> {
         ))
 }
 
-/// Content lines of a task (metadata + markdown body). Reused by the Board
 /// Short (7-char) commit hash, git-style.
 fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
@@ -993,34 +886,43 @@ fn local_datetime(secs: u64) -> String {
     )
 }
 
-/// Short hash(es) the task's review was taken against, from the persisted
-/// `reviewed_sha` per PR link. `None` when nothing was reviewed yet; distinct
-/// shas (multi-PR tasks) are joined so the tag says which commits it covers.
-fn reviewed_tag(t: &jaum_core::Task) -> Option<String> {
-    let mut shas: Vec<String> = Vec::new();
-    for link in &t.prs {
-        if let Some(sha) = &link.reviewed_sha {
-            let s = short_sha(sha);
-            if !shas.contains(&s) {
-                shas.push(s);
-            }
+/// Joins distinct short shas (multi-PR tasks) so a tag says which commits a
+/// review covers. `None` when the list is empty.
+fn join_shas(shas: &[String]) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for s in shas {
+        let short = short_sha(s);
+        if !seen.contains(&short) {
+            seen.push(short);
         }
     }
-    (!shas.is_empty()).then(|| shas.join(", "))
+    (!seen.is_empty()).then(|| seen.join(", "))
 }
 
+/// Short hash(es) the task's review was taken against, from the per-PR
+/// `reviewed_sha` carried in the snapshot. `None` when nothing was reviewed yet.
+fn reviewed_tag(t: &TaskView) -> Option<String> {
+    let shas: Vec<String> = t
+        .prs
+        .iter()
+        .filter_map(|p| p.reviewed_sha.clone())
+        .collect();
+    join_shas(&shas)
+}
+
+/// Content lines of a task (metadata + markdown body). Reused by the Board
 /// preview and the detail overlay.
-fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
+fn task_detail_lines(t: &TaskView, width: u16) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:?}", t.task_type),
+            task_type_name(t.task_type),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
-            status_label(t.status).to_uppercase(),
+            status_name(t.status).to_uppercase(),
             Style::default().fg(status_color(t.status)),
         ),
     ]));
@@ -1050,8 +952,8 @@ fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled("Constraints", bold)));
         for c in &t.constraints {
             let (tag, color) = match c.enforce {
-                jaum_core::Enforce::Hook => ("hook", Color::Red),
-                jaum_core::Enforce::Review => ("review", PINK),
+                EnforceId::Hook => ("hook", Color::Red),
+                EnforceId::Review => ("review", PINK),
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("  [{tag}] "), Style::default().fg(color)),
@@ -1072,24 +974,32 @@ fn task_detail_lines(t: &jaum_core::Task, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// Selected task view (None while the `· project` row is selected).
+fn selected_task(snap: &DomainSnapshot) -> Option<&TaskView> {
+    if snap.board.project_selected {
+        return None;
+    }
+    snap.board.tasks.get(snap.board.selected)
+}
+
 /// Overlay with the full content of the selected task (Enter/`o`).
-fn render_detail(f: &mut Frame, app: &App) {
+fn render_detail(f: &mut Frame, snap: &DomainSnapshot) {
     use ratatui::widgets::Clear;
-    let Some(t) = app.selected_task() else { return };
+    let Some(t) = selected_task(snap) else { return };
     let area = centered_rect(80, 80, f.area());
     f.render_widget(Clear, area);
     let p = Paragraph::new(task_detail_lines(t, area.width.saturating_sub(7)))
         .block(overlay_panel(&format!("{} · j/k scroll · Esc close", t.id)))
         .wrap(Wrap { trim: false })
-        .scroll((app.detail_scroll, 0));
+        .scroll((snap.board.detail_scroll, 0));
     f.render_widget(p, area);
 }
 
 /// Header: logo + tab pills (left) and project name (right).
-fn render_header(f: &mut Frame, app: &App, area: Rect) {
+fn render_header(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     let cols = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(app.project_name().chars().count() as u16 + 4),
+        Constraint::Length(snap.project.chars().count() as u16 + 4),
     ])
     .split(area);
 
@@ -1100,9 +1010,12 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("    "),
     ];
-    for (i, t) in Tab::all().iter().enumerate() {
-        let label = format!(" {} {} ", i + 1, t.title());
-        if *t == app.tab {
+    for (i, (tab, title)) in [(TabId::Board, "Board"), (TabId::Docs, "Docs")]
+        .iter()
+        .enumerate()
+    {
+        let label = format!(" {} {} ", i + 1, title);
+        if *tab == snap.tab {
             spans.push(Span::styled(
                 label,
                 Style::default()
@@ -1120,7 +1033,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let right = Line::from(vec![
         Span::styled("", Style::default().fg(BORDER)),
         Span::styled(
-            format!(" {} ", app.project_name()),
+            format!(" {} ", snap.project),
             Style::default().fg(SUBTLE).add_modifier(Modifier::BOLD),
         ),
     ])
@@ -1129,20 +1042,19 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Central overlay with the project list (`P` key).
-fn render_picker(f: &mut Frame, app: &App) {
+fn render_picker(f: &mut Frame, snap: &DomainSnapshot) {
     use ratatui::widgets::Clear;
 
     let area = centered_rect(60, 50, f.area());
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = app
-        .config
+    let items: Vec<ListItem> = snap
         .projects
         .iter()
-        .map(|p| ListItem::new(format!("{}  {}", p.name, p.backlog.display())))
+        .map(|p| ListItem::new(format!("{}  {}", p.name, p.backlog)))
         .collect();
     let mut state = ListState::default();
-    state.select(Some(app.picker_selected));
+    state.select(snap.picker.as_ref().map(|p| p.selected));
     let list = List::new(items)
         .block(overlay_panel("Projects · Enter switch · Esc close"))
         .highlight_style(sel_style())
@@ -1191,38 +1103,33 @@ fn panel_focus(title: &str, focused: bool) -> Block<'static> {
     }
 }
 
-fn render_board(f: &mut Frame, app: &App, area: Rect) {
+fn render_board(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>, area: Rect) {
     // chat fullscreen: the card content takes the whole area.
-    if app.chat_fullscreen {
-        render_card_content(f, app, area);
+    if snap.board.chat_fullscreen {
+        render_card_content(f, snap, app, area);
         return;
     }
     let cols = board_layout(area);
-    render_board_list(f, app, cols[0]);
-    render_task_cards(f, app, cols[1]);
-    render_card_content(f, app, cols[2]);
+    render_board_list(f, snap, cols[0]);
+    render_task_cards(f, snap, cols[1]);
+    render_card_content(f, snap, app, cols[2]);
 }
 
-fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
-    use jaum_core::Status;
+fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
+    let board = &snap.board;
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_to_task: Vec<Option<usize>> = Vec::new();
-    let mut last_status: Option<Status> = None;
-    let active = app.active_task_ids();
+    let mut last_status: Option<StatusId> = None;
 
     // synthetic "· project" row (top): holds the setup sessions.
     let mut proj = vec![Span::styled(
         "· project",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    if app
-        .sessions
-        .iter()
-        .any(|e| e.is_live() && e.kind == SessionKind::Setup)
-    {
+    if board.setup_live {
         proj.push(Span::styled(" ●", Style::default().fg(Color::Green)));
     }
-    if app.setup_needed() {
+    if board.setup_needed {
         proj.push(Span::styled(
             " setup (S)",
             Style::default().fg(Color::Yellow),
@@ -1231,14 +1138,14 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
     items.push(ListItem::new(Line::from(proj)));
     row_to_task.push(None);
 
-    for (i, t) in app.tasks.iter().enumerate() {
+    for (i, t) in board.tasks.iter().enumerate() {
         if last_status != Some(t.status) {
-            let count = app.tasks.iter().filter(|x| x.status == t.status).count();
+            let count = board.tasks.iter().filter(|x| x.status == t.status).count();
             let color = status_color(t.status);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled("▌ ", Style::default().fg(color)),
                 Span::styled(
-                    status_label(t.status).to_uppercase(),
+                    status_name(t.status).to_uppercase(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {count}"), Style::default().fg(Color::DarkGray)),
@@ -1248,8 +1155,8 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
         }
 
         let badge = match t.status {
-            Status::Wip => ("▶", Color::Green),
-            Status::Merged => ("✔", Color::DarkGray),
+            StatusId::Wip => ("▶", Color::Green),
+            StatusId::Merged => ("✔", Color::DarkGray),
             _ => ("·", SUBTLE),
         };
         let mut spans = vec![
@@ -1257,25 +1164,21 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(t.id.clone(), Style::default().add_modifier(Modifier::BOLD)),
         ];
         // live session open on this task (there's a chat to enter).
-        if app
-            .sessions
-            .iter()
-            .any(|e| e.is_live() && e.task.as_deref() == Some(t.id.as_str()))
-        {
+        if t.live_session {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
         // review progress: running now, or a newer commit still owing a review.
-        if let Some(p) = app.review_progress(t) {
+        if let Some(p) = t.review_progress {
             let (g, c) = match p {
-                ReviewProgress::Running => ("⟳", Color::Yellow),
-                ReviewProgress::AwaitingCi => ("◷", Color::Yellow),
-                ReviewProgress::CiFailed => ("✗", Color::Red),
+                ReviewProgressId::Running => ("⟳", Color::Yellow),
+                ReviewProgressId::AwaitingCi => ("◷", Color::Yellow),
+                ReviewProgressId::CiFailed => ("✗", Color::Red),
             };
             spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
         }
         // review verdict (if there's a `.review.md`).
-        if let Some(n) = app.review_badge(&t.id) {
-            let (g, c) = if n == 0 {
+        if let Some(r) = &t.review {
+            let (g, c) = if r.badge == 0 {
                 ("✓", Color::Green)
             } else {
                 ("⚑", Color::Red)
@@ -1283,35 +1186,30 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
         }
         // parallelism glyph (only when there are active tasks and this isn't one).
-        if !active.contains(&t.id) {
-            if app.parallel_conflict_with_active(&t.id).is_some() {
+        match t.parallel {
+            Some(ParallelMark::Conflict) => {
                 spans.push(Span::styled(" ⚠", Style::default().fg(Color::Yellow)));
-            } else if app.is_parallel_safe(&t.id) {
+            }
+            Some(ParallelMark::Safe) => {
                 spans.push(Span::styled(" ‖", Style::default().fg(Color::Green)));
             }
+            None => {}
         }
         items.push(ListItem::new(Line::from(spans)));
         row_to_task.push(Some(i));
     }
 
-    if items.is_empty() {
-        items.push(ListItem::new(Span::styled(
-            "empty — `i` to ingest the docs",
-            Style::default().fg(SUBTLE),
-        )));
-    }
-
-    let selected_row = if app.project_selected {
+    let selected_row = if board.project_selected {
         Some(0) // the · project row is the first item
     } else {
-        row_to_task.iter().position(|r| *r == Some(app.selected))
+        row_to_task.iter().position(|r| *r == Some(board.selected))
     };
     let mut state = ListState::default();
     state.select(selected_row);
 
-    let title = format!("Board · {}", app.tasks.len());
+    let title = format!("Board · {}", board.tasks.len());
     let list = List::new(items)
-        .block(panel_focus(&title, app.board_focus == BoardFocus::Tasks))
+        .block(panel_focus(&title, board.focus == FocusId::Tasks))
         .highlight_style(sel_style())
         .highlight_symbol("▌ ");
     f.render_stateful_widget(list, area, &mut state);
@@ -1319,8 +1217,9 @@ fn render_board_list(f: &mut Frame, app: &App, area: Rect) {
 
 /// Middle column: compact task detail at the top + the card list (sessions
 /// + verdict). Cards are the navigable rows (`card_selected`).
-fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
-    let focused = app.board_focus == BoardFocus::Cards;
+fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
+    let board = &snap.board;
+    let focused = board.focus == FocusId::Cards;
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_to_card: Vec<Option<usize>> = Vec::new();
     // task body (goal/description), rendered below the Items.
@@ -1331,7 +1230,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // compact detail (· project row or task)
-    let title = if app.project_selected {
+    let title = if board.project_selected {
         detail(
             &mut items,
             Line::from(Span::styled(
@@ -1339,7 +1238,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(SUBTLE),
             )),
         );
-        if app.setup_needed() {
+        if board.setup_needed {
             detail(
                 &mut items,
                 Line::from(Span::styled(
@@ -1349,11 +1248,15 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         "· project".to_string()
-    } else if let Some(t) = app.selected_task() {
+    } else if let Some(t) = selected_task(snap) {
         detail(
             &mut items,
             Line::from(Span::styled(
-                format!("{:?} · {}", t.task_type, status_label(t.status)),
+                format!(
+                    "{} · {}",
+                    task_type_name(t.task_type),
+                    status_name(t.status)
+                ),
                 Style::default().fg(SUBTLE),
             )),
         );
@@ -1368,14 +1271,11 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(Span::styled(pr_txt, Style::default().fg(SUBTLE))),
             );
         }
-        if let Some(r) = app.load_review(&t.id) {
-            let (mut txt, c) = if r.is_clean() {
+        if let Some(r) = &t.review {
+            let (mut txt, c) = if r.clean {
                 ("review CLEAN".to_string(), Color::Green)
             } else {
-                (
-                    format!("review DIRTY · {} pending", r.unmet_count()),
-                    Color::Red,
-                )
+                (format!("review DIRTY · {} pending", r.unmet), Color::Red)
             };
             // tag the commit the verdict was taken against (short reviewed SHA).
             if let Some(tag) = reviewed_tag(t) {
@@ -1391,33 +1291,33 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             );
         }
         // pending/in-flight review state (new commit not yet reviewed).
-        if let Some(p) = app.review_progress(t) {
+        if let Some(p) = t.review_progress {
             let (txt, c) = match p {
-                ReviewProgress::Running => ("⟳ review running", Color::Yellow),
-                ReviewProgress::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
-                ReviewProgress::CiFailed => ("✗ review blocked · CI red", Color::Red),
+                ReviewProgressId::Running => ("⟳ review running", Color::Yellow),
+                ReviewProgressId::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
+                ReviewProgressId::CiFailed => ("✗ review blocked · CI red", Color::Red),
             };
             detail(
                 &mut items,
                 Line::from(Span::styled(txt, Style::default().fg(c))),
             );
         }
-        if app.parallel_conflict_with_active(&t.id).is_some() {
-            detail(
+        match t.parallel {
+            Some(ParallelMark::Conflict) => detail(
                 &mut items,
                 Line::from(Span::styled(
                     "⚠ parallel conflict",
                     Style::default().fg(Color::Yellow),
                 )),
-            );
-        } else if app.is_parallel_safe(&t.id) {
-            detail(
+            ),
+            Some(ParallelMark::Safe) => detail(
                 &mut items,
                 Line::from(Span::styled(
                     "‖ parallel ok",
                     Style::default().fg(Color::Green),
                 )),
-            );
+            ),
+            None => {}
         }
         if !t.body.trim().is_empty() {
             // List inner width: panel chrome (6) + highlight_symbol (2) + 1 col
@@ -1442,8 +1342,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
     );
-    let cards = app.task_cards();
-    if cards.is_empty() {
+    if board.cards.is_empty() {
         detail(
             &mut items,
             Line::from(Span::styled(
@@ -1452,8 +1351,8 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
             )),
         );
     } else {
-        for (ci, card) in cards.iter().enumerate() {
-            items.push(card_item(app, *card));
+        for (ci, card) in board.cards.iter().enumerate() {
+            items.push(card_item(card));
             row_to_card.push(Some(ci));
         }
     }
@@ -1470,7 +1369,7 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
 
     let selected_row = row_to_card
         .iter()
-        .position(|r| *r == Some(app.card_selected));
+        .position(|r| *r == Some(board.card_selected));
     let mut state = ListState::default();
     state.select(selected_row);
     let hl = if focused {
@@ -1486,38 +1385,34 @@ fn render_task_cards(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A single card row in the middle column.
-fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
+fn card_item(card: &CardView) -> ListItem<'static> {
     match card {
-        BoardCard::Session(i) => {
-            let Some(e) = app.sessions.get(i) else {
-                return ListItem::new(Line::from("  ?"));
-            };
-            let (dot, color) = if e.is_live() {
+        CardView::Session {
+            kind,
+            live,
+            last_activity_ms,
+        } => {
+            let (dot, color) = if *live {
                 ("●", Color::Green)
             } else {
                 ("✓", Color::DarkGray)
             };
-            let age = if e.is_live() {
-                format!("active · {}", fmt_dur(age_of(e.last_activity)))
+            let age = if *live {
+                format!("active · {}", fmt_dur(age_of_ms(*last_activity_ms)))
             } else {
                 "closed".to_string()
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(color)),
                 Span::styled(
-                    e.kind.label().to_string(),
+                    session_kind_label(*kind).to_string(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {age}"), Style::default().fg(SUBTLE)),
             ]))
         }
-        BoardCard::Verdict => {
-            let clean = app
-                .selected_task()
-                .and_then(|t| app.load_review(&t.id))
-                .map(|r| r.is_clean())
-                .unwrap_or(true);
-            let (dot, color, txt) = if clean {
+        CardView::Verdict { clean } => {
+            let (dot, color, txt) = if *clean {
                 ("✓", Color::Green, "verdict (CLEAN)")
             } else {
                 ("⚑", Color::Red, "verdict (DIRTY)")
@@ -1535,15 +1430,16 @@ fn card_item(app: &App, card: BoardCard) -> ListItem<'static> {
 
 /// Right panel: content of the selected card (session chat, verdict, or the
 /// task detail if there's no card).
-fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
-    let focused = app.board_focus == BoardFocus::Chat || app.chat_fullscreen;
-    match app.selected_card() {
-        Some(BoardCard::Session(i)) => render_pty(f, app, i, area, focused),
-        Some(BoardCard::Verdict) => {
-            let id = app.selected_task().map(|t| t.id.clone());
-            let lines = verdict_lines(app, id.as_deref());
-            let title = match &id {
-                Some(i) => format!("Verdict · {i}"),
+fn render_card_content(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>, area: Rect) {
+    let board = &snap.board;
+    let focused = board.focus == FocusId::Chat || board.chat_fullscreen;
+    let idx = board.card_selected.min(board.cards.len().saturating_sub(1));
+    match board.cards.get(idx) {
+        Some(CardView::Session { .. }) => render_session_pane(f, app, area, focused),
+        Some(CardView::Verdict { .. }) => {
+            let lines = verdict_lines(board.review.as_ref());
+            let title = match selected_task(snap) {
+                Some(t) => format!("Verdict · {}", t.id),
                 None => "Verdict".to_string(),
             };
             let p = Paragraph::new(lines)
@@ -1553,7 +1449,7 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
         }
         None => {
             // no card: task detail (or hint).
-            let (title, lines) = match app.selected_task() {
+            let (title, lines) = match selected_task(snap) {
                 Some(t) => (
                     format!("{} · Enter expand", t.id),
                     task_detail_lines(t, area.width.saturating_sub(7)),
@@ -1574,8 +1470,25 @@ fn render_card_content(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Renders the PTY of session index `i` (or the history message).
-fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
+/// Renders the selected session: the local PTY when the `App` is at hand
+/// (local mode), or a placeholder for socket clients (no session stream to
+/// draw from on this side of the wire).
+fn render_session_pane(f: &mut Frame, app: Option<&App>, area: Rect, focused: bool) {
+    let Some(app) = app else {
+        let block = if focused {
+            panel_tight("chat — Esc back to cards").border_style(Style::default().fg(ACCENT))
+        } else {
+            panel_tight("chat")
+        };
+        let msg = "Session panel not available on this client.\nThe board stays fully usable; the chat runs where the daemon lives.";
+        f.render_widget(
+            Paragraph::new(msg)
+                .style(Style::default().fg(SUBTLE))
+                .block(block),
+            area,
+        );
+        return;
+    };
     let hint = if app.pending_prefix {
         "Ctrl+G… (n/p card · f finish · x remove · z zoom · g=Ctrl+G)"
     } else if focused {
@@ -1588,7 +1501,7 @@ fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
     } else {
         panel_tight(&format!("chat — {hint}"))
     };
-    match app.sessions.get(i) {
+    match app.current_session_idx().and_then(|i| app.sessions.get(i)) {
         Some(e) if !e.is_live() => {
             let msg = "Session closed (history). No live terminal.\nContext is saved in claude; open a new play/review to continue.";
             f.render_widget(
@@ -1607,19 +1520,17 @@ fn render_pty(f: &mut Frame, app: &App, i: usize, area: Rect, focused: bool) {
 }
 
 /// Verdict body (findings + constraints + criteria) for the right panel.
-fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
-    let report = id.and_then(|i| app.load_review(i));
+fn verdict_lines(review: Option<&ReviewView>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    let Some(r) = report else {
+    let Some(r) = review else {
         lines.push(Line::from(
             "No review yet. The verdict runs by itself when every PR check turns green; `R` opens the review chat.",
         ));
         return lines;
     };
-    let clean = r.is_clean();
     lines.push(Line::from(vec![
         Span::raw("is_clean: "),
-        if clean {
+        if r.clean {
             Span::styled(
                 "CLEAN",
                 Style::default()
@@ -1636,23 +1547,20 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         format!(
             "{} blocking · {} finding(s) · minor/nit don't fail",
-            r.blocking_count(),
+            r.blocking,
             r.findings.len()
         ),
         Style::default().fg(SUBTLE),
     )));
     // which commit this verdict was taken against, and when it ran.
-    if let Some(tag) = id
-        .and_then(|i| app.tasks.iter().find(|t| t.id == i))
-        .and_then(reviewed_tag)
-    {
+    if let Some(tag) = join_shas(&r.reviewed_shas) {
         let mut line = format!("reviewed @{tag}");
         if let Some(at) = r.reviewed_at {
             line.push_str(&format!(" · {}", review_when(at)));
         }
         lines.push(Line::from(Span::styled(line, Style::default().fg(SUBTLE))));
     }
-    if !clean {
+    if !r.clean {
         lines.push(Line::from(Span::styled(
             "`H` sends the open items to the play session to fix",
             Style::default().fg(SUBTLE),
@@ -1667,7 +1575,7 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
         lines.push(Line::from("  (none)"));
     } else {
         for finding in &r.findings {
-            lines.push(Line::from(format!("  {}", finding.render())));
+            lines.push(Line::from(format!("  {}", finding_line(finding))));
         }
     }
     push_verdict_section(&mut lines, "Constraints (enforce: review)", &r.constraints);
@@ -1675,12 +1583,37 @@ fn verdict_lines(app: &App, id: Option<&str>) -> Vec<Line<'static>> {
     lines
 }
 
-/// Age of a wall-clock instant (time since `t`). Tolerant of a clock that went
+fn severity_tag(s: SeverityId) -> &'static str {
+    match s {
+        SeverityId::Blocker => "BLOCKER",
+        SeverityId::Major => "MAJOR",
+        SeverityId::Minor => "MINOR",
+        SeverityId::Nit => "NIT",
+    }
+}
+
+/// Terminal rendering of a structured finding: `[SEV] file:line - message
+/// (violates ref)`.
+fn finding_line(f: &FindingView) -> String {
+    let loc = match f.line {
+        Some(l) => format!("{}:{}", f.file, l),
+        None => f.file.clone(),
+    };
+    let tag = severity_tag(f.severity);
+    match &f.reference {
+        Some(r) => format!("[{tag}] {loc} - {} (violates {r})", f.message),
+        None => format!("[{tag}] {loc} - {}", f.message),
+    }
+}
+
+/// Age of an epoch-milliseconds instant. Tolerant of a clock that went
 /// backwards (clamped to zero).
-fn age_of(t: std::time::SystemTime) -> std::time::Duration {
-    std::time::SystemTime::now()
-        .duration_since(t)
+fn age_of_ms(ms: u64) -> std::time::Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
+        .as_millis() as u64;
+    std::time::Duration::from_millis(now.saturating_sub(ms))
 }
 
 /// Short, readable duration: `8s`, `3m`, `1h2m`.
@@ -1696,8 +1629,8 @@ fn fmt_dur(d: std::time::Duration) -> String {
 }
 
 /// Pushes a header + the items of a checklist (constraint/criterion) with the
-/// colored verdict, in the Review tab detail.
-fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintResult]) {
+/// colored verdict.
+fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[CheckView]) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         title.to_string(),
@@ -1712,9 +1645,9 @@ fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintR
     }
     for c in items {
         let (tag, color) = match c.verdict {
-            ConstraintVerdict::Ok => ("OK", Color::Green),
-            ConstraintVerdict::Failed => ("FAILED", Color::Red),
-            ConstraintVerdict::Pending => ("PENDING", Color::Yellow),
+            CheckVerdict::Ok => ("OK", Color::Green),
+            CheckVerdict::Failed => ("FAILED", Color::Red),
+            CheckVerdict::Pending => ("PENDING", Color::Yellow),
         };
         lines.push(Line::from(vec![
             Span::styled(format!("  [{tag}] "), Style::default().fg(color)),
@@ -1723,11 +1656,11 @@ fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[ConstraintR
     }
 }
 
-fn render_docs(f: &mut Frame, app: &App, area: Rect) {
-    if app.docs.is_empty() {
+fn render_docs(f: &mut Frame, docs: &DocsView, area: Rect) {
+    if docs.list.is_empty() {
         let p = Paragraph::new(format!(
             "(no .md in {})\n\nWrite the design docs here; then press `i` to ingest.",
-            app.docs_dir.display()
+            docs.dir
         ))
         .block(panel("Docs"))
         .wrap(Wrap { trim: true });
@@ -1737,11 +1670,11 @@ fn render_docs(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
         .spacing(1)
         .split(area);
-    render_docs_list(f, app, cols[0]);
-    render_docs_preview(f, app, cols[1]);
+    render_docs_list(f, docs, cols[0]);
+    render_docs_preview(f, docs, cols[1]);
 }
 
-fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
+fn render_docs_list(f: &mut Frame, docs: &DocsView, area: Rect) {
     let group_of = |rel: &str| -> String {
         rel.split_once('/')
             .map(|(g, _)| g.to_string())
@@ -1751,7 +1684,7 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
     let mut row_to_doc: Vec<Option<usize>> = Vec::new();
     let mut last_group: Option<String> = None;
 
-    for (i, rel) in app.docs.iter().enumerate() {
+    for (i, rel) in docs.list.iter().enumerate() {
         let group = group_of(rel);
         if last_group.as_deref() != Some(group.as_str()) {
             let label = if group.is_empty() {
@@ -1759,7 +1692,7 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 group.to_uppercase()
             };
-            let count = app.docs.iter().filter(|d| group_of(d) == group).count();
+            let count = docs.list.iter().filter(|d| group_of(d) == group).count();
             let color = doc_group_color(&group);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled("▌ ", Style::default().fg(color)),
@@ -1777,13 +1710,11 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
         row_to_doc.push(Some(i));
     }
 
-    let selected_row = row_to_doc
-        .iter()
-        .position(|r| *r == Some(app.docs_selected));
+    let selected_row = row_to_doc.iter().position(|r| *r == Some(docs.selected));
     let mut state = ListState::default();
     state.select(selected_row);
 
-    let title = format!("Docs · {}", app.docs.len());
+    let title = format!("Docs · {}", docs.list.len());
     let list = List::new(items)
         .block(panel(&title))
         .highlight_style(sel_style())
@@ -1792,14 +1723,13 @@ fn render_docs_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Live preview (rendered markdown) of the selected doc.
-fn render_docs_preview(f: &mut Frame, app: &App, area: Rect) {
-    let (title, lines) = match app.docs.get(app.docs_selected) {
+fn render_docs_preview(f: &mut Frame, docs: &DocsView, area: Rect) {
+    let (title, lines) = match docs.list.get(docs.selected) {
         Some(rel) => {
             let file = rel.rsplit('/').next().unwrap_or(rel).to_string();
-            let content = std::fs::read_to_string(app.docs_dir.join(rel)).unwrap_or_default();
             (
                 format!("{file} · J/K scroll · Enter expand"),
-                markdown_lines(&content, area.width.saturating_sub(7)),
+                markdown_lines(&docs.preview, area.width.saturating_sub(7)),
             )
         }
         None => ("preview".to_string(), Vec::new()),
@@ -1807,7 +1737,7 @@ fn render_docs_preview(f: &mut Frame, app: &App, area: Rect) {
     let p = Paragraph::new(lines)
         .block(panel(&title))
         .wrap(Wrap { trim: false })
-        .scroll((app.doc_scroll, 0));
+        .scroll((docs.scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -1822,10 +1752,52 @@ fn doc_group_color(group: &str) -> Color {
     }
 }
 
-fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
+/// Footer status text built from the domain snapshot: tab, selected row,
+/// branch, overlap warning and this terminal's navigation hints. Presentation
+/// belongs here, not on the wire.
+fn statusline_text(snap: &DomainSnapshot) -> String {
+    let mut s = format!(
+        "[{}]",
+        match snap.tab {
+            TabId::Board => "Board",
+            TabId::Docs => "Docs",
+        }
+    );
+    // in-flight review first, so the narrow footer never truncates it away.
+    if let Some(t) = snap
+        .board
+        .tasks
+        .iter()
+        .find(|t| t.review_progress == Some(ReviewProgressId::Running))
+    {
+        s.push_str(&format!(" ⟳ review {}", t.id));
+    }
+    if snap.board.project_selected {
+        s.push_str(" · project");
+    } else if let Some(t) = selected_task(snap) {
+        s.push_str(&format!(" {}", t.id));
+        if let Some(pr) = t.prs.first() {
+            s.push_str(&format!(" {}", pr.branch));
+        }
+    }
+    if let Some(o) = snap.board.overlaps.first() {
+        s.push_str(&format!(" · ⚠ overlap {} ({}↔{})", o.repo, o.a, o.b));
+    }
+    // navigation hint depending on the focused panel (Board only).
+    if snap.tab == TabId::Board {
+        s.push_str(match snap.board.focus {
+            FocusId::Tasks => "   h/l focus · l items · z zoom",
+            FocusId::Cards => "   Enter chat · h back · z zoom",
+            FocusId::Chat => "   Ctrl+G cmd · Ctrl+G z zoom",
+        });
+    }
+    s
+}
+
+fn render_statusline(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     // input mode: active prompt
-    if let Some((kind, buf)) = &app.input {
-        let label = match kind {
+    if let Some(input) = &snap.input {
+        let label = match input.kind {
             InputKind::Defer => "defer",
             InputKind::Convention => "convention",
             InputKind::NewTask => "new task",
@@ -1840,7 +1812,7 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
                     .bg(PINK)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" {buf}")),
+            Span::raw(format!(" {}", input.buffer)),
             Span::styled("█", Style::default().fg(PINK)),
             Span::styled("   Enter confirm · Esc cancel", Style::default().fg(SUBTLE)),
         ]);
@@ -1874,7 +1846,10 @@ fn render_statusline(f: &mut Frame, app: &App, area: Rect) {
 
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(84)]).split(area);
     f.render_widget(
-        Paragraph::new(Span::styled(app.statusline(), Style::default().fg(SUBTLE))),
+        Paragraph::new(Span::styled(
+            statusline_text(snap),
+            Style::default().fg(SUBTLE),
+        )),
         cols[0],
     );
     f.render_widget(Paragraph::new(Line::from(hint)).right_aligned(), cols[1]);
