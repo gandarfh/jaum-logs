@@ -184,6 +184,10 @@ fn from_epoch_ms(ms: u64) -> SystemTime {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub kind: SessionKind,
+    /// Owning project's name (stable across projects, unlike `task`'s id,
+    /// which is only unique within one project's `.backlog/`).
+    #[serde(default)]
+    pub project: String,
     pub task: Option<String>,
     /// claude session UUID (forced on the first turn; resumed afterwards).
     pub claude_session_id: String,
@@ -219,6 +223,9 @@ pub struct ChatState {
 /// (restored from disk and not resumable) have neither live handle.
 pub struct SessionEntry {
     pub kind: SessionKind,
+    /// Owning project's name (stable across projects, unlike `task`'s id,
+    /// which is only unique within one project's `.backlog/`).
+    pub project: String,
     /// Linked task (None for setup).
     pub task: Option<String>,
     pub session: Option<Session>,
@@ -252,6 +259,7 @@ impl SessionEntry {
     /// Creates the LIVE entry and spawns the thread that pumps the PTY into the parser.
     fn spawn(
         kind: SessionKind,
+        project: String,
         task: Option<String>,
         session: Session,
         worktrees: Vec<(String, PathBuf)>,
@@ -286,6 +294,7 @@ impl SessionEntry {
         let now = SystemTime::now();
         Self {
             kind,
+            project,
             task,
             session: Some(session),
             parser,
@@ -306,6 +315,7 @@ impl SessionEntry {
     /// chat receiver and accumulate in the session log.
     pub(crate) fn sidecar(
         kind: SessionKind,
+        project: String,
         task: Option<String>,
         worktrees: Vec<(String, PathBuf)>,
         session_id: String,
@@ -317,6 +327,7 @@ impl SessionEntry {
         let now = SystemTime::now();
         Self {
             kind,
+            project,
             task,
             session: None,
             parser,
@@ -346,6 +357,7 @@ impl SessionEntry {
         parser.screen_mut().set_size(40, 120);
         Self {
             kind: rec.kind,
+            project: rec.project.clone(),
             task: rec.task.clone(),
             session: None,
             parser,
@@ -366,6 +378,7 @@ impl SessionEntry {
     fn to_record(&self) -> SessionRecord {
         SessionRecord {
             kind: self.kind,
+            project: self.project.clone(),
             task: self.task.clone(),
             claude_session_id: self.claude_session_id.clone(),
             cwd: self.cwd.clone(),
@@ -765,15 +778,33 @@ impl App {
     /// still on disk) come back resumed via `claude --resume`; the rest enter as
     /// history (no PTY). Never breaks boot.
     pub(crate) fn rehydrate_sessions(&mut self) {
+        // Sessions of projects visited earlier this boot are already live in
+        // memory (project switches no longer stop them); re-reading their
+        // persisted record would duplicate the card or clobber live chat
+        // state with an inert copy.
+        let already_live: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|e| e.claude_session_id.clone())
+            .collect();
         for rec in self.load_session_records() {
+            if already_live.contains(&rec.claude_session_id) {
+                continue;
+            }
             let entry = self.rehydrate_one(rec);
             self.sessions.push(entry);
         }
     }
 
     /// Builds a `SessionEntry` from a record: resumes when possible, otherwise
-    /// becomes history.
+    /// becomes history. Only ever called for the CURRENT project's own
+    /// `sessions.json` (that's what `load_session_records` reads), so the
+    /// record's `project` is trusted to be (or is normalized to) it.
     fn rehydrate_one(&self, rec: SessionRecord) -> SessionEntry {
+        let rec = SessionRecord {
+            project: self.project_name().to_string(),
+            ..rec
+        };
         // not resumable: already finished, or the cwd (worktree/repo) is gone.
         if rec.finished || !rec.cwd.exists() {
             return self.with_replayed_log(SessionEntry::history(&rec));
@@ -787,6 +818,7 @@ impl App {
             let log = SessionLog::new(&self.home(), &rec.claude_session_id);
             let mut e = SessionEntry::sidecar(
                 rec.kind,
+                rec.project.clone(),
                 rec.task.clone(),
                 rec.worktrees.clone(),
                 rec.claude_session_id.clone(),
@@ -802,6 +834,7 @@ impl App {
             Ok(session) => {
                 let mut e = SessionEntry::spawn(
                     rec.kind,
+                    rec.project.clone(),
                     rec.task.clone(),
                     session,
                     rec.worktrees.clone(),
@@ -912,12 +945,16 @@ impl App {
             .unwrap_or("?")
     }
 
-    /// Switches to another project (stops sessions, reloads store/repos/docs).
+    /// Switches to another project (reloads store/repos/docs). Live sessions of
+    /// the project being left are NOT stopped: they keep running in the
+    /// background (PTY/sidecar untouched) and stay in `self.sessions`, tagged
+    /// with their own project, so the board only ever shows the active one's.
     pub fn load_project(&mut self, i: usize) {
         let Some(project) = self.config.projects.get(i).cloned() else {
             return;
         };
-        self.stop_all_sessions();
+        // flush the outgoing project's session state before leaving it.
+        self.persist_sessions();
         self.store = Store::new(&project.backlog);
         self.repos = project.repo_map();
         self.docs_dir = project.docs.clone();
@@ -929,7 +966,7 @@ impl App {
         self.tab = Tab::Board;
         self.status_msg = format!("project: {}", project.name);
         let _ = self.refresh();
-        self.rehydrate_sessions(); // persisted sessions of the new project
+        self.rehydrate_sessions(); // persisted sessions of the new project, unless already live
         self.start_watch(); // watch the new project's folder
     }
 
@@ -984,24 +1021,28 @@ impl App {
     /// of it + the verdict (if there's a `.review.md`). Session order follows
     /// `sessions` (already sorted by activity in `sort_sessions`).
     pub fn task_cards(&self) -> Vec<BoardCard> {
+        let project = self.project_name();
         // · project row: cards = setup sessions (no task).
         if self.project_selected {
             return self
                 .sessions
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.kind == SessionKind::Setup)
+                .filter(|(_, e)| e.kind == SessionKind::Setup && e.project == project)
                 .map(|(i, _)| BoardCard::Session(i))
                 .collect();
         }
         let Some(id) = self.selected_task().map(|t| t.id.clone()) else {
             return Vec::new();
         };
+        // A background session of another project may carry the same task id
+        // (ids are only unique within one project's `.backlog/`): the project
+        // filter keeps the two from colliding on this board.
         let mut cards: Vec<BoardCard> = self
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.task.as_deref() == Some(id.as_str()))
+            .filter(|(_, e)| e.project == project && e.task.as_deref() == Some(id.as_str()))
             .map(|(i, _)| BoardCard::Session(i))
             .collect();
         if self.load_review(&id).is_some() {
@@ -1062,10 +1103,11 @@ impl App {
     /// "Active" tasks (parallelism reference): with a live play session OR in
     /// status `wip`.
     pub fn active_task_ids(&self) -> Vec<String> {
+        let project = self.project_name();
         let mut ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|e| e.is_live() && e.kind == SessionKind::Play)
+            .filter(|e| e.is_live() && e.kind == SessionKind::Play && e.project == project)
             .filter_map(|e| e.task.clone())
             .collect();
         for t in &self.tasks {
@@ -1253,15 +1295,34 @@ impl App {
             self.status_msg = "no task selected".into();
             return;
         };
-        // already a live play session for this task? focus it instead of opening a
-        // duplicate (two claudes in the same worktree would fight over the working dir).
+        let project = self.project_name().to_string();
+        // already a live play session for this task (in THIS project)? focus it
+        // instead of opening a duplicate (two claudes in the same worktree
+        // would fight over the working dir). A same-id task in another
+        // project's own live session must not match here.
         if let Some(idx) = self.sessions.iter().position(|e| {
-            e.is_live() && e.kind == SessionKind::Play && e.task.as_deref() == Some(id.as_str())
+            e.is_live()
+                && e.kind == SessionKind::Play
+                && e.project == project
+                && e.task.as_deref() == Some(id.as_str())
         }) {
             self.focus_session(idx);
             self.status_msg = format!("play for {id} is already open");
             return;
         }
+        // A prior (finished) play session for this task, if any: its claude
+        // session id is reused via `resume` so the new turn picks up the
+        // earlier conversation instead of starting from zero.
+        let resume = self
+            .sessions
+            .iter()
+            .filter(|e| {
+                e.kind == SessionKind::Play
+                    && e.project == project
+                    && e.task.as_deref() == Some(id.as_str())
+            })
+            .max_by_key(|e| e.last_activity)
+            .map(|e| e.claude_session_id.clone());
         // Spawn the sidecar BEFORE creating any side effect: a spawn failure
         // must not leave worktrees or a wip status behind.
         let prior_status = self.store.get(&id).map(|t| t.status).ok();
@@ -1275,13 +1336,16 @@ impl App {
             .launch(&id)
         });
         let result = result.and_then(|launch| {
-            let opened = self.open_play_session(&launch);
+            let opened = self.open_play_session(&launch, resume.clone());
             if opened.is_err() {
                 self.rollback_play_launch(&id, &launch.worktrees, prior_status);
             }
             opened
         });
         match result {
+            Ok(()) if resume.is_some() => {
+                self.status_msg = format!("play resumed on {id}");
+            }
             Ok(()) => self.status_msg = format!("play started on {id}"),
             Err(e) => self.status_msg = format!("play failed: {e}"),
         }
@@ -1328,21 +1392,29 @@ impl App {
     }
 
     /// Sends the launch prompt as the session's first chat turn and registers
-    /// the sidecar-backed entry.
-    fn open_play_session(&mut self, launch: &PlayLaunch) -> Result<()> {
-        let log = SessionLog::new(&self.home(), &launch.session_id);
+    /// the sidecar-backed entry. `resume`, when set, is the claude session id
+    /// of an earlier (finished) play session for the same task: reusing it as
+    /// both the identity and the resume target picks the conversation back up
+    /// instead of starting from zero.
+    fn open_play_session(&mut self, launch: &PlayLaunch, resume: Option<String>) -> Result<()> {
+        let session_id = resume.clone().unwrap_or_else(|| launch.session_id.clone());
+        let log = SessionLog::new(&self.home(), &session_id);
         let mut entry = SessionEntry::sidecar(
             SessionKind::Play,
+            self.project_name().to_string(),
             Some(launch.id.clone()),
             launch.worktrees.clone(),
-            launch.session_id.clone(),
+            session_id.clone(),
             launch.cwd.clone(),
             log,
         );
+        if resume.is_some() {
+            entry = self.with_replayed_log(entry);
+        }
         let turn = ChatTurn {
-            request_id: format!("{}#1", launch.session_id),
-            session_id: launch.session_id.clone(),
-            resume: None,
+            request_id: format!("{session_id}#1"),
+            session_id: session_id.clone(),
+            resume,
             cwd: Some(launch.cwd.clone()),
             model: Some(launch.guards.model.clone()),
             allowed_tools: Vec::new(),
@@ -1356,16 +1428,26 @@ impl App {
         let rx = self.ensure_sidecar()?.chat(turn)?;
         if let Some(chat) = &mut entry.chat {
             chat.rx = Some(rx);
-            chat.request_id = Some(format!("{}#1", launch.session_id));
+            chat.request_id = Some(format!("{session_id}#1"));
             chat.turn_seq = 1;
         }
-        let key = entry.claude_session_id.clone();
-        self.sessions.push(entry);
+        // resuming replaces the stale (finished) card in place, so the task
+        // keeps exactly one card for this claude session instead of a dangling
+        // history duplicate next to the newly-live one.
+        if let Some(pos) = self
+            .sessions
+            .iter()
+            .position(|e| e.claude_session_id == session_id)
+        {
+            self.sessions[pos] = entry;
+        } else {
+            self.sessions.push(entry);
+        }
         self.sort_sessions();
         let idx = self
             .sessions
             .iter()
-            .position(|e| e.claude_session_id == key)
+            .position(|e| e.claude_session_id == session_id)
             .unwrap_or(0);
         self.focus_session(idx);
         self.persist_sessions();
@@ -1428,7 +1510,15 @@ impl App {
     /// the text view, updates the claude session id and routes permissions.
     pub fn drain_sidecar(&mut self) {
         let route_permissions = self.route_permissions;
-        let home = self.home();
+        // Per-project home, so a background session's log migration (below)
+        // never lands in the CURRENTLY loaded project's directory.
+        let homes: HashMap<String, PathBuf> = self
+            .config
+            .projects
+            .iter()
+            .map(|p| (p.name.clone(), p.home()))
+            .collect();
+        let fallback_home = self.home();
         let mut to_answer: Vec<(usize, String)> = Vec::new();
         let mut to_track: Vec<(String, String)> = Vec::new();
         let mut to_send: Vec<(usize, String)> = Vec::new();
@@ -1456,11 +1546,12 @@ impl App {
                                 // history must follow the resumable one.
                                 e.claude_session_id = claude_session_id.clone();
                                 if let Some(chat) = e.chat.as_mut() {
+                                    let home = homes.get(&e.project).unwrap_or(&fallback_home);
                                     let old = std::mem::replace(
                                         &mut chat.log,
-                                        SessionLog::new(&home, claude_session_id),
+                                        SessionLog::new(home, claude_session_id),
                                     );
-                                    chat.log = old.migrate(&home, claude_session_id);
+                                    chat.log = old.migrate(home, claude_session_id);
                                 }
                                 changed = true;
                             }
@@ -1695,10 +1786,14 @@ impl App {
             return;
         }
 
-        // find (or open) a live play session for the task
+        // find (or open) a live play session for the task, in THIS project
+        let project = self.project_name().to_string();
         let find = |s: &[SessionEntry]| {
             s.iter().position(|e| {
-                e.is_live() && e.kind == SessionKind::Play && e.task.as_deref() == Some(id.as_str())
+                e.is_live()
+                    && e.kind == SessionKind::Play
+                    && e.project == project
+                    && e.task.as_deref() == Some(id.as_str())
             })
         };
         let mut idx = find(&self.sessions);
@@ -2112,9 +2207,13 @@ impl App {
     /// `(id, repo, branch)` of branches still without a PR (`pr == 0`) for tasks
     /// with a live play session. The target of the background PR sync.
     pub fn pr_sync_targets(&self) -> Vec<(String, String, String)> {
+        let project = self.project_name();
         let mut targets = Vec::new();
         for e in &self.sessions {
-            if !(e.is_live() && e.kind == SessionKind::Play) {
+            // `self.tasks`/`self.repos` are this project's; a background
+            // session of another one must not be looked up against them
+            // (worse, a same-id task there would silently match).
+            if !(e.is_live() && e.kind == SessionKind::Play && e.project == project) {
                 continue;
             }
             let Some(id) = e.task.as_deref() else {
@@ -2485,6 +2584,7 @@ impl App {
         });
         self.sessions.push(SessionEntry::spawn(
             kind,
+            self.project_name().to_string(),
             task,
             session,
             worktrees,
@@ -2536,19 +2636,35 @@ impl App {
         }
     }
 
-    /// Path of the persisted sessions file (survives shutdown).
+    /// Path of the CURRENT project's persisted sessions file (survives shutdown).
     fn sessions_file(&self) -> PathBuf {
         self.work_dir.join("sessions.json")
     }
 
-    /// Writes the sessions snapshot to disk (best-effort, never crashes the TUI).
+    /// Writes each project's own sessions snapshot to its own `work_dir/sessions.json`
+    /// (best-effort, never crashes the TUI). `self.sessions` can hold entries of
+    /// several projects at once (switching projects no longer stops them), so
+    /// persistence is grouped by `SessionEntry::project` rather than dumped as
+    /// one list into the CURRENT project's file.
     pub(crate) fn persist_sessions(&self) {
-        let records: Vec<SessionRecord> = self.sessions.iter().map(|e| e.to_record()).collect();
-        if let Some(parent) = self.sessions_file().parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let mut by_project: HashMap<&str, Vec<SessionRecord>> = HashMap::new();
+        for e in &self.sessions {
+            by_project
+                .entry(e.project.as_str())
+                .or_default()
+                .push(e.to_record());
         }
-        if let Ok(json) = serde_json::to_string_pretty(&records) {
-            let _ = std::fs::write(self.sessions_file(), json);
+        for (project_name, records) in by_project {
+            let Some(project) = self.config.projects.iter().find(|p| p.name == project_name) else {
+                continue; // stale/removed project: nothing to persist to
+            };
+            let file = project.work_dir.join("sessions.json");
+            if let Some(parent) = file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&records) {
+                let _ = std::fs::write(file, json);
+            }
         }
     }
 
@@ -2561,13 +2677,26 @@ impl App {
     }
 
     /// Removes a play session's worktrees (cleanup on close). The branch stays in
-    /// the repo (the worktree is just the working copy).
-    fn cleanup_worktrees(&self, task: &Option<String>, worktrees: &[(String, PathBuf)]) {
+    /// the repo (the worktree is just the working copy). Resolves the store/repo
+    /// map from the entry's OWN project (not necessarily the one currently
+    /// loaded in the app), so cleaning up a background session never touches
+    /// the wrong project's backlog.
+    fn cleanup_worktrees(
+        &self,
+        project: &str,
+        task: &Option<String>,
+        worktrees: &[(String, PathBuf)],
+    ) {
         let Some(id) = task else { return };
+        let Some(project) = self.config.projects.iter().find(|p| p.name == project) else {
+            return;
+        };
+        let store = Store::new(&project.backlog);
+        let repos = project.repo_map();
         for (repo, _) in worktrees {
-            if let Ok(task) = self.store.get(id)
+            if let Ok(task) = store.get(id)
                 && let Some(link) = task.prs.iter().find(|p| &p.repo == repo)
-                && let Some(repo_path) = self.repos.get(repo)
+                && let Some(repo_path) = repos.get(repo)
             {
                 let _ = self.git.worktree_remove(repo_path, &link.branch);
             }
@@ -2633,9 +2762,10 @@ impl App {
         }
         self.sessions[idx].session = None;
         self.sessions[idx].chat = None;
+        let project = self.sessions[idx].project.clone();
         let task = self.sessions[idx].task.clone();
         let worktrees = self.sessions[idx].worktrees.clone();
-        self.cleanup_worktrees(&task, &worktrees);
+        self.cleanup_worktrees(&project, &task, &worktrees);
         self.sessions[idx].finished = true;
         // history entries were already reported as finished; no duplicate event.
         if was_live {
@@ -2666,7 +2796,7 @@ impl App {
                 kind: SessionEventKind::Finished,
             });
         }
-        self.cleanup_worktrees(&e.task, &e.worktrees);
+        self.cleanup_worktrees(&e.project, &e.task, &e.worktrees);
         // the cards cursor recomputes; if we were in chat, fall back to cards.
         self.card_selected = self.card_selected.saturating_sub(1);
         if self.board_focus == BoardFocus::Chat {
@@ -2675,9 +2805,11 @@ impl App {
         self.persist_sessions();
     }
 
-    /// Stops ALL sessions (project switch / daemon shutdown). PRESERVES the
-    /// worktrees and the on-disk record: live ones come back resumed on the next
-    /// boot. Worktree removal only happens on explicit `finish`/`close`.
+    /// Stops ALL sessions across every project (daemon/TUI shutdown only — a
+    /// plain project switch must NOT call this, it would kill background work
+    /// of the project being left). PRESERVES the worktrees and the on-disk
+    /// record: live ones come back resumed on the next boot. Worktree removal
+    /// only happens on explicit `finish`/`close`.
     pub fn stop_all_sessions(&mut self) {
         self.persist_sessions();
         for idx in 0..self.sessions.len() {

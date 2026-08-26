@@ -450,6 +450,7 @@ fn handoff_selected_sends_findings_to_play() {
     let log = session_event::SessionLog::new(&dir.0, "uuid-h");
     let mut entry = SessionEntry::sidecar(
         SessionKind::Play,
+        "test".into(),
         Some("TASK-001".into()),
         Vec::new(),
         "uuid-h".into(),
@@ -542,6 +543,7 @@ fn session_record_roundtrip_serde() {
     use app::{SessionKind, SessionRecord};
     let rec = SessionRecord {
         kind: SessionKind::Play,
+        project: "test".into(),
         task: Some("TASK-001".into()),
         claude_session_id: "abc-123".into(),
         cwd: PathBuf::from("/tmp/wt"),
@@ -574,6 +576,7 @@ fn rehydrate_brings_finished_and_missing_cwd_as_history() {
     let recs = vec![
         SessionRecord {
             kind: SessionKind::Setup,
+            project: "test".into(),
             task: None,
             claude_session_id: "s-fin".into(),
             cwd: dir.0.clone(),
@@ -585,6 +588,7 @@ fn rehydrate_brings_finished_and_missing_cwd_as_history() {
         },
         SessionRecord {
             kind: SessionKind::Play,
+            project: "test".into(),
             task: Some("TASK-001".into()),
             claude_session_id: "s-gone".into(),
             cwd: dir.0.join("worktree-gone"),
