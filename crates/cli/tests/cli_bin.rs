@@ -76,6 +76,25 @@ impl Home {
         root
     }
 
+    /// Overwrites the project's configured repos (for --repo resolution tests).
+    fn set_repos(&self, slugs: &[&str]) {
+        let cfg_path = self.0.join("jaum/config.toml");
+        let mut cfg = Config::load_from(&cfg_path).unwrap();
+        cfg.projects[0].repos = slugs
+            .iter()
+            .map(|s| config::RepoMap {
+                slug: s.to_string(),
+                path: self.0.join(format!("repo-{s}")),
+            })
+            .collect();
+        cfg.save_to(&cfg_path).unwrap();
+    }
+
+    /// Backlog dir of the project created by `with_project()`.
+    fn backlog_dir(&self) -> PathBuf {
+        self.0.join("jaum/proj/backlog")
+    }
+
     fn jaum(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(jaum_bin());
         cmd.args(args)
@@ -206,6 +225,329 @@ fn list_prints_backlog_from_project_cwd_and_elsewhere() {
         .unwrap();
     assert!(out.status.success());
     assert!(stdout_of(&out).contains("TASK-001"));
+}
+
+// --- task new ------------------------------------------------------------
+
+fn task_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("TASK-"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn task_new_creates_task_with_objective_criteria_rfcs_and_adrs() {
+    let home = Home::new("task-new-ok");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "do the thing",
+            "--criteria",
+            "first thing works",
+            "--criteria",
+            "second thing works",
+            "--rfc",
+            "rfc-a",
+            "--rfc",
+            "rfc-b",
+            "--adr",
+            "adr-a",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert_eq!(stdout.lines().next(), Some("TASK-002"));
+
+    let content = fs::read_to_string(home.backlog_dir().join("TASK-002.md")).unwrap();
+    assert!(content.contains("type: impl"));
+    assert!(content.contains("rfc-a"));
+    assert!(content.contains("rfc-b"));
+    assert!(content.contains("adr-a"));
+    assert!(content.contains("## Objective\n\ndo the thing"));
+    assert!(content.contains("- [ ] first thing works"));
+    assert!(content.contains("- [ ] second thing works"));
+    // order preserved
+    let first_pos = content.find("first thing works").unwrap();
+    let second_pos = content.find("second thing works").unwrap();
+    assert!(first_pos < second_pos);
+}
+
+#[test]
+fn task_new_rejects_invalid_type_and_writes_nothing() {
+    let home = Home::new("task-new-bad-type");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "refactor",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = stderr_of(&out);
+    assert!(
+        stderr.contains("'refactor' is not a valid task type"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("impl, spike"), "stderr: {stderr}");
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_requires_objective() {
+    let home = Home::new("task-new-no-objective");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&["task", "new", "--type", "impl", "--criteria", "y"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("missing required --objective"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_rejects_blank_objective() {
+    let home = Home::new("task-new-blank-objective");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "   ",
+            "--criteria",
+            "y",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("--objective must not be blank"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_requires_at_least_one_criteria() {
+    let home = Home::new("task-new-no-criteria");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&["task", "new", "--type", "impl", "--objective", "x"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("at least one --criteria is required"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_rejects_blank_criteria_value() {
+    let home = Home::new("task-new-blank-criteria");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "   ",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("--criteria must not be blank"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_rejects_unknown_flag() {
+    let home = Home::new("task-new-unknown-flag");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&["task", "new", "--bogus", "x"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("unknown flag '--bogus'"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_rejects_repo_without_branch() {
+    let home = Home::new("task-new-repo-no-branch");
+    let root = home.with_project();
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+            "--repo",
+            "org/app",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("--repo requires --branch"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_links_repo_when_single_repo_configured() {
+    let home = Home::new("task-new-single-repo");
+    let root = home.with_project();
+    home.set_repos(&["org/app"]);
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+            "--branch",
+            "feat/x",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("linked: org/app@feat/x"),
+        "stdout: {stdout}"
+    );
+
+    let content = fs::read_to_string(home.backlog_dir().join("TASK-002.md")).unwrap();
+    assert!(content.contains("org/app"));
+    assert!(content.contains("feat/x"));
+}
+
+#[test]
+fn task_new_requires_explicit_repo_when_multiple_configured() {
+    let home = Home::new("task-new-multi-repo");
+    let root = home.with_project();
+    home.set_repos(&["org/a", "org/b"]);
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+            "--branch",
+            "feat/x",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = stderr_of(&out);
+    assert!(
+        stderr.contains("multiple repos are configured"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("org/a") && stderr.contains("org/b"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_rejects_unknown_repo_slug() {
+    let home = Home::new("task-new-unknown-repo");
+    let root = home.with_project();
+    home.set_repos(&["org/app"]);
+
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+            "--repo",
+            "org/other",
+            "--branch",
+            "feat/x",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("unknown --repo 'org/other'"));
+    assert_eq!(task_files(&home.backlog_dir()), vec!["TASK-001.md"]);
+}
+
+#[test]
+fn task_new_requires_a_registered_project() {
+    let home = Home::new("task-new-no-project");
+    let out = home
+        .jaum(&[
+            "task",
+            "new",
+            "--type",
+            "impl",
+            "--objective",
+            "x",
+            "--criteria",
+            "y",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("no project registered"));
 }
 
 // --- shutdown / daemon -------------------------------------------------------
