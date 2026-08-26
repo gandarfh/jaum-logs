@@ -889,9 +889,9 @@ fn local_datetime(secs: u64) -> String {
 /// Joins distinct short shas (multi-PR tasks) so a tag says which commits a
 /// review covers. `None` when the list is empty.
 fn join_shas(shas: &[String]) -> Option<String> {
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for s in shas {
-        let short = &s[..s.len().min(7)];
+        let short = short_sha(s);
         if !seen.contains(&short) {
             seen.push(short);
         }
@@ -902,7 +902,11 @@ fn join_shas(shas: &[String]) -> Option<String> {
 /// Short hash(es) the task's review was taken against, from the per-PR
 /// `reviewed_sha` carried in the snapshot. `None` when nothing was reviewed yet.
 fn reviewed_tag(t: &TaskView) -> Option<String> {
-    let shas: Vec<String> = t.prs.iter().filter_map(|p| p.reviewed_sha.clone()).collect();
+    let shas: Vec<String> = t
+        .prs
+        .iter()
+        .filter_map(|p| p.reviewed_sha.clone())
+        .collect();
     join_shas(&shas)
 }
 
@@ -1290,9 +1294,7 @@ fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
         if let Some(p) = t.review_progress {
             let (txt, c) = match p {
                 ReviewProgressId::Running => ("⟳ review running", Color::Yellow),
-                ReviewProgressId::AwaitingCi => {
-                    ("◷ re-review pending · CI running", Color::Yellow)
-                }
+                ReviewProgressId::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
                 ReviewProgressId::CiFailed => ("✗ review blocked · CI red", Color::Red),
             };
             detail(

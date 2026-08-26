@@ -869,11 +869,7 @@ fn statusline_shows_running_review() {
     rjob.kind = app::JobKind::Review;
     rjob.task = Some("TASK-001".into());
     a.job = Some(rjob);
-    assert!(
-        text(&a).contains("⟳ review TASK-001"),
-        "{}",
-        text(&a)
-    );
+    assert!(text(&a).contains("⟳ review TASK-001"), "{}", text(&a));
 }
 
 #[test]

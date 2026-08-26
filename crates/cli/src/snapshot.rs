@@ -23,7 +23,10 @@ fn review_progress_id(p: ReviewProgress) -> ReviewProgressId {
 
 /// Short reviewed SHAs carried on a task's PR links (for the verdict tag).
 fn reviewed_shas(t: &Task) -> Vec<String> {
-    t.prs.iter().filter_map(|p| p.reviewed_sha.clone()).collect()
+    t.prs
+        .iter()
+        .filter_map(|p| p.reviewed_sha.clone())
+        .collect()
 }
 
 fn status_id(s: Status) -> StatusId {
