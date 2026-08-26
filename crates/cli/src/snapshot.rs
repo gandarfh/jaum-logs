@@ -149,10 +149,14 @@ fn task_view(app: &App, t: &Task, report: Option<&ReviewReport>, active: &[Strin
             })
             .collect(),
         body: t.body.clone(),
-        live_session: app
-            .sessions
-            .iter()
-            .any(|e| e.is_live() && e.task.as_deref() == Some(t.id.as_str())),
+        // a background session of another project may carry the same task id
+        // (unique only within one project's `.backlog/`); it must not light up
+        // this task's badge.
+        live_session: app.sessions.iter().any(|e| {
+            e.is_live()
+                && e.project == app.project_name()
+                && e.task.as_deref() == Some(t.id.as_str())
+        }),
         review,
         parallel,
         review_progress,

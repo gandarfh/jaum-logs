@@ -134,6 +134,7 @@ fn open_sidecar_play(app: &mut App, task: &str, session_id: &str, cwd: &Path) ->
     let log = SessionLog::new(&app.home(), session_id);
     app.sessions.push(SessionEntry::sidecar(
         SessionKind::Play,
+        app.project_name().to_string(),
         Some(task.into()),
         Vec::new(),
         session_id.into(),
@@ -223,6 +224,7 @@ fn past(secs: u64) -> Instant {
 fn record(kind: SessionKind, task: Option<&str>, uuid: &str, cwd: &Path) -> SessionRecord {
     SessionRecord {
         kind,
+        project: "test".into(),
         task: task.map(str::to_string),
         claude_session_id: uuid.into(),
         cwd: cwd.to_path_buf(),
@@ -660,7 +662,7 @@ fn project_name_falls_back_when_index_invalid() {
 }
 
 #[test]
-fn load_project_switches_and_stops_sessions() {
+fn load_project_switches_but_keeps_other_projects_sessions_running() {
     let dir1 = TmpDir::new("proj-a");
     let dir2 = TmpDir::new("proj-b");
     let backlog2 = dir2.path().join(".backlog");
@@ -679,13 +681,76 @@ fn load_project_switches_and_stops_sessions() {
     app.load_project(1);
     assert_eq!(app.current, 1);
     assert_eq!(app.project_name(), "second");
-    assert!(app.sessions.is_empty());
+    // the "test" project's setup session is NOT killed: it keeps running in the
+    // background instead of disappearing from the daemon's session list.
+    assert_eq!(app.sessions.len(), 1);
+    assert!(app.sessions[0].is_live(), "background session stays live");
+    assert_eq!(app.sessions[0].project, "test");
+    // but it must not leak onto "second"'s board: no cards belong to it here
+    // (the · project row is still selected from the setup session's own focus).
+    assert!(app.project_selected);
+    assert!(
+        app.task_cards().is_empty(),
+        "another project's setup session must not show up on this board"
+    );
     assert_eq!(app.tasks.len(), 1);
     assert!(app.status_msg.contains("second"));
 
+    // switching back finds the same live session again (no duplicate from rehydration)
+    app.load_project(0);
+    assert_eq!(app.sessions.len(), 1);
+    assert!(app.sessions[0].is_live());
+
     // out-of-range index is ignored
     app.load_project(7);
-    assert_eq!(app.current, 1);
+    assert_eq!(app.current, 0);
+
+    app.stop_all_sessions();
+}
+
+#[test]
+fn same_task_id_in_two_projects_does_not_collide_on_the_board() {
+    let dir1 = TmpDir::new("collide-a");
+    let dir2 = TmpDir::new("collide-b");
+    // both projects have a task with the SAME id: ids are only unique within
+    // one project's own `.backlog/`.
+    write_task(&dir1.path().join(".backlog"), "TASK-001", "wip", "feat/a");
+    write_task(
+        &dir2.path().join(".backlog"),
+        "TASK-001",
+        "backlog",
+        "feat/b",
+    );
+    let mut p2 = project(dir2.path(), Vec::new());
+    p2.name = "second".into();
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir1.path(), Vec::new()), p2],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    // a live play session for "test"'s TASK-001
+    open_cat(
+        &mut app,
+        SessionKind::Play,
+        Some("TASK-001"),
+        "u-a",
+        dir1.path(),
+    );
+    assert!(app.active_task_ids().contains(&"TASK-001".to_string()));
+
+    app.load_project(1);
+    assert_eq!(app.project_name(), "second");
+    app.selected = app.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
+    app.card_selected = 0;
+
+    // "test"'s live session for its own TASK-001 must not surface here: no
+    // card, and it must not count as this project's TASK-001 being active
+    // (it isn't `wip` here, and the other project's session doesn't apply).
+    assert!(app.task_cards().is_empty());
+    assert!(!app.active_task_ids().contains(&"TASK-001".to_string()));
+    assert!(!app.selected_card_is_live());
+
+    app.stop_all_sessions();
 }
 
 #[test]
@@ -1109,6 +1174,54 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
     app.close_selected_session();
     assert!(app.sessions.is_empty());
     assert!(!wt.exists());
+}
+
+#[test]
+fn play_selected_resumes_a_finished_sessions_claude_id() {
+    let dir = TmpDir::new("play-resume");
+    let repo = git_repo(dir.path());
+    let backlog = dir.path().join(".backlog");
+    write_task(&backlog, "TASK-001", "backlog", "feat/nice-work");
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(
+            dir.path(),
+            vec![RepoMap {
+                slug: "org/x".into(),
+                path: repo.clone(),
+            }],
+        )],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    sidecar_stub(&mut app);
+    app.gh = Gh::with_bin("false");
+
+    app.play_selected();
+    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
+    let first_session_id = app.sessions[0].claude_session_id.clone();
+
+    // finish it: worktree cleaned up, entry demoted to HISTORY (no live handle).
+    app.finish_selected_session();
+    assert_eq!(app.sessions.len(), 1);
+    assert!(!app.sessions[0].is_live());
+    assert_eq!(app.sessions[0].claude_session_id, first_session_id);
+
+    // task goes back to backlog so play_selected accepts it again
+    app.store.set_status("TASK-001", Status::Backlog).unwrap();
+
+    // playing the same task again reuses the prior claude session id instead
+    // of generating a brand new one, so the conversation resumes.
+    app.play_selected();
+    assert!(app.status_msg.contains("resumed"), "{}", app.status_msg);
+    assert_eq!(
+        app.sessions.len(),
+        1,
+        "the stale history card is replaced in place, not duplicated"
+    );
+    assert_eq!(app.sessions[0].claude_session_id, first_session_id);
+    assert!(app.sessions[0].is_live());
+
+    app.close_selected_session();
 }
 
 #[test]
@@ -2258,6 +2371,61 @@ fn open_session_focuses_owner_task_and_persists() {
 }
 
 #[test]
+fn persist_sessions_writes_each_project_to_its_own_file() {
+    let dir1 = TmpDir::new("persist-a");
+    let dir2 = TmpDir::new("persist-b");
+    fs::create_dir_all(dir1.path().join(".backlog")).unwrap();
+    fs::create_dir_all(dir2.path().join(".backlog")).unwrap();
+    let mut p2 = project(dir2.path(), Vec::new());
+    p2.name = "second".into();
+    let cfg = GlobalConfig {
+        ci_poll_secs: None,
+        projects: vec![project(dir1.path(), Vec::new()), p2],
+    };
+    let mut app = App::new(cfg, 0).unwrap();
+    open_cat(&mut app, SessionKind::Setup, None, "u-first", dir1.path());
+    app.load_project(1);
+    open_cat(&mut app, SessionKind::Setup, None, "u-second", dir2.path());
+    assert_eq!(app.sessions.len(), 2, "both projects' sessions coexist");
+
+    app.persist_sessions();
+    let recs1: Vec<SessionRecord> =
+        serde_json::from_str(&fs::read_to_string(dir1.path().join(".jaum/sessions.json")).unwrap())
+            .unwrap();
+    let recs2: Vec<SessionRecord> =
+        serde_json::from_str(&fs::read_to_string(dir2.path().join(".jaum/sessions.json")).unwrap())
+            .unwrap();
+    // each project's file holds only its OWN session, never the other's.
+    assert_eq!(recs1.len(), 1);
+    assert_eq!(recs1[0].claude_session_id, "u-first");
+    assert_eq!(recs1[0].project, "test");
+    assert_eq!(recs2.len(), 1);
+    assert_eq!(recs2[0].claude_session_id, "u-second");
+    assert_eq!(recs2[0].project, "second");
+
+    // a session tagged with a project no longer in the config (removed since
+    // it was persisted) is skipped, not a crash.
+    app.sessions.push(SessionEntry::history(&record(
+        SessionKind::Setup,
+        None,
+        "u-ghost",
+        dir1.path(),
+    )));
+    app.sessions.last_mut().unwrap().project = "ghost".into();
+    app.persist_sessions();
+    let recs1_again: Vec<SessionRecord> =
+        serde_json::from_str(&fs::read_to_string(dir1.path().join(".jaum/sessions.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        recs1_again.len(),
+        1,
+        "the unknown project's session is skipped, not written anywhere"
+    );
+
+    app.stop_all_sessions();
+}
+
+#[test]
 fn focus_session_handles_unknown_task_and_history_cards() {
     let dir = TmpDir::new("focus-edge");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
@@ -2322,9 +2490,16 @@ fn cleanup_worktrees_ignores_sessions_without_task() {
     let dir = TmpDir::new("cleanup-none");
     let app = app_with(&dir, &[("TASK-001", "wip")]);
     // must not touch git at all
-    app.cleanup_worktrees(&None, &[("org/x".into(), dir.path().to_path_buf())]);
+    app.cleanup_worktrees("test", &None, &[("org/x".into(), dir.path().to_path_buf())]);
     app.cleanup_worktrees(
+        "test",
         &Some("TASK-404".into()),
+        &[("org/x".into(), dir.path().to_path_buf())],
+    );
+    // an unknown project resolves to nothing and is also a no-op
+    app.cleanup_worktrees(
+        "does-not-exist",
+        &Some("TASK-001".into()),
         &[("org/x".into(), dir.path().to_path_buf())],
     );
 }
