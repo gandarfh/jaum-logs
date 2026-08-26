@@ -132,6 +132,31 @@ constraints:
 `type: spike` produces a document (RFC/ADR), has **no** PR and no play. Review
 reports live in `.backlog/TASK-NNN.review.md`.
 
+## Creating tasks
+
+`jaum task new` creates a backlog task deterministically — no `claude` call,
+and it fails before writing anything if a required field is missing or
+`--type` isn't `impl`/`spike`:
+
+```sh
+jaum task new --type impl \
+  --objective "..." \
+  --criteria "..." [--criteria "..."] \
+  [--rfc RFC-XXX] [--adr ADR-XXX] \
+  [--repo org/name --branch feat/x]
+```
+
+A paired Claude Code Skill (`skills/jaum-new-task/`) drives this from a
+conversation — gathering the fields, running the command, and surfacing any
+validation error back for correction — instead of hand-writing a
+`TASK-*.md` file. This repo is also a Claude Code plugin, so the skill can be
+installed at any scope:
+
+```
+/plugin marketplace add gandarfh/jaum-logs
+/plugin install jaum-logs --scope user
+```
+
 ## Stack
 
 `ratatui` + `crossterm` (TUI) · `portable-pty` + `tui-term` (embedded `claude`
