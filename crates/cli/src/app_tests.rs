@@ -2338,6 +2338,7 @@ fn play_permission_request_is_auto_allowed_while_no_client_answers() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/perm-allow", "ask-permission");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2355,16 +2356,16 @@ fn play_permission_request_is_auto_allowed_while_no_client_answers() {
 
     let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::PermissionRequest { tool_name, .. } if tool_name == "Write")),
+        events.iter().any(
+            |e| matches!(e, ChatEvent::PermissionRequest { tool_name, .. } if tool_name == "Write")
+        ),
         "permission request not routed into the log: {events:?}"
     );
     // the resolution is logged too, so a replay never shows it pending
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SessionEvent::PermissionDecision { behavior, .. } if behavior == "allow"
+            ChatEvent::PermissionDecision { behavior, .. } if behavior == "allow"
         )),
         "auto-allow decision not logged: {events:?}"
     );
@@ -2380,6 +2381,7 @@ fn unanswered_permission_expires_denies_and_blocks_the_session() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/perm-deny", "ask-permission");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2416,9 +2418,7 @@ fn unanswered_permission_expires_denies_and_blocks_the_session() {
     assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
     let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::Done { .. })),
+        events.iter().any(|e| matches!(e, ChatEvent::Done { .. })),
         "deny did not close the turn: {events:?}"
     );
     // the persisted record carries the flag across restarts
@@ -2434,6 +2434,7 @@ fn close_aborts_a_hanging_turn() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/abort-hang", "hang");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2471,6 +2472,7 @@ fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/abort-perm", "ask-permission");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2506,13 +2508,13 @@ fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SessionEvent::PermissionDecision { behavior, message: Some(m), .. }
+            ChatEvent::PermissionDecision { behavior, message: Some(m), .. }
                 if behavior == "deny" && m == "turn aborted"
         )),
         "dropped permission not resolved in the log: {events:?}"
     );
     assert!(
-        matches!(events.last(), Some(SessionEvent::Done { .. })),
+        matches!(events.last(), Some(ChatEvent::Done { .. })),
         "aborted turn not closed in the log: {events:?}"
     );
     // no deadline is left behind to block the session later
@@ -2573,6 +2575,7 @@ fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/no-sidecar");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2606,6 +2609,7 @@ fn rollback_undoes_worktrees_and_status_of_a_failed_launch() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/rollback-me");
     let cfg = GlobalConfig {
+        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2660,7 +2664,7 @@ fn disconnected_sidecar_surfaces_an_error_and_closes_the_turn() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SessionEvent::Error { category, message }
+            ChatEvent::Error { category, message }
                 if category == "sidecar" && message.contains("disconnected")
         )),
         "disconnect not logged: {events:?}"
@@ -2668,7 +2672,7 @@ fn disconnected_sidecar_surfaces_an_error_and_closes_the_turn() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            SessionEvent::PermissionDecision { permission_id, behavior, .. }
+            ChatEvent::PermissionDecision { permission_id, behavior, .. }
                 if permission_id == "perm-disc" && behavior == "deny"
         )),
         "dropped permission not resolved in the log: {events:?}"
@@ -2691,7 +2695,7 @@ fn diverging_claude_session_id_migrates_the_log() {
         .as_ref()
         .unwrap()
         .log
-        .append(&SessionEvent::TextDelta {
+        .append(&ChatEvent::TextDelta {
             text: "before the switch".into(),
         })
         .unwrap();
@@ -2727,14 +2731,10 @@ fn diverging_claude_session_id_migrates_the_log() {
     );
     // the history and the new turn live in the migrated file
     let events = app.sessions[idx].chat.as_ref().unwrap().log.replay();
-    assert!(events.contains(&SessionEvent::TextDelta {
+    assert!(events.contains(&ChatEvent::TextDelta {
         text: "before the switch".into()
     }));
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, SessionEvent::Done { .. }))
-    );
+    assert!(events.iter().any(|e| matches!(e, ChatEvent::Done { .. })));
     // the persisted record follows the resumable id
     assert!(
         app.load_session_records()
@@ -2750,12 +2750,12 @@ fn render_event_clips_multibyte_text_without_panicking() {
     let idx = open_sidecar_play(&mut app, "TASK-001", "s-clip", dir.path());
     // 200 two-byte chars: a byte-indexed truncate(120) would split one in half
     let accented = "çãé".repeat(70);
-    app.sessions[idx].render_event(&SessionEvent::ToolUse {
+    app.sessions[idx].render_event(&ChatEvent::ToolUse {
         tool_use_id: "tu".into(),
         name: "Bash".into(),
         input: serde_json::json!({ "command": accented.clone() }),
     });
-    app.sessions[idx].render_event(&SessionEvent::ToolResult {
+    app.sessions[idx].render_event(&ChatEvent::ToolResult {
         tool_use_id: "tu".into(),
         content: vec![ContentBlock::Text { text: accented }],
         is_error: false,

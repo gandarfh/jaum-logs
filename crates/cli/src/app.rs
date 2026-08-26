@@ -1503,7 +1503,7 @@ impl App {
                 // must be visible in the log and in the panel, and any routed
                 // permission still pending belongs to a turn that no longer
                 // exists (its deadline must not block the session later).
-                let event = SessionEvent::Error {
+                let event = ChatEvent::Error {
                     category: "sidecar".into(),
                     message: "sidecar disconnected before the turn finished".into(),
                 };
@@ -1538,7 +1538,7 @@ impl App {
             }
             // The resolution goes into the log too, otherwise a replay shows
             // the request as eternally pending.
-            let event = SessionEvent::PermissionDecision {
+            let event = ChatEvent::PermissionDecision {
                 permission_id,
                 behavior: "allow".into(),
                 message: None,
@@ -1557,7 +1557,7 @@ impl App {
             for pending in self.permissions.clear_session(&session_id) {
                 // No response goes to the sidecar (it is gone); the log still
                 // records the resolution so a replay never shows it pending.
-                let event = SessionEvent::PermissionDecision {
+                let event = ChatEvent::PermissionDecision {
                     permission_id: pending.permission_id,
                     behavior: "deny".into(),
                     message: Some("sidecar disconnected before a decision".into()),
@@ -1610,6 +1610,10 @@ impl App {
     /// Expires unanswered permission requests: denies by default and marks
     /// the session blocked so the board surfaces it.
     pub fn tick_permissions(&mut self) {
+        // called on every daemon tick; skip the scan when nothing is tracked.
+        if self.permissions.pending_count() == 0 {
+            return;
+        }
         let expired = self.permissions.expired(Instant::now());
         if expired.is_empty() {
             return;
@@ -2592,7 +2596,7 @@ impl App {
         let dropped = self.permissions.clear_session(&session_id);
         if let Some(e) = self.sessions.get_mut(idx) {
             for pending in &dropped {
-                let event = SessionEvent::PermissionDecision {
+                let event = ChatEvent::PermissionDecision {
                     permission_id: pending.permission_id.clone(),
                     behavior: "deny".into(),
                     message: Some("turn aborted".into()),
@@ -2603,7 +2607,7 @@ impl App {
                 e.render_event(&event);
             }
             if request_id.is_some() {
-                let event = SessionEvent::Done { usage: None };
+                let event = ChatEvent::Done { usage: None };
                 if let Some(chat) = &e.chat {
                     let _ = chat.log.append(&event);
                 }

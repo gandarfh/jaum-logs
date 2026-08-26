@@ -17,15 +17,15 @@ mod config;
 #[path = "../src/protocol.rs"]
 #[allow(dead_code)]
 mod protocol;
-#[path = "../src/snapshot.rs"]
-#[allow(dead_code)]
-mod snapshot;
 #[path = "../src/session_event.rs"]
 #[allow(dead_code)]
 mod session_event;
 #[path = "../src/sidecar.rs"]
 #[allow(dead_code)]
 mod sidecar;
+#[path = "../src/snapshot.rs"]
+#[allow(dead_code)]
+mod snapshot;
 
 use app::{App, STATUS_ORDER, Tab, sort_for_board};
 
