@@ -7,6 +7,7 @@ mod protocol;
 mod session_event;
 mod sidecar;
 mod snapshot;
+mod task_new;
 mod tui;
 
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use crate::config::{Config, init_project};
 /// `jaum init [dirs] registers the cwd project (auto-detects repos, or the given dirs).
 /// `jaum ingest`     scans the project with claude and builds the backlog from the docs.
 /// `jaum list`       lists the current project's backlog without the TUI.
+/// `jaum task new`   creates a backlog task deterministically from flags (no claude call).
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
@@ -120,6 +122,49 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("task") => match args.next().as_deref() {
+            Some("new") => {
+                let rest: Vec<String> = args.collect();
+                let parsed = task_new::parse(&rest).map_err(|e| anyhow::anyhow!(e))?;
+
+                let cfg = Config::load()?;
+                let idx = select_project(&cfg)?;
+                let project = &cfg.projects[idx];
+                let store = jaum_core::Store::new(&project.backlog);
+
+                // Resolve (and validate) the repo before writing anything, so an
+                // unknown/ambiguous --repo never leaves a partial task file behind.
+                let repo_slug = if parsed.branch.is_some() {
+                    Some(
+                        project
+                            .resolve_repo_slug(parsed.repo.as_deref())
+                            .map_err(|e| anyhow::anyhow!(e))?,
+                    )
+                } else {
+                    None
+                };
+
+                let body = task_new::render_body(&parsed.objective, &parsed.criteria);
+                let task =
+                    store.create_backlog(parsed.task_type, parsed.rfcs, parsed.adrs, body)?;
+                if let (Some(repo), Some(branch)) = (&repo_slug, &parsed.branch) {
+                    store.link_repo(&task.id, repo, branch)?;
+                }
+
+                println!("{}", task.id);
+                if let Some(path) = &task.path {
+                    println!("path: {}", path.display());
+                }
+                if let (Some(repo), Some(branch)) = (&repo_slug, &parsed.branch) {
+                    println!("linked: {repo}@{branch}");
+                }
+                Ok(())
+            }
+            other => {
+                eprintln!("unknown `jaum task` subcommand: {other:?} (expected `new`)");
+                std::process::exit(1);
+            }
+        },
         // default: attach to the daemon (starting it if needed).
         _ => attach(),
     }

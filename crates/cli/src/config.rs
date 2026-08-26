@@ -54,6 +54,37 @@ impl Project {
     pub fn conventions_path(&self) -> PathBuf {
         self.home().join("conventions.md")
     }
+
+    /// Resolves the repo slug for `task new --branch` linking. An explicit
+    /// slug must match a configured repo; otherwise falls back to the single
+    /// configured repo, and is ambiguous (errors) with zero or 2+ repos.
+    pub fn resolve_repo_slug(&self, explicit: Option<&str>) -> Result<String, String> {
+        if let Some(slug) = explicit {
+            return self
+                .repos
+                .iter()
+                .find(|r| r.slug == slug)
+                .map(|r| r.slug.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "unknown --repo '{slug}': configured repos are [{}]",
+                        self.repos
+                            .iter()
+                            .map(|r| r.slug.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+        }
+        match self.repos.as_slice() {
+            [only] => Ok(only.slug.clone()),
+            [] => Err("--branch given without --repo, and no repos are configured for this project; pass --repo explicitly".to_string()),
+            many => Err(format!(
+                "--branch given without --repo, and multiple repos are configured ([{}]); pass --repo explicitly",
+                many.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
 }
 
 /// Initial `conventions.md` template.
@@ -576,5 +607,53 @@ mod tests {
         let err =
             init_project_in(&dir.path().join("base"), &dir.path().join("nope"), &[]).unwrap_err();
         assert!(format!("{err:#}").contains("resolving"));
+    }
+
+    fn project_with_repos(slugs: &[&str]) -> Project {
+        let mut p = project_at(PathBuf::from("/none/root"), PathBuf::from("/none/backlog"));
+        p.repos = slugs
+            .iter()
+            .map(|s| RepoMap {
+                slug: s.to_string(),
+                path: PathBuf::from(format!("/none/{s}")),
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn resolve_repo_slug_explicit_match() {
+        let p = project_with_repos(&["org/a", "org/b"]);
+        assert_eq!(p.resolve_repo_slug(Some("org/b")).unwrap(), "org/b");
+    }
+
+    #[test]
+    fn resolve_repo_slug_explicit_unknown() {
+        let p = project_with_repos(&["org/a"]);
+        let err = p.resolve_repo_slug(Some("org/other")).unwrap_err();
+        assert!(err.contains("unknown --repo 'org/other'"));
+        assert!(err.contains("org/a"));
+    }
+
+    #[test]
+    fn resolve_repo_slug_auto_resolves_single_repo() {
+        let p = project_with_repos(&["org/only"]);
+        assert_eq!(p.resolve_repo_slug(None).unwrap(), "org/only");
+    }
+
+    #[test]
+    fn resolve_repo_slug_ambiguous_with_no_repos() {
+        let p = project_with_repos(&[]);
+        let err = p.resolve_repo_slug(None).unwrap_err();
+        assert!(err.contains("no repos are configured"));
+    }
+
+    #[test]
+    fn resolve_repo_slug_ambiguous_with_many_repos() {
+        let p = project_with_repos(&["org/a", "org/b"]);
+        let err = p.resolve_repo_slug(None).unwrap_err();
+        assert!(err.contains("multiple repos are configured"));
+        assert!(err.contains("org/a"));
+        assert!(err.contains("org/b"));
     }
 }

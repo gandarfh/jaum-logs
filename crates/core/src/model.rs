@@ -22,6 +22,27 @@ pub enum TaskType {
     Spike,
 }
 
+impl TaskType {
+    /// Accepted CLI/config string values, in the order shown in error
+    /// messages. The one place this list is spelled out.
+    pub const VALID_VALUES: [&'static str; 2] = ["impl", "spike"];
+}
+
+impl std::str::FromStr for TaskType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "impl" => Ok(TaskType::Impl),
+            "spike" => Ok(TaskType::Spike),
+            other => Err(format!(
+                "'{other}' is not a valid task type (expected one of: {})",
+                TaskType::VALID_VALUES.join(", ")
+            )),
+        }
+    }
+}
+
 /// How a constraint is enforced (the two core patches):
 /// `Hook` = mechanical, blocked preemptively by a PreToolUse hook;
 /// `Review` = semantic, checked item by item and mandatory at review.

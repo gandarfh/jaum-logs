@@ -286,3 +286,18 @@ fn review_trigger_is_idempotent_per_commit_and_rearms_on_new_push() {
         ])
     );
 }
+
+#[test]
+fn task_type_from_str_accepts_impl_and_spike() {
+    use jaum_core::TaskType;
+    assert_eq!("impl".parse::<TaskType>(), Ok(TaskType::Impl));
+    assert_eq!("spike".parse::<TaskType>(), Ok(TaskType::Spike));
+}
+
+#[test]
+fn task_type_from_str_rejects_unknown_and_lists_valid_values() {
+    use jaum_core::TaskType;
+    let err = "refactor".parse::<TaskType>().unwrap_err();
+    assert!(err.contains("'refactor'"));
+    assert!(err.contains("impl, spike"));
+}

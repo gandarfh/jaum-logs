@@ -1,0 +1,11 @@
+{
+  "name": "jaum-logs",
+  "owner": { "name": "gandarfh" },
+  "plugins": [
+    {
+      "name": "jaum-logs",
+      "description": "Deterministic backlog task creation for jaum-managed projects.",
+      "source": "."
+    }
+  ]
+}
