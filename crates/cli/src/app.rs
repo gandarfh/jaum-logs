@@ -752,27 +752,6 @@ impl App {
         if rec.finished || !rec.cwd.exists() {
             return self.with_replayed_log(SessionEntry::history(&rec));
         }
-        // Play is sidecar-backed: no process to relaunch. The entry comes back
-        // resumable (next turn resumes the claude session) with the log replayed.
-        if rec.kind == SessionKind::Play {
-            if rec.task.is_none() {
-                return self.with_replayed_log(SessionEntry::history(&rec));
-            }
-            let log = SessionLog::new(&self.home(), &rec.claude_session_id);
-            let mut e = SessionEntry::sidecar(
-                rec.kind,
-                rec.project.clone(),
-                rec.task.clone(),
-                rec.worktrees.clone(),
-                rec.claude_session_id.clone(),
-                rec.cwd.clone(),
-                log,
-            );
-            e.created = from_epoch_ms(rec.created_ms);
-            e.last_activity = from_epoch_ms(rec.last_activity_ms);
-            e.blocked = rec.blocked;
-            return self.with_replayed_log(e);
-        }
         match self.resume_session(&rec) {
             Ok(session) => {
                 let mut e = SessionEntry::spawn(
@@ -803,11 +782,25 @@ impl App {
         e
     }
 
-    /// Relaunches claude with `--resume` for the record, per kind. Review and
-    /// setup still run on the PTY executor; only play is sidecar-backed.
+    /// Relaunches claude with `--resume` for the record, per kind: both play
+    /// and setup run on the PTY executor.
     fn resume_session(&self, rec: &SessionRecord) -> Result<Session> {
         match rec.kind {
-            SessionKind::Play => unreachable!("play resumes over the sidecar"),
+            SessionKind::Play => {
+                let id = rec
+                    .task
+                    .as_deref()
+                    .context("play session record has no task")?;
+                Play::new(
+                    &self.store,
+                    &self.git,
+                    &self.executor,
+                    &self.work_dir,
+                    self.repos.clone(),
+                    self.conventions.clone(),
+                )
+                .resume(id, &rec.claude_session_id, &rec.cwd)
+            }
             SessionKind::Setup => Setup::new(
                 &self.store,
                 &self.executor,
@@ -1186,24 +1179,44 @@ impl App {
             })
             .max_by_key(|e| e.last_activity)
             .map(|e| e.claude_session_id.clone());
-        // Spawn the sidecar BEFORE creating any side effect: a spawn failure
-        // must not leave worktrees or a wip status behind.
+        // Launched worktrees + wip status must be rolled back if the spawn
+        // (interactive claude process) then fails.
         let prior_status = self.store.get(&id).map(|t| t.status).ok();
-        let result = self.ensure_sidecar().map(|_| ()).and_then(|()| {
-            Play::new(
-                &self.store,
-                &self.git,
-                self.repos.clone(),
-                self.conventions.clone(),
-            )
-            .launch(&id)
-        });
-        let result = result.and_then(|launch| {
-            let opened = self.open_play_session(&launch, resume.clone());
-            if opened.is_err() {
-                self.rollback_play_launch(&id, &launch.worktrees, prior_status);
+        let play = Play::new(
+            &self.store,
+            &self.git,
+            &self.executor,
+            &self.work_dir,
+            self.repos.clone(),
+            self.conventions.clone(),
+        );
+        let result = match play.launch(&id) {
+            Ok(launch) => {
+                let spawned = play.spawn(&launch, resume.as_deref());
+                match spawned {
+                    Ok(ps) => Ok((id.clone(), ps)),
+                    Err(e) => {
+                        self.rollback_play_launch(&id, &launch.worktrees, prior_status);
+                        Err(e)
+                    }
+                }
             }
-            opened
+            Err(e) => Err(e),
+        };
+        let result = result.map(|(id, ps)| {
+            // resuming replaces the stale (finished) card in place, so the
+            // task keeps exactly one card for this claude session instead of
+            // a dangling history duplicate next to the newly-live one.
+            self.sessions
+                .retain(|e| e.claude_session_id != ps.claude_session_id);
+            self.open_session(
+                SessionKind::Play,
+                Some(id),
+                ps.session,
+                ps.worktrees,
+                ps.claude_session_id,
+                ps.cwd,
+            );
         });
         match result {
             Ok(()) if resume.is_some() => {
@@ -1226,6 +1239,8 @@ impl App {
         let _ = Play::new(
             &self.store,
             &self.git,
+            &self.executor,
+            &self.work_dir,
             self.repos.clone(),
             self.conventions.clone(),
         )
@@ -1259,6 +1274,11 @@ impl App {
     /// of an earlier (finished) play session for the same task: reusing it as
     /// both the identity and the resume target picks the conversation back up
     /// instead of starting from zero.
+    ///
+    /// Not called today: play now runs over a PTY (see `play_selected`), not
+    /// the sidecar. Kept intact (not deleted) to make it easy to reconnect
+    /// play to the sidecar later, once a structured chat timeline exists.
+    #[allow(dead_code)]
     fn open_play_session(&mut self, launch: &PlayLaunch, resume: Option<String>) -> Result<()> {
         let session_id = resume.clone().unwrap_or_else(|| launch.session_id.clone());
         let log = SessionLog::new(&self.home(), &session_id);
@@ -1343,6 +1363,8 @@ impl App {
         let spec: GuardSpec = Play::new(
             &self.store,
             &self.git,
+            &self.executor,
+            &self.work_dir,
             self.repos.clone(),
             self.conventions.clone(),
         )

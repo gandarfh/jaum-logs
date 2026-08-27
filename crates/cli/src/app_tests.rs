@@ -132,31 +132,6 @@ fn open_sidecar_play(app: &mut App, task: &str, session_id: &str, cwd: &Path) ->
 }
 
 /// Pumps sidecar events and permission deadlines until `pred` holds (10s cap).
-fn drain_until(app: &mut App, pred: impl Fn(&App) -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        app.drain_sidecar();
-        app.tick_permissions();
-        if pred(app) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// Task whose objective carries a trigger word for the sidecar stub script.
-fn write_task_with_objective(backlog: &Path, id: &str, branch: &str, objective: &str) {
-    fs::create_dir_all(backlog).unwrap();
-    fs::write(
-        backlog.join(format!("{id}.md")),
-        format!(
-            "---\nid: {id}\ntype: impl\nstatus: backlog\nprs:\n  - repo: org/x\n    pr: 0\n    branch: {branch}\n---\n\n## Objective\n{objective}\n"
-        ),
-    )
-    .unwrap();
-}
-
 fn git(args: &[&str], cwd: &Path) {
     let st = Command::new("git")
         .args(args)
@@ -1012,7 +987,7 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
         )],
     };
     let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
+    app.executor = ClaudeExecutor::with_bin("cat");
     app.gh = Gh::with_bin("false");
 
     app.play_selected();
@@ -1023,38 +998,11 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
     );
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.sessions[0].kind, SessionKind::Play);
-    assert!(
-        app.sessions[0].turn_active(),
-        "initial prompt is a chat turn"
-    );
+    assert!(app.sessions[0].session.is_some());
+    assert!(app.sessions[0].is_live());
     let wt = repo.with_file_name("repo.worktrees").join("feat-nice-work");
     assert!(wt.exists());
     assert_eq!(app.tasks[0].status, Status::Wip);
-
-    // the whole first turn flows through the stub into the session log
-    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
-    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::TextDelta { text } if text.contains("Objective"))),
-        "prompt not echoed into the log: {events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::ToolUse { name, .. } if name == "Bash"))
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::ToolResult { .. }))
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ChatEvent::Done { usage: Some(_) }))
-    );
 
     app.close_selected_session();
     assert!(app.sessions.is_empty());
@@ -1077,11 +1025,10 @@ fn play_selected_resumes_a_finished_sessions_claude_id() {
         )],
     };
     let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
+    app.executor = ClaudeExecutor::with_bin("cat");
     app.gh = Gh::with_bin("false");
 
     app.play_selected();
-    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
     let first_session_id = app.sessions[0].claude_session_id.clone();
 
     // finish it: worktree cleaned up, entry demoted to HISTORY (no live handle).
@@ -1763,240 +1710,7 @@ fn cleanup_worktrees_ignores_sessions_without_task() {
 // --- sidecar sessions (play over the node stub) -----------------------------
 
 #[test]
-fn play_permission_request_is_auto_allowed_while_no_client_answers() {
-    let dir = TmpDir::new("perm-allow");
-    let repo = git_repo(dir.path());
-    let backlog = dir.path().join(".backlog");
-    write_task_with_objective(&backlog, "TASK-001", "feat/perm-allow", "ask-permission");
-    let cfg = GlobalConfig {
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
-    app.gh = Gh::with_bin("false");
-
-    app.play_selected();
-    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
-
-    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
-    assert!(
-        events.iter().any(
-            |e| matches!(e, ChatEvent::PermissionRequest { tool_name, .. } if tool_name == "Write")
-        ),
-        "permission request not routed into the log: {events:?}"
-    );
-    // the resolution is logged too, so a replay never shows it pending
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            ChatEvent::PermissionDecision { behavior, .. } if behavior == "allow"
-        )),
-        "auto-allow decision not logged: {events:?}"
-    );
-    assert!(!app.sessions[0].blocked);
-    assert_eq!(app.permissions.pending_count(), 0);
-    app.close_selected_session();
-}
-
-#[test]
-fn unanswered_permission_expires_denies_and_blocks_the_session() {
-    let dir = TmpDir::new("perm-deny");
-    let repo = git_repo(dir.path());
-    let backlog = dir.path().join(".backlog");
-    write_task_with_objective(&backlog, "TASK-001", "feat/perm-deny", "ask-permission");
-    let cfg = GlobalConfig {
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
-    app.gh = Gh::with_bin("false");
-    // route to clients (none exists) with an immediate deadline
-    app.route_permissions = true;
-    app.permissions = crate::sidecar::PermissionTracker::new(Duration::ZERO);
-
-    app.play_selected();
-    assert!(drain_until(&mut app, |a| a.sessions[0].blocked));
-
-    assert!(
-        app.status_msg.contains("session blocked"),
-        "{}",
-        app.status_msg
-    );
-    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            ChatEvent::PermissionDecision { behavior, message: Some(m), .. }
-                if behavior == "deny" && m.contains("denied by default")
-        )),
-        "timeout decision not logged: {events:?}"
-    );
-    // the deny reached the sidecar: the turn finished with the deny verdict
-    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
-    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
-    assert!(
-        events.iter().any(|e| matches!(e, ChatEvent::Done { .. })),
-        "deny did not close the turn: {events:?}"
-    );
-    // the persisted record carries the flag across restarts
-    let recs = app.load_session_records();
-    assert!(recs.iter().any(|r| r.blocked));
-    app.close_selected_session();
-}
-
-#[test]
-fn close_aborts_a_hanging_turn() {
-    let dir = TmpDir::new("abort-hang");
-    let repo = git_repo(dir.path());
-    let backlog = dir.path().join(".backlog");
-    write_task_with_objective(&backlog, "TASK-001", "feat/abort-hang", "hang");
-    let cfg = GlobalConfig {
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo.clone(),
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
-    app.gh = Gh::with_bin("false");
-
-    app.play_selected();
-    // the stub never finishes this turn on its own
-    let session_id = app.sessions[0].claude_session_id.clone();
-    let log_file = app
-        .home()
-        .join(".sessions")
-        .join(format!("{session_id}.jsonl"));
-    assert!(drain_until(&mut app, |_| log_file.exists()));
-    assert!(app.sessions[0].turn_active());
-
-    let wt = repo
-        .with_file_name("repo.worktrees")
-        .join("feat-abort-hang");
-    app.close_selected_session();
-    assert!(app.sessions.is_empty());
-    assert!(!wt.exists(), "worktree not cleaned after aborting");
-}
-
-#[test]
-fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
-    let dir = TmpDir::new("abort-perm");
-    let repo = git_repo(dir.path());
-    let backlog = dir.path().join(".backlog");
-    write_task_with_objective(&backlog, "TASK-001", "feat/abort-perm", "ask-permission");
-    let cfg = GlobalConfig {
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
-    app.gh = Gh::with_bin("false");
-    // routed mode with the default (long) deadline: nothing expires by itself
-    app.route_permissions = true;
-
-    app.play_selected();
-    assert!(drain_until(&mut app, |a| a.permissions.pending_count() == 1));
-    // a follow-up queued behind the aborted turn must die with it
-    app.sessions[0]
-        .chat
-        .as_mut()
-        .unwrap()
-        .queued
-        .push_back("stale follow-up".into());
-
-    app.abort_chat_turn(0);
-    assert_eq!(app.permissions.pending_count(), 0);
-    assert!(!app.sessions[0].turn_active());
-    assert!(
-        app.sessions[0].chat.as_ref().unwrap().queued.is_empty(),
-        "queued turn survived the abort"
-    );
-    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            ChatEvent::PermissionDecision { behavior, message: Some(m), .. }
-                if behavior == "deny" && m == "turn aborted"
-        )),
-        "dropped permission not resolved in the log: {events:?}"
-    );
-    assert!(
-        matches!(events.last(), Some(ChatEvent::Done { .. })),
-        "aborted turn not closed in the log: {events:?}"
-    );
-    // no deadline is left behind to block the session later
-    app.tick_permissions();
-    assert!(!app.sessions[0].blocked);
-    app.close_selected_session();
-}
-
-#[test]
-fn rehydrated_play_session_replays_the_log() {
-    let dir = TmpDir::new("replay");
-    let work = dir.path().join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    let mut rec = record(SessionKind::Play, Some("TASK-001"), "s-replay", dir.path());
-    rec.blocked = true;
-    fs::write(
-        work.join("sessions.json"),
-        serde_json::to_string(&vec![rec]).unwrap(),
-    )
-    .unwrap();
-
-    // pre-existing event log for that session id under the project home
-    let home = dir.path().to_path_buf();
-    let log = SessionLog::new(&home, "s-replay");
-    log.append(&ChatEvent::TextDelta {
-        text: "hello from the past".into(),
-    })
-    .unwrap();
-    log.append(&ChatEvent::ToolUse {
-        tool_use_id: "tu".into(),
-        name: "Bash".into(),
-        input: serde_json::json!({"command": "ls"}),
-    })
-    .unwrap();
-    log.append(&ChatEvent::Done { usage: None }).unwrap();
-
-    let app = app_with(&dir, &[("TASK-001", "wip")]);
-    assert_eq!(app.sessions.len(), 1);
-    let e = &app.sessions[0];
-    assert!(e.is_live(), "sidecar sessions come back resumable");
-    assert!(!e.turn_active(), "no turn is in flight after a restart");
-    assert!(e.blocked, "blocked flag survives the restart");
-    let text = e.parser.screen().contents();
-    assert!(
-        text.contains("hello from the past"),
-        "log not replayed: {text}"
-    );
-    assert!(
-        text.contains("[tool Bash]"),
-        "tool event not rendered: {text}"
-    );
-}
-
-#[test]
-fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
+fn play_fails_cleanly_when_the_executor_cannot_spawn() {
     let dir = TmpDir::new("spawn-fail");
     let repo = git_repo(dir.path());
     let backlog = dir.path().join(".backlog");
@@ -2011,7 +1725,7 @@ fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
         )],
     };
     let mut app = App::new(cfg, 0).unwrap();
-    app.node_bin = "/nonexistent-node-jaum-test".into();
+    app.executor = ClaudeExecutor::with_bin("/nonexistent-bin-jaum-test");
     app.gh = Gh::with_bin("false");
 
     app.play_selected();
@@ -2048,6 +1762,8 @@ fn rollback_undoes_worktrees_and_status_of_a_failed_launch() {
     let launch = Play::new(
         &app.store,
         &app.git,
+        &app.executor,
+        &app.work_dir,
         app.repos.clone(),
         app.conventions.clone(),
     )
