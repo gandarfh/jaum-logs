@@ -1,4 +1,4 @@
-use jaum_core::{CiStatus, Constraint, Enforce, MergeState, PrCi};
+use jaum_core::{Constraint, Enforce};
 
 fn c(text: &str, pattern: Option<&str>) -> Constraint {
     Constraint {
@@ -124,167 +124,16 @@ fn is_spike_and_constraints_by_kind() {
 #[test]
 fn linked_repos_dedups_preserving_order() {
     let mut t = task_with_body("");
-    t.prs = vec![
-        link("org/b", 1, None),
-        link("org/a", 2, None),
-        link("org/b", 3, None),
-    ];
+    t.prs = vec![link("org/b", 1), link("org/a", 2), link("org/b", 3)];
     assert_eq!(t.linked_repos(), vec!["org/b", "org/a"]);
 }
 
-fn link(repo: &str, pr: u64, reviewed_sha: Option<&str>) -> jaum_core::PrLink {
+fn link(repo: &str, pr: u64) -> jaum_core::PrLink {
     jaum_core::PrLink {
         repo: repo.into(),
         pr,
         branch: "b".into(),
-        reviewed_sha: reviewed_sha.map(String::from),
     }
-}
-
-fn ci(state: MergeState, checks: CiStatus, head_sha: &str) -> PrCi {
-    PrCi {
-        state,
-        checks,
-        head_sha: head_sha.into(),
-    }
-}
-
-fn task_with_links(links: Vec<jaum_core::PrLink>) -> jaum_core::Task {
-    let mut t = task_with_body("");
-    t.prs = links;
-    t
-}
-
-#[test]
-fn review_trigger_fires_when_every_pr_is_green() {
-    let t = task_with_links(vec![link("org/a", 1, None), link("org/b", 2, None)]);
-    let observed = vec![
-        (
-            "org/a".to_string(),
-            ci(MergeState::Open, CiStatus::Passing, "aaa"),
-        ),
-        (
-            "org/b".to_string(),
-            ci(MergeState::Open, CiStatus::Passing, "bbb"),
-        ),
-    ];
-    assert_eq!(
-        t.review_trigger(&observed),
-        Some(vec![
-            ("org/a".to_string(), "aaa".to_string()),
-            ("org/b".to_string(), "bbb".to_string()),
-        ])
-    );
-}
-
-#[test]
-fn review_trigger_requires_all_prs_green() {
-    let t = task_with_links(vec![link("org/a", 1, None), link("org/b", 2, None)]);
-    for not_green in [
-        CiStatus::Pending,
-        CiStatus::Failing,
-        CiStatus::NoChecks,
-        CiStatus::Unknown,
-    ] {
-        let observed = vec![
-            (
-                "org/a".to_string(),
-                ci(MergeState::Open, CiStatus::Passing, "aaa"),
-            ),
-            ("org/b".to_string(), ci(MergeState::Open, not_green, "bbb")),
-        ];
-        assert_eq!(t.review_trigger(&observed), None, "{not_green:?}");
-    }
-}
-
-#[test]
-fn review_trigger_requires_open_prs_and_known_repos() {
-    let t = task_with_links(vec![link("org/a", 1, None)]);
-    for state in [
-        MergeState::Merged,
-        MergeState::Closed,
-        MergeState::NotCreated,
-        MergeState::Unknown,
-    ] {
-        let observed = vec![("org/a".to_string(), ci(state, CiStatus::Passing, "aaa"))];
-        assert_eq!(t.review_trigger(&observed), None, "{state:?}");
-    }
-    // repo missing from the observations: no decision possible
-    let other = vec![(
-        "org/z".to_string(),
-        ci(MergeState::Open, CiStatus::Passing, "z"),
-    )];
-    assert_eq!(t.review_trigger(&other), None);
-    // empty head SHA (gh gave no commit): no trigger
-    let no_sha = vec![(
-        "org/a".to_string(),
-        ci(MergeState::Open, CiStatus::Passing, ""),
-    )];
-    assert_eq!(t.review_trigger(&no_sha), None);
-}
-
-#[test]
-fn review_trigger_skips_spikes_missing_prs_and_uncreated_prs() {
-    let green = vec![(
-        "org/a".to_string(),
-        ci(MergeState::Open, CiStatus::Passing, "aaa"),
-    )];
-
-    let mut spike = task_with_links(vec![link("org/a", 1, None)]);
-    spike.task_type = jaum_core::TaskType::Spike;
-    assert_eq!(spike.review_trigger(&green), None);
-
-    let no_prs = task_with_links(Vec::new());
-    assert_eq!(no_prs.review_trigger(&green), None);
-
-    let uncreated = task_with_links(vec![link("org/a", 0, None)]);
-    assert_eq!(uncreated.review_trigger(&green), None);
-}
-
-#[test]
-fn review_trigger_is_idempotent_per_commit_and_rearms_on_new_push() {
-    let reviewed = task_with_links(vec![link("org/a", 1, Some("aaa"))]);
-    let same = vec![(
-        "org/a".to_string(),
-        ci(MergeState::Open, CiStatus::Passing, "aaa"),
-    )];
-    assert_eq!(
-        reviewed.review_trigger(&same),
-        None,
-        "same SHA must not re-fire"
-    );
-
-    let moved = vec![(
-        "org/a".to_string(),
-        ci(MergeState::Open, CiStatus::Passing, "ccc"),
-    )];
-    assert_eq!(
-        reviewed.review_trigger(&moved),
-        Some(vec![("org/a".to_string(), "ccc".to_string())])
-    );
-
-    // multi-PR: one head moving is enough, and markers cover every link
-    let multi = task_with_links(vec![
-        link("org/a", 1, Some("aaa")),
-        link("org/b", 2, Some("bbb")),
-    ]);
-    let one_moved = vec![
-        (
-            "org/a".to_string(),
-            ci(MergeState::Open, CiStatus::Passing, "aaa"),
-        ),
-        (
-            "org/b".to_string(),
-            ci(MergeState::Open, CiStatus::Passing, "new"),
-        ),
-    ];
-    assert_eq!(
-        multi.review_trigger(&one_moved),
-        Some(vec![
-            ("org/a".to_string(), "aaa".to_string()),
-            ("org/b".to_string(), "new".to_string()),
-        ])
-    );
 }
 
 #[test]

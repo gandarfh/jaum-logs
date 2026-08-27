@@ -46,7 +46,6 @@ fn app_in(dir: &Path) -> App {
     let mut app = App::new(
         Config {
             projects: vec![project],
-            ci_poll_secs: None,
         },
         0,
     )
@@ -194,6 +193,26 @@ fn burst_drain_yields_within_the_cap_under_continuous_events() {
     );
     drop(rx);
     producer.join().unwrap();
+}
+
+/// Regression: `drain_burst` used to always wait a fixed 20ms
+/// (`COALESCE.min(...)`) hoping a follow-up event would arrive, even for a
+/// single isolated one — every lone keystroke paid that latency before its
+/// snapshot was even built. It must now drain what's already queued and
+/// return immediately once the channel is empty.
+#[test]
+fn burst_drain_returns_immediately_for_a_lone_event() {
+    let mut server = Server::new(Daemon::new(app()));
+    let (tx, rx) = channel::<Event>();
+    tx.send(Event::Disconnect(9999)).unwrap();
+
+    let started = std::time::Instant::now();
+    drain_burst(&rx, &mut server);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(10),
+        "a lone event must not pay the coalescing wait, took {elapsed:?}"
+    );
 }
 
 // --- serve (socket) -----------------------------------------------------------

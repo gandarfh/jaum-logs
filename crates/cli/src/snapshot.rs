@@ -3,31 +3,13 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::{App, BoardCard, BoardFocus, ReviewProgress, SessionKind, Tab};
+use crate::app::{App, BoardCard, BoardFocus, SessionKind, Tab};
 use crate::protocol::{
-    BoardView, CardView, CheckVerdict, CheckView, ConstraintView, DocsView, DomainSnapshot,
-    EnforceId, FindingView, FocusId, InputView, JobView, OverlapView, ParallelMark, PickerView,
-    PrView, ProjectRef, ReviewBadge, ReviewProgressId, ReviewView, SessionKind as WireSessionKind,
-    SeverityId, StatusId, TabId, TaskTypeId, TaskView,
+    BoardView, CardView, ConstraintView, DocsView, DomainSnapshot, EnforceId, FocusId, InputView,
+    JobView, OverlapView, PickerView, PrView, ProjectRef, SessionKind as WireSessionKind, StatusId,
+    TabId, TaskTypeId, TaskView,
 };
 use jaum_core::{Enforce, Status, Task, TaskType};
-use jaum_flows::review::{ConstraintResult, ConstraintVerdict, Finding, ReviewReport, Severity};
-
-fn review_progress_id(p: ReviewProgress) -> ReviewProgressId {
-    match p {
-        ReviewProgress::Running => ReviewProgressId::Running,
-        ReviewProgress::AwaitingCi => ReviewProgressId::AwaitingCi,
-        ReviewProgress::CiFailed => ReviewProgressId::CiFailed,
-    }
-}
-
-/// Short reviewed SHAs carried on a task's PR links (for the verdict tag).
-fn reviewed_shas(t: &Task) -> Vec<String> {
-    t.prs
-        .iter()
-        .filter_map(|p| p.reviewed_sha.clone())
-        .collect()
-}
 
 fn status_id(s: Status) -> StatusId {
     match s {
@@ -56,46 +38,7 @@ fn enforce_id(e: Enforce) -> EnforceId {
 pub(crate) fn wire_session_kind(k: SessionKind) -> WireSessionKind {
     match k {
         SessionKind::Play => WireSessionKind::Play,
-        SessionKind::Review => WireSessionKind::Review,
         SessionKind::Setup => WireSessionKind::Setup,
-    }
-}
-
-fn check_view(c: &ConstraintResult) -> CheckView {
-    CheckView {
-        text: c.text.clone(),
-        verdict: match c.verdict {
-            ConstraintVerdict::Pending => CheckVerdict::Pending,
-            ConstraintVerdict::Ok => CheckVerdict::Ok,
-            ConstraintVerdict::Failed => CheckVerdict::Failed,
-        },
-    }
-}
-
-fn finding_view(f: &Finding) -> FindingView {
-    FindingView {
-        severity: match f.severity {
-            Severity::Blocker => SeverityId::Blocker,
-            Severity::Major => SeverityId::Major,
-            Severity::Minor => SeverityId::Minor,
-            Severity::Nit => SeverityId::Nit,
-        },
-        file: f.file.clone(),
-        line: f.line,
-        message: f.message.clone(),
-        reference: f.reference.clone(),
-    }
-}
-
-fn review_view(r: &ReviewReport, shas: Vec<String>) -> ReviewView {
-    ReviewView {
-        clean: r.is_clean(),
-        blocking: r.blocking_count(),
-        findings: r.findings.iter().map(finding_view).collect(),
-        constraints: r.constraints.iter().map(check_view).collect(),
-        criteria: r.criteria.iter().map(check_view).collect(),
-        reviewed_shas: shas,
-        reviewed_at: r.reviewed_at,
     }
 }
 
@@ -106,23 +49,7 @@ fn epoch_ms(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() * 1000
 }
 
-fn task_view(app: &App, t: &Task, report: Option<&ReviewReport>, active: &[String]) -> TaskView {
-    let review = report.map(|r| ReviewBadge {
-        clean: r.is_clean(),
-        badge: r.findings.len() + r.unmet_count(),
-        unmet: r.unmet_count(),
-        reviewed_at: r.reviewed_at,
-    });
-    let review_progress = app.review_progress(t).map(review_progress_id);
-    let parallel = if active.contains(&t.id) {
-        None
-    } else if app.parallel_conflict_with_active(&t.id).is_some() {
-        Some(ParallelMark::Conflict)
-    } else if app.is_parallel_safe(&t.id) {
-        Some(ParallelMark::Safe)
-    } else {
-        None
-    };
+fn task_view(app: &App, t: &Task) -> TaskView {
     TaskView {
         id: t.id.clone(),
         task_type: task_type_id(t.task_type),
@@ -136,7 +63,6 @@ fn task_view(app: &App, t: &Task, report: Option<&ReviewReport>, active: &[Strin
                 repo: p.repo.clone(),
                 pr: p.pr,
                 branch: p.branch.clone(),
-                reviewed_sha: p.reviewed_sha.clone(),
             })
             .collect(),
         deferred: t.deferred.clone(),
@@ -157,13 +83,10 @@ fn task_view(app: &App, t: &Task, report: Option<&ReviewReport>, active: &[Strin
                 && e.project == app.project_name()
                 && e.task.as_deref() == Some(t.id.as_str())
         }),
-        review,
-        parallel,
-        review_progress,
     }
 }
 
-fn card_view(app: &App, card: BoardCard, selected_review: Option<&ReviewView>) -> CardView {
+fn card_view(app: &App, card: BoardCard) -> CardView {
     match card {
         BoardCard::Session(i) => {
             let e = &app.sessions[i];
@@ -173,37 +96,17 @@ fn card_view(app: &App, card: BoardCard, selected_review: Option<&ReviewView>) -
                 last_activity_ms: epoch_ms(e.last_activity),
             }
         }
-        BoardCard::Verdict => CardView::Verdict {
-            clean: selected_review.map(|r| r.clean).unwrap_or(true),
-        },
     }
 }
 
 /// Builds the full snapshot of the app's domain state.
 pub fn build_snapshot(app: &App) -> DomainSnapshot {
-    let active = app.active_task_ids();
-    // one review read per task, reused for the badge AND the selected-task
-    // detail (this runs on every daemon tick; no doubled disk reads).
-    let reports: Vec<Option<ReviewReport>> =
-        app.tasks.iter().map(|t| app.load_review(&t.id)).collect();
-    let tasks: Vec<TaskView> = app
-        .tasks
-        .iter()
-        .zip(&reports)
-        .map(|(t, report)| task_view(app, t, report.as_ref(), &active))
-        .collect();
+    let tasks: Vec<TaskView> = app.tasks.iter().map(|t| task_view(app, t)).collect();
 
-    // reuse the deduped report for the selected task (no second disk read).
-    let selected_review = app.selected_task().and_then(|t| {
-        reports
-            .get(app.selected)
-            .and_then(Option::as_ref)
-            .map(|r| review_view(r, reviewed_shas(t)))
-    });
     let cards: Vec<CardView> = app
         .task_cards()
         .into_iter()
-        .map(|c| card_view(app, c, selected_review.as_ref()))
+        .map(|c| card_view(app, c))
         .collect();
 
     let board = BoardView {
@@ -225,7 +128,6 @@ pub fn build_snapshot(app: &App) -> DomainSnapshot {
             .any(|e| e.is_live() && e.kind == SessionKind::Setup),
         detail_open: app.detail_open,
         detail_scroll: app.detail_scroll,
-        review: selected_review,
         overlaps: app
             .overlaps
             .iter()

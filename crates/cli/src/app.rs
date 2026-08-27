@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -18,13 +18,10 @@ use crate::sidecar::{
     ChatTurn, GuardPattern, PermissionDecision, PermissionTracker, SidecarClient, SidecarEvent,
     resolve_bundle,
 };
-use jaum_core::{CiStatus, MergeState, PrCi, Repo, Status, Store, Task};
+use jaum_core::{Status, Store, Task};
 use jaum_flows::conflict::Conflict;
 use jaum_flows::finish::Finish;
-use jaum_flows::ingest::Ingest;
-use jaum_flows::parallel::{Parallel, ParallelReport};
 use jaum_flows::play::{GuardSpec, Play, PlayLaunch};
-use jaum_flows::review::{Review, ReviewReport};
 use jaum_flows::setup::{Setup, branch_leaks_id, is_template};
 
 /// What's missing from the project's mandatory setup (validated at init/open).
@@ -80,25 +77,10 @@ pub enum BoardFocus {
     Chat,
 }
 
-/// Middle-column item of a task: a session (index into `sessions`) or the
-/// review verdict card (`.review.md`).
+/// Middle-column item of a task: a session (index into `sessions`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BoardCard {
     Session(usize),
-    Verdict,
-}
-
-/// In-flight/pending state of a task's automatic review, for the board glyphs.
-/// The persisted verdict badge (`✓`/`⚑`) covers the "done" case; this covers
-/// what is still owed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReviewProgress {
-    /// Capture running right now.
-    Running,
-    /// A new commit exists whose CI is still running; re-review is due once green.
-    AwaitingCi,
-    /// A new commit exists whose CI is red; the review stays blocked until it passes.
-    CiFailed,
 }
 
 /// Canonical display order of statuses on the board.
@@ -155,7 +137,6 @@ pub fn list_docs(dir: &std::path::Path) -> Vec<String> {
 #[serde(rename_all = "lowercase")]
 pub enum SessionKind {
     Play,
-    Review,
     Setup,
 }
 
@@ -163,7 +144,6 @@ impl SessionKind {
     pub fn label(self) -> &'static str {
         match self {
             SessionKind::Play => "play",
-            SessionKind::Review => "review",
             SessionKind::Setup => "setup",
         }
     }
@@ -493,29 +473,21 @@ pub use crate::protocol::InputKind;
 /// Async job kind (defines what to do when it finishes).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
-    Ingest,
-    Capture,
     Init,
-    Review,
-    Parallel,
 }
 
 /// Message from a background job to the UI.
 pub enum JobMsg {
     /// Live log line.
     Log(String),
-    /// Termination. `Ok` = project name (Init) or success phrase; `Err` =
-    /// failure message.
+    /// Termination. `Ok` = project name (Init); `Err` = failure message.
     Done(Result<String, String>),
 }
 
-/// An async job (ingest/capture/init) with its live logs.
+/// An async job (init) with its live logs.
 pub struct Job {
     pub kind: JobKind,
     pub title: String,
-    /// Task the job acts on, when it has one (review). Drives the in-flight
-    /// indicators (statusline + list glyph) while it runs.
-    pub task: Option<String>,
     pub logs: Vec<String>,
     pub rx: Receiver<JobMsg>,
     pub finished: bool,
@@ -602,8 +574,6 @@ pub struct App {
     /// daemon broadcasts them; the local TUI discards them each frame).
     session_events: Vec<SessionEvent>,
 
-    pub review_report: Option<ReviewReport>,
-
     /// Board (3-column layout): focused panel, cards-column cursor, and whether the
     /// chat is fullscreen. `project_selected` = the synthetic "· project" row (top
     /// of the list) is selected instead of a task; its cards are the setup sessions.
@@ -611,9 +581,6 @@ pub struct App {
     pub card_selected: usize,
     pub chat_fullscreen: bool,
     pub project_selected: bool,
-
-    /// Last parallelism analysis (loaded from `work_dir/parallel.json`).
-    pub parallel: Option<ParallelReport>,
 
     /// Session tab: pending prefix (Ctrl+B) for the next jaum command.
     pub pending_prefix: bool,
@@ -638,7 +605,7 @@ pub struct App {
     /// Request to open `conventions.md` in `$EDITOR` (handled in the event loop).
     pub edit_request: bool,
 
-    /// In-flight async job (ingest/capture/init) with live logs.
+    /// In-flight async job (init) with live logs.
     pub job: Option<Job>,
     /// Logs overlay visible (separate from the job: the job keeps running in background).
     pub job_overlay: bool,
@@ -648,18 +615,6 @@ pub struct App {
     /// agent and writes it to the task.
     last_pr_sync: Instant,
     pr_sync_running: Arc<AtomicBool>,
-
-    /// CI watch: polls the PRs of eligible tasks and, when every check is green,
-    /// dispatches the structured review capture automatically. Observations come
-    /// back on `ci_rx`; `ci_tx` is cloned into the polling thread.
-    last_ci_poll: Instant,
-    ci_poll_interval: Duration,
-    ci_poll_running: Arc<AtomicBool>,
-    ci_tx: Sender<(String, Vec<(Repo, PrCi)>)>,
-    ci_rx: Receiver<(String, Vec<(Repo, PrCi)>)>,
-    /// Latest CI observation per task id, kept so the board can show whether a
-    /// re-review is still pending (new commit whose CI is running or red).
-    pub(crate) ci_obs: HashMap<String, Vec<(Repo, PrCi)>>,
 
     /// Sidecar process (lazy; respawned when it dies).
     sidecar: Option<SidecarClient>,
@@ -677,9 +632,8 @@ pub struct App {
     /// switch to interactive approvals once a client can present them.
     pub route_permissions: bool,
 
-    /// Binaries used by background jobs (their threads build their own adapters);
-    /// tests point these at stubs so no real `claude`/`gh` is ever spawned.
-    claude_bin: String,
+    /// Binary used by background jobs (their threads build their own adapters);
+    /// tests point this at a stub so no real `gh` is ever spawned.
     gh_bin: String,
     /// node binary + bundle used to spawn the sidecar (stubbed in tests).
     node_bin: String,
@@ -699,8 +653,6 @@ impl App {
             .context("invalid project index")?;
         let conventions_path = project.conventions_path();
         let conventions = std::fs::read_to_string(&conventions_path).unwrap_or_default();
-        let ci_poll_interval = Duration::from_secs(config.ci_poll_secs.unwrap_or(30));
-        let (ci_tx, ci_rx) = channel();
         let mut app = Self {
             git: Git::new(),
             gh: Gh::new(),
@@ -726,12 +678,10 @@ impl App {
             should_quit: false,
             sessions: Vec::new(),
             session_events: Vec::new(),
-            review_report: None,
             board_focus: BoardFocus::Tasks,
             card_selected: 0,
             chat_fullscreen: false,
             project_selected: false,
-            parallel: None,
             pending_prefix: false,
             input: None,
             project_picker: false,
@@ -747,18 +697,11 @@ impl App {
             job_overlay: false,
             last_pr_sync: Instant::now(),
             pr_sync_running: Arc::new(AtomicBool::new(false)),
-            last_ci_poll: Instant::now(),
-            ci_poll_interval,
-            ci_poll_running: Arc::new(AtomicBool::new(false)),
-            ci_tx,
-            ci_rx,
-            ci_obs: HashMap::new(),
             sidecar: None,
             sidecar_pinged: None,
             last_sidecar_ping: Instant::now(),
             permissions: PermissionTracker::default(),
             route_permissions: false,
-            claude_bin: "claude".into(),
             gh_bin: "gh".into(),
             node_bin: "node".into(),
             sidecar_bundle: resolve_bundle(
@@ -809,27 +752,6 @@ impl App {
         if rec.finished || !rec.cwd.exists() {
             return self.with_replayed_log(SessionEntry::history(&rec));
         }
-        // Play is sidecar-backed: no process to relaunch. The entry comes back
-        // resumable (next turn resumes the claude session) with the log replayed.
-        if rec.kind == SessionKind::Play {
-            if rec.task.is_none() {
-                return self.with_replayed_log(SessionEntry::history(&rec));
-            }
-            let log = SessionLog::new(&self.home(), &rec.claude_session_id);
-            let mut e = SessionEntry::sidecar(
-                rec.kind,
-                rec.project.clone(),
-                rec.task.clone(),
-                rec.worktrees.clone(),
-                rec.claude_session_id.clone(),
-                rec.cwd.clone(),
-                log,
-            );
-            e.created = from_epoch_ms(rec.created_ms);
-            e.last_activity = from_epoch_ms(rec.last_activity_ms);
-            e.blocked = rec.blocked;
-            return self.with_replayed_log(e);
-        }
         match self.resume_session(&rec) {
             Ok(session) => {
                 let mut e = SessionEntry::spawn(
@@ -860,19 +782,20 @@ impl App {
         e
     }
 
-    /// Relaunches claude with `--resume` for the record, per kind. Review and
-    /// setup still run on the PTY executor; only play is sidecar-backed.
+    /// Relaunches claude with `--resume` for the record, per kind: both play
+    /// and setup run on the PTY executor.
     fn resume_session(&self, rec: &SessionRecord) -> Result<Session> {
         match rec.kind {
-            SessionKind::Play => unreachable!("play resumes over the sidecar"),
-            SessionKind::Review => {
-                let id = rec.task.as_deref().context("review record without task")?;
-                Review::new(
+            SessionKind::Play => {
+                let id = rec
+                    .task
+                    .as_deref()
+                    .context("play session record has no task")?;
+                Play::new(
                     &self.store,
                     &self.git,
-                    &self.gh,
                     &self.executor,
-                    &self.docs_dir,
+                    &self.work_dir,
                     self.repos.clone(),
                     self.conventions.clone(),
                 )
@@ -1004,10 +927,6 @@ impl App {
         self.overlaps = Conflict::new(&self.store)
             .detect_overlap()
             .unwrap_or_default();
-        // persisted parallelism analysis (best-effort; absent = no badges).
-        self.parallel = std::fs::read_to_string(self.parallel_file())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
         self.docs = list_docs(&self.docs_dir);
         if !self.docs.is_empty() && self.docs_selected >= self.docs.len() {
             self.docs_selected = self.docs.len() - 1;
@@ -1017,9 +936,9 @@ impl App {
 
     // --- Board: task cards + panel focus -----------------------------------
 
-    /// Middle-column cards for the selected task: one entry per live/history session
-    /// of it + the verdict (if there's a `.review.md`). Session order follows
-    /// `sessions` (already sorted by activity in `sort_sessions`).
+    /// Middle-column cards for the selected task: one entry per live/history
+    /// session of it. Session order follows `sessions` (already sorted by
+    /// activity in `sort_sessions`).
     pub fn task_cards(&self) -> Vec<BoardCard> {
         let project = self.project_name();
         // · project row: cards = setup sessions (no task).
@@ -1038,17 +957,12 @@ impl App {
         // A background session of another project may carry the same task id
         // (ids are only unique within one project's `.backlog/`): the project
         // filter keeps the two from colliding on this board.
-        let mut cards: Vec<BoardCard> = self
-            .sessions
+        self.sessions
             .iter()
             .enumerate()
             .filter(|(_, e)| e.project == project && e.task.as_deref() == Some(id.as_str()))
             .map(|(i, _)| BoardCard::Session(i))
-            .collect();
-        if self.load_review(&id).is_some() {
-            cards.push(BoardCard::Verdict);
-        }
-        cards
+            .collect()
     }
 
     /// Card under the middle-column cursor.
@@ -1091,55 +1005,6 @@ impl App {
             BoardFocus::Cards => BoardFocus::Tasks,
             BoardFocus::Tasks => BoardFocus::Tasks,
         };
-    }
-
-    // --- parallelism (Board badges) ----------------------------------------
-
-    /// File of the persisted parallelism analysis.
-    fn parallel_file(&self) -> PathBuf {
-        self.work_dir.join("parallel.json")
-    }
-
-    /// "Active" tasks (parallelism reference): with a live play session OR in
-    /// status `wip`.
-    pub fn active_task_ids(&self) -> Vec<String> {
-        let project = self.project_name();
-        let mut ids: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|e| e.is_live() && e.kind == SessionKind::Play && e.project == project)
-            .filter_map(|e| e.task.clone())
-            .collect();
-        for t in &self.tasks {
-            if t.status == Status::Wip && !ids.contains(&t.id) {
-                ids.push(t.id.clone());
-            }
-        }
-        ids
-    }
-
-    /// If the task collides with any ACTIVE task, returns `(other, repo, reason)`.
-    pub fn parallel_conflict_with_active(&self, id: &str) -> Option<(String, String, String)> {
-        let report = self.parallel.as_ref()?;
-        for other in self.active_task_ids() {
-            if other == id {
-                continue;
-            }
-            if let Some(c) = report.conflict_between(id, &other) {
-                return Some((other, c.repo.clone(), c.reason.clone()));
-            }
-        }
-        None
-    }
-
-    /// `true` if there's analysis, another active task, and this one collides with
-    /// none — i.e. it can be started in parallel safely.
-    pub fn is_parallel_safe(&self, id: &str) -> bool {
-        if self.parallel.is_none() {
-            return false;
-        }
-        let has_other_active = self.active_task_ids().iter().any(|a| a != id);
-        has_other_active && self.parallel_conflict_with_active(id).is_none()
     }
 
     // --- docs (Docs tab) ---------------------------------------------------
@@ -1222,15 +1087,6 @@ impl App {
     /// When the Board row changes, the cards cursor returns to the start.
     fn on_task_change(&mut self) {
         self.card_selected = 0;
-    }
-
-    /// Task's review report (if there's a `.review.md`). No session needed.
-    pub fn load_review(&self, id: &str) -> Option<ReviewReport> {
-        let path = self.store.review_path(id);
-        self.store
-            .read_doc::<ReviewReport>(&path)
-            .ok()
-            .map(|(r, _)| r)
     }
 
     // --- project setup ----------------------------------------------------
@@ -1323,24 +1179,44 @@ impl App {
             })
             .max_by_key(|e| e.last_activity)
             .map(|e| e.claude_session_id.clone());
-        // Spawn the sidecar BEFORE creating any side effect: a spawn failure
-        // must not leave worktrees or a wip status behind.
+        // Launched worktrees + wip status must be rolled back if the spawn
+        // (interactive claude process) then fails.
         let prior_status = self.store.get(&id).map(|t| t.status).ok();
-        let result = self.ensure_sidecar().map(|_| ()).and_then(|()| {
-            Play::new(
-                &self.store,
-                &self.git,
-                self.repos.clone(),
-                self.conventions.clone(),
-            )
-            .launch(&id)
-        });
-        let result = result.and_then(|launch| {
-            let opened = self.open_play_session(&launch, resume.clone());
-            if opened.is_err() {
-                self.rollback_play_launch(&id, &launch.worktrees, prior_status);
+        let play = Play::new(
+            &self.store,
+            &self.git,
+            &self.executor,
+            &self.work_dir,
+            self.repos.clone(),
+            self.conventions.clone(),
+        );
+        let result = match play.launch(&id) {
+            Ok(launch) => {
+                let spawned = play.spawn(&launch, resume.as_deref());
+                match spawned {
+                    Ok(ps) => Ok((id.clone(), ps)),
+                    Err(e) => {
+                        self.rollback_play_launch(&id, &launch.worktrees, prior_status);
+                        Err(e)
+                    }
+                }
             }
-            opened
+            Err(e) => Err(e),
+        };
+        let result = result.map(|(id, ps)| {
+            // resuming replaces the stale (finished) card in place, so the
+            // task keeps exactly one card for this claude session instead of
+            // a dangling history duplicate next to the newly-live one.
+            self.sessions
+                .retain(|e| e.claude_session_id != ps.claude_session_id);
+            self.open_session(
+                SessionKind::Play,
+                Some(id),
+                ps.session,
+                ps.worktrees,
+                ps.claude_session_id,
+                ps.cwd,
+            );
         });
         match result {
             Ok(()) if resume.is_some() => {
@@ -1363,6 +1239,8 @@ impl App {
         let _ = Play::new(
             &self.store,
             &self.git,
+            &self.executor,
+            &self.work_dir,
             self.repos.clone(),
             self.conventions.clone(),
         )
@@ -1396,6 +1274,11 @@ impl App {
     /// of an earlier (finished) play session for the same task: reusing it as
     /// both the identity and the resume target picks the conversation back up
     /// instead of starting from zero.
+    ///
+    /// Not called today: play now runs over a PTY (see `play_selected`), not
+    /// the sidecar. Kept intact (not deleted) to make it easy to reconnect
+    /// play to the sidecar later, once a structured chat timeline exists.
+    #[allow(dead_code)]
     fn open_play_session(&mut self, launch: &PlayLaunch, resume: Option<String>) -> Result<()> {
         let session_id = resume.clone().unwrap_or_else(|| launch.session_id.clone());
         let log = SessionLog::new(&self.home(), &session_id);
@@ -1480,6 +1363,8 @@ impl App {
         let spec: GuardSpec = Play::new(
             &self.store,
             &self.git,
+            &self.executor,
+            &self.work_dir,
             self.repos.clone(),
             self.conventions.clone(),
         )
@@ -1739,82 +1624,6 @@ impl App {
         self.persist_sessions();
     }
 
-    pub fn review_selected(&mut self) {
-        let Some(id) = self.target_task_id() else {
-            return;
-        };
-        self.review_report = self.load_review(&id);
-        let review = Review::new(
-            &self.store,
-            &self.git,
-            &self.gh,
-            &self.executor,
-            &self.docs_dir,
-            self.repos.clone(),
-            self.conventions.clone(),
-        );
-        let cwd = review.review_cwd(&id);
-        match review.start(&id) {
-            Ok((session, sid)) => {
-                self.open_session(
-                    SessionKind::Review,
-                    Some(id.clone()),
-                    session,
-                    Vec::new(),
-                    sid,
-                    cwd,
-                );
-                self.status_msg = format!("read-only review of {id}");
-            }
-            Err(e) => self.status_msg = format!("review failed: {e}"),
-        }
-    }
-
-    /// Handoff: injects the review findings into the task's play session (opening
-    /// one if none), so claude fixes the pending items.
-    pub fn handoff_selected(&mut self) {
-        let Some(id) = self.target_task_id() else {
-            self.status_msg = "no task selected".into();
-            return;
-        };
-        let Some(report) = self.load_review(&id) else {
-            self.status_msg = "run review (R) before handoff".into();
-            return;
-        };
-        if report.is_clean() {
-            self.status_msg = "clean review — nothing to fix".into();
-            return;
-        }
-
-        // find (or open) a live play session for the task, in THIS project
-        let project = self.project_name().to_string();
-        let find = |s: &[SessionEntry]| {
-            s.iter().position(|e| {
-                e.is_live()
-                    && e.kind == SessionKind::Play
-                    && e.project == project
-                    && e.task.as_deref() == Some(id.as_str())
-            })
-        };
-        let mut idx = find(&self.sessions);
-        if idx.is_none() {
-            self.play_selected();
-            idx = find(&self.sessions);
-        }
-        let Some(idx) = idx else {
-            return; // play failed (status already set)
-        };
-
-        let msg = jaum_flows::review::handoff_message(&report);
-        match self.send_chat_turn(idx, msg) {
-            Ok(()) => {
-                self.focus_session(idx);
-                self.status_msg = format!("{id} findings sent to play");
-            }
-            Err(e) => self.status_msg = format!("handoff failed: {e}"),
-        }
-    }
-
     pub fn finish_selected(&mut self) {
         let Some(id) = self.target_task_id() else {
             return;
@@ -1828,21 +1637,11 @@ impl App {
         let _ = self.refresh();
     }
 
-    // --- async jobs (ingest/capture/init with live logs) ------------------
+    // --- async jobs (init with live logs) -----------------------------------
 
     /// Is a job still running?
     pub fn job_running(&self) -> bool {
         self.job.as_ref().is_some_and(|j| !j.finished)
-    }
-
-    /// Task whose review capture is running right now, if any. Drives the
-    /// in-flight indicators (statusline label + list glyph) so the background
-    /// auto-review isn't invisible once the "review started" toast fades.
-    pub fn reviewing_task_id(&self) -> Option<&str> {
-        self.job
-            .as_ref()
-            .filter(|j| !j.finished && j.kind == JobKind::Review)
-            .and_then(|j| j.task.as_deref())
     }
 
     /// Path of the current project's `.backlog/` (to build a Store in the thread).
@@ -1852,192 +1651,6 @@ impl App {
             .get(self.current)
             .map(|p| p.backlog.clone())
             .unwrap_or_default()
-    }
-
-    /// Starts ingest in background, with live logs in the overlay.
-    pub fn start_ingest_job(&mut self) {
-        if self.job_running() {
-            return;
-        }
-        let backlog = self.backlog_path();
-        let docs_dir = self.docs_dir.clone();
-        let add_dirs: Vec<PathBuf> = self.repos.values().cloned().collect();
-        let claude_bin = self.claude_bin.clone();
-        let (tx, rx) = channel();
-        self.job = Some(Job {
-            kind: JobKind::Ingest,
-            title: "ingest".into(),
-            task: None,
-            logs: vec!["scanning docs and repos with claude…".into()],
-            rx,
-            finished: false,
-            scroll: 0,
-            follow: true,
-        });
-        self.job_overlay = true;
-        std::thread::spawn(move || {
-            let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::with_bin(claude_bin);
-            let ingest = Ingest::new(&store, &executor, docs_dir, add_dirs);
-            let mut on_line = |s: &str| {
-                let _ = tx.send(JobMsg::Log(s.to_string()));
-            };
-            let done = match ingest.run_logged(&mut on_line) {
-                Ok(o) => Ok(format!(
-                    "ingest: {} stub(s), {} doc(s)",
-                    o.created.len(),
-                    o.docs_imported
-                )),
-                Err(e) => Err(format!("ingest failed: {e}")),
-            };
-            let _ = tx.send(JobMsg::Done(done));
-        });
-    }
-
-    /// Runs the structured review capture of a task in background: a read-only
-    /// `claude -p` that writes the `.review.md` (findings + verdicts). Dispatched
-    /// by the CI watch when every PR check turns green — not by a keybinding —
-    /// so it does NOT steal the screen with the job overlay.
-    ///
-    /// `markers` are the `(repo, head_sha)` to stamp as reviewed, applied ONLY
-    /// after the capture succeeds: a failed run (claude error, rate limit) leaves
-    /// the SHA unmarked so the next poll retries instead of skipping it forever.
-    pub fn start_review_job_for(&mut self, id: &str, markers: Vec<(Repo, String)>) {
-        let id = id.to_string();
-        if self.job_running() {
-            return;
-        }
-        let backlog = self.backlog_path();
-        let docs_dir = self.docs_dir.clone();
-        let repos = self.repos.clone();
-        let conventions = self.conventions.clone();
-        let claude_bin = self.claude_bin.clone();
-        let gh_bin = self.gh_bin.clone();
-        let (tx, rx) = channel();
-        self.job = Some(Job {
-            kind: JobKind::Review,
-            title: format!("review {id}"),
-            task: Some(id.clone()),
-            logs: vec![format!("reviewing {id} against docs and constraints…")],
-            rx,
-            finished: false,
-            scroll: 0,
-            follow: true,
-        });
-        self.status_msg = format!("CI green on {id} — review started");
-        std::thread::spawn(move || {
-            let store = Store::new(&backlog);
-            let git = Git::new();
-            let gh = Gh::with_bin(gh_bin);
-            let executor = ClaudeExecutor::with_bin(claude_bin);
-            let review = Review::new(&store, &git, &gh, &executor, docs_dir, repos, conventions);
-            let mut on_line = |s: &str| {
-                let _ = tx.send(JobMsg::Log(s.to_string()));
-            };
-            let done = match review.capture_logged(&id, &mut on_line) {
-                Ok(r) => {
-                    // stamp the reviewed SHAs only now that the report exists.
-                    let _ = store.mark_reviewed(&id, &markers);
-                    Ok(format!(
-                        "review {id}: {} finding(s), {}",
-                        r.findings.len(),
-                        if r.is_clean() { "CLEAN" } else { "DIRTY" }
-                    ))
-                }
-                Err(e) => Err(format!("review failed: {e}")),
-            };
-            let _ = tx.send(JobMsg::Done(done));
-        });
-    }
-
-    /// Runs the parallelism analysis (which tasks collide) in background, writes
-    /// `parallel.json` and refreshes the Board badges when done.
-    pub fn start_parallel_job(&mut self) {
-        if self.job_running() {
-            return;
-        }
-        let backlog = self.backlog_path();
-        let root = self.docs_dir.clone();
-        let repos = self.repos.clone();
-        let out_file = self.parallel_file();
-        let claude_bin = self.claude_bin.clone();
-        let (tx, rx) = channel();
-        self.job = Some(Job {
-            kind: JobKind::Parallel,
-            title: "parallelism analysis".into(),
-            task: None,
-            logs: vec!["analyzing which tasks collide…".into()],
-            rx,
-            finished: false,
-            scroll: 0,
-            follow: true,
-        });
-        self.job_overlay = true;
-        std::thread::spawn(move || {
-            let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::with_bin(claude_bin);
-            let parallel = Parallel::new(&store, &executor, root, repos);
-            let mut on_line = |s: &str| {
-                let _ = tx.send(JobMsg::Log(s.to_string()));
-            };
-            let done = match parallel.analyze_logged(&mut on_line) {
-                Ok(r) => {
-                    if let Some(parent) = out_file.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Ok(json) = serde_json::to_string_pretty(&r) {
-                        let _ = std::fs::write(&out_file, json);
-                    }
-                    Ok(format!("parallelism: {} conflict(s)", r.conflicts.len()))
-                }
-                Err(e) => Err(format!("parallelism analysis failed: {e}")),
-            };
-            let _ = tx.send(JobMsg::Done(done));
-        });
-    }
-
-    /// Starts the investigated capture (user hint) in background.
-    pub fn start_capture_job(&mut self, hint: &str) {
-        let hint = hint.trim().to_string();
-        if hint.is_empty() {
-            self.status_msg = "capture cancelled (empty)".into();
-            return;
-        }
-        if self.job_running() {
-            return;
-        }
-        let backlog = self.backlog_path();
-        let docs_dir = self.docs_dir.clone();
-        let add_dirs: Vec<PathBuf> = self.repos.values().cloned().collect();
-        let claude_bin = self.claude_bin.clone();
-        let (tx, rx) = channel();
-        self.job = Some(Job {
-            kind: JobKind::Capture,
-            title: "capture (claude investigates)".into(),
-            task: None,
-            logs: vec![format!("investigating: {hint}")],
-            rx,
-            finished: false,
-            scroll: 0,
-            follow: true,
-        });
-        self.job_overlay = true;
-        std::thread::spawn(move || {
-            let store = Store::new(&backlog);
-            let executor = ClaudeExecutor::with_bin(claude_bin);
-            let ingest = Ingest::new(&store, &executor, docs_dir, add_dirs);
-            let mut on_line = |s: &str| {
-                let _ = tx.send(JobMsg::Log(s.to_string()));
-            };
-            let done = match ingest.capture_logged(&hint, &mut on_line) {
-                Ok(o) => {
-                    let ids: Vec<String> = o.created.iter().map(|t| t.id.clone()).collect();
-                    Ok(format!("claude created: {}", ids.join(", ")))
-                }
-                Err(e) => Err(format!("capture failed: {e}")),
-            };
-            let _ = tx.send(JobMsg::Done(done));
-        });
     }
 
     /// Starts `init` of a new project in background (detects repos and registers).
@@ -2056,7 +1669,6 @@ impl App {
         self.job = Some(Job {
             kind: JobKind::Init,
             title: format!("init {path}"),
-            task: None,
             logs: vec![format!("detecting repos in {}", root.display())],
             rx,
             finished: false,
@@ -2100,11 +1712,11 @@ impl App {
                 }
             }
         }
-        let Some((kind, r)) = outcome else { return };
-        // a successful ingest chains into the parallelism analysis.
-        let auto_parallel = matches!(kind, JobKind::Ingest) && r.is_ok();
-        match (kind, r) {
-            (JobKind::Init, Ok(name)) => {
+        let Some((JobKind::Init, r)) = outcome else {
+            return;
+        };
+        match r {
+            Ok(name) => {
                 if let Ok(cfg) = (self.load_config)() {
                     self.config = cfg;
                     if let Some(idx) = self.config.projects.iter().position(|p| p.name == name) {
@@ -2120,16 +1732,13 @@ impl App {
                     j.logs.push(format!("— project '{name}' ready"));
                 }
             }
-            (_, Ok(msg)) | (_, Err(msg)) => {
+            Err(msg) => {
                 self.status_msg = msg.clone();
                 if let Some(j) = self.job.as_mut() {
                     j.logs.push(format!("— {msg}"));
                 }
                 let _ = self.refresh();
             }
-        }
-        if auto_parallel {
-            self.start_parallel_job();
         }
     }
 
@@ -2265,141 +1874,6 @@ impl App {
         });
     }
 
-    // --- CI watch (auto review on green checks) ----------------------------
-
-    /// `(id, [(repo, pr)])` of the tasks whose CI is worth polling: every link
-    /// already has a PR (`pr != 0`) and the task is not merged/spike. Openness
-    /// is confirmed by the poll itself (it comes back in the same gh call).
-    pub fn ci_watch_targets(&self) -> Vec<(String, Vec<(Repo, u64)>)> {
-        self.tasks
-            .iter()
-            .filter(|t| {
-                !t.is_spike()
-                    && t.status != Status::Merged
-                    && !t.prs.is_empty()
-                    && t.prs.iter().all(|l| l.pr != 0)
-            })
-            .map(|t| {
-                let prs = t.prs.iter().map(|l| (l.repo.clone(), l.pr)).collect();
-                (t.id.clone(), prs)
-            })
-            .collect()
-    }
-
-    /// Polls, in background, the CI of the eligible tasks' PRs (throttled by
-    /// `ci_poll_interval`) and dispatches the automatic review for whatever
-    /// turned green. A gh failure downgrades that PR to `Unknown`, which never
-    /// triggers. Called every frame by the daemon loop.
-    pub fn tick_ci_watch(&mut self) {
-        self.drain_ci_results();
-        if self.ci_poll_running.load(Ordering::Relaxed) {
-            return;
-        }
-        if self.last_ci_poll.elapsed() < self.ci_poll_interval {
-            return;
-        }
-        self.last_ci_poll = Instant::now();
-
-        let targets = self.ci_watch_targets();
-        if targets.is_empty() {
-            return;
-        }
-
-        let repos = self.repos.clone();
-        let gh_bin = self.gh_bin.clone();
-        let tx = self.ci_tx.clone();
-        let flag = self.ci_poll_running.clone();
-        flag.store(true, Ordering::Relaxed);
-        std::thread::spawn(move || {
-            let gh = Gh::with_bin(gh_bin);
-            for (id, prs) in targets {
-                let observed: Vec<(Repo, PrCi)> = prs
-                    .into_iter()
-                    .map(|(repo, pr)| {
-                        let ci = repos
-                            .get(&repo)
-                            .map(|dir| gh.pr_ci(dir, pr))
-                            .and_then(Result::ok)
-                            .unwrap_or(PrCi {
-                                state: MergeState::Unknown,
-                                checks: CiStatus::Unknown,
-                                head_sha: String::new(),
-                            });
-                        (repo, ci)
-                    })
-                    .collect();
-                if tx.send((id, observed)).is_err() {
-                    break;
-                }
-            }
-            flag.store(false, Ordering::Relaxed);
-        });
-    }
-
-    /// Applies the CI observations queued by the polling thread: records the
-    /// observation (for the board's pending-review indicator), re-reads the task
-    /// from disk (the source of truth may have moved), asks the trigger and
-    /// starts the review job with the SHAs to stamp on success. With a job
-    /// already running the observation is dropped — the SHA stays unmarked, so
-    /// the next poll re-arms the trigger.
-    fn drain_ci_results(&mut self) {
-        let pending: Vec<(String, Vec<(Repo, PrCi)>)> = self.ci_rx.try_iter().collect();
-        for (id, observed) in pending {
-            self.ci_obs.insert(id.clone(), observed.clone());
-            let Ok(task) = self.store.get(&id) else {
-                continue;
-            };
-            let Some(markers) = task.review_trigger(&observed) else {
-                continue;
-            };
-            if self.job_running() {
-                continue;
-            }
-            self.start_review_job_for(&id, markers);
-        }
-    }
-
-    /// Review status of a task, for the board indicators. Derived from the last
-    /// CI observation vs the persisted `reviewed_sha`: a re-review is due when an
-    /// open PR's head moved past what was reviewed. `Running` wins (a capture is
-    /// in flight); otherwise the aggregate CI of the unreviewed heads decides.
-    pub fn review_progress(&self, task: &Task) -> Option<ReviewProgress> {
-        if self.reviewing_task_id() == Some(task.id.as_str()) {
-            return Some(ReviewProgress::Running);
-        }
-        let obs = self.ci_obs.get(&task.id)?;
-        let mut pending_review = false;
-        let mut agg = CiStatus::Passing;
-        for link in &task.prs {
-            let Some((_, ci)) = obs.iter().find(|(repo, _)| *repo == link.repo) else {
-                continue;
-            };
-            if ci.state != MergeState::Open || ci.head_sha.is_empty() {
-                continue;
-            }
-            // this PR carries a commit that has not been reviewed yet.
-            if link.reviewed_sha.as_deref() != Some(ci.head_sha.as_str()) {
-                pending_review = true;
-                agg = match (agg, ci.checks) {
-                    (_, CiStatus::Failing) | (CiStatus::Failing, _) => CiStatus::Failing,
-                    (_, CiStatus::Pending) | (CiStatus::Pending, _) => CiStatus::Pending,
-                    (_, CiStatus::Unknown) | (CiStatus::Unknown, _) => CiStatus::Unknown,
-                    _ => CiStatus::Passing,
-                };
-            }
-        }
-        if !pending_review {
-            return None;
-        }
-        match agg {
-            // all green: the trigger fires on the next tick, so this is transient.
-            CiStatus::Passing => None,
-            CiStatus::Pending => Some(ReviewProgress::AwaitingCi),
-            CiStatus::Failing => Some(ReviewProgress::CiFailed),
-            CiStatus::Unknown | CiStatus::NoChecks => None,
-        }
-    }
-
     // --- toast (temporary snackbar) ---------------------------------------
 
     /// Detects a change in `status_msg` and (re)starts the toast timer. Called every
@@ -2434,7 +1908,6 @@ impl App {
             InputKind::Defer => self.defer(&text),
             InputKind::Convention => self.add_convention(&text),
             InputKind::NewTask => self.new_task_quick(&text),
-            InputKind::NewTaskClaude => self.start_capture_job(&text),
             InputKind::InitPath => self.start_init_job(&text),
         }
     }
@@ -2447,11 +1920,7 @@ impl App {
         let rearm = matches!(
             intent,
             Intent::Play
-                | Intent::ReviewChat
-                | Intent::Handoff
                 | Intent::Finish
-                | Intent::Ingest
-                | Intent::AnalyzeParallel
                 | Intent::StartSetup
                 | Intent::StartInput {
                     kind: InputKind::InitPath,
@@ -2492,11 +1961,7 @@ impl App {
             Intent::JobFollow => self.job_follow(),
             Intent::ToggleZoom => self.chat_fullscreen = !self.chat_fullscreen,
             Intent::Play => self.play_selected(),
-            Intent::ReviewChat => self.review_selected(),
-            Intent::Handoff => self.handoff_selected(),
             Intent::Finish => self.finish_selected(),
-            Intent::Ingest => self.start_ingest_job(),
-            Intent::AnalyzeParallel => self.start_parallel_job(),
             Intent::StartSetup => self.setup_start(),
             Intent::EditConventions => self.request_edit_conventions(),
             Intent::StartInput { kind, prefill } => self.input = Some((kind, prefill)),

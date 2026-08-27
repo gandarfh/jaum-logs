@@ -12,7 +12,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use crate::app::{self, App, BoardCard, BoardFocus, InputKind, SessionKind, Tab};
+use crate::app::{self, App, BoardFocus, InputKind, SessionKind, Tab};
 use crate::config;
 use crate::tui;
 use jaum_adapters::{ClaudeExecutor, ExecFlags, Executor};
@@ -62,7 +62,6 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
         repos: Vec::new(),
     };
     let cfg = config::Config {
-        ci_poll_secs: None,
         projects: vec![project],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -91,7 +90,9 @@ fn open_cat(a: &mut App, kind: SessionKind, task: Option<&str>, uuid: &str, cwd:
 fn draw(a: &App, w: u16, h: u16) -> Terminal<TestBackend> {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     let snap = crate::snapshot::build_snapshot(a);
-    term.draw(|f| tui::render(f, &snap, Some(a))).unwrap();
+    let mut lists = tui::ListStates::default();
+    term.draw(|f| tui::render(f, &snap, Some(a), &mut lists))
+        .unwrap();
     term
 }
 
@@ -99,7 +100,9 @@ fn draw(a: &App, w: u16, h: u16) -> Terminal<TestBackend> {
 fn draw_remote(a: &App, w: u16, h: u16) -> Terminal<TestBackend> {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     let snap = crate::snapshot::build_snapshot(a);
-    term.draw(|f| tui::render(f, &snap, None)).unwrap();
+    let mut lists = tui::ListStates::default();
+    term.draw(|f| tui::render(f, &snap, None, &mut lists))
+        .unwrap();
     term
 }
 
@@ -144,9 +147,8 @@ fn fake_job(
     let (tx, rx) = std::sync::mpsc::channel();
     (
         app::Job {
-            kind: app::JobKind::Ingest,
-            title: "ingest".into(),
-            task: None,
+            kind: app::JobKind::Init,
+            title: "init".into(),
             logs: logs.iter().map(|s| s.to_string()).collect(),
             rx,
             finished,
@@ -155,20 +157,6 @@ fn fake_job(
         },
         tx,
     )
-}
-
-fn dirty_review_md(id: &str) -> String {
-    format!(
-        "---\ntask: {id}\nfindings:\n  - file: src/a.rs\n    line: 3\n    message: broken invariant\n    reference: RFC-001\n    severity: blocker\n  - file: src/b.rs\n    message: nit only\n    severity: nit\nconstraints:\n  - text: reviewed rule\n    verdict: failed\n  - text: ok rule\n    verdict: ok\ncriteria:\n  - text: criterion one\n    verdict: pending\n---\nbody\n"
-    )
-}
-
-fn clean_review_md(id: &str) -> String {
-    format!("---\ntask: {id}\nfindings: []\nconstraints: []\ncriteria: []\n---\nok\n")
-}
-
-fn write_review(dir: &TmpDir, id: &str, body: &str) {
-    fs::write(dir.0.join(format!(".backlog/{id}.review.md")), body).unwrap();
 }
 
 // --- render: board ----------------------------------------------------------
@@ -205,165 +193,56 @@ fn board_renders_status_groups_badges_and_selection() {
     assert!(s.contains("[Board]"), "statusline tab");
 }
 
+/// Regression: `render_board_list` used to build a fresh `ListState` on every
+/// draw, so ratatui always recomputed the visible window from offset 0. Going
+/// down this coincidentally looks right (the window only ever grows to reveal
+/// the selection), but going up it recomputes `offset = selected -
+/// visible_height + 1` from scratch on every single step — no plateau — so
+/// the very first step up from the bottom already scrolls the viewport,
+/// instead of just moving the cursor within the still-fully-visible window.
+/// With a `ListStates` persisted across frames (matching real usage: one
+/// `render` call per key), the offset must stay put on that first step up.
 #[test]
-fn board_shows_review_badges_and_parallel_glyphs() {
-    let dir = TmpDir::new("badges");
-    let work = dir.0.join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    fs::write(
-        work.join("parallel.json"),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"both edit src/x.rs"}]}"#,
-    )
-    .unwrap();
-    let mut a = app_with(
-        &dir,
-        &[
-            ("TASK-001", "wip"),
-            ("TASK-002", "backlog"),
-            ("TASK-003", "backlog"),
-        ],
-    );
-    write_review(&dir, "TASK-002", &dirty_review_md("TASK-002"));
-    write_review(&dir, "TASK-003", &clean_review_md("TASK-003"));
-    a.refresh().unwrap();
-    assert!(a.parallel.is_some());
+fn board_list_scroll_holds_viewport_on_first_step_up() {
+    let dir = TmpDir::new("scroll");
+    let ids: Vec<String> = (0..40).map(|i| format!("TASK-{i:03}")).collect();
+    let tasks: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "backlog")).collect();
+    let mut a = app_with(&dir, &tasks);
 
-    let term = draw(&a, 120, 40);
-    let s = buf_string(&term);
-    assert!(s.contains("⚑"), "dirty review badge");
-    assert!(s.contains("✓"), "clean review badge");
-    assert!(s.contains("⚠"), "parallel conflict glyph");
-    assert!(s.contains("‖"), "parallel-safe glyph");
+    let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let mut lists = tui::ListStates::default();
 
-    // middle column detail for the conflicting task
-    a.selected = a.tasks.iter().position(|t| t.id == "TASK-002").unwrap();
-    let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("⚠ parallel conflict"));
-    assert!(s.contains("review DIRTY · 2 pending"));
-
-    // and for the safe/clean one
-    a.selected = a.tasks.iter().position(|t| t.id == "TASK-003").unwrap();
-    let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("‖ parallel ok"));
-    assert!(s.contains("review CLEAN"));
-}
-
-#[test]
-fn board_shows_in_flight_review_glyph_and_statusline() {
-    let dir = TmpDir::new("reviewing-glyph");
-    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
-    // no review running: no spinner anywhere
-    assert!(!buf_string(&draw(&a, 120, 40)).contains("⟳"));
-
-    // a review capture in flight on TASK-001: spinner in the list + statusline
-    let (job, _tx) = fake_job(&[], false, true, 0);
-    let mut job = job;
-    job.kind = app::JobKind::Review;
-    job.task = Some("TASK-001".into());
-    a.job = Some(job);
-    a.selected = 0;
-    let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("⟳"), "in-flight review spinner in the list");
-    assert!(s.contains("⟳ review TASK-001"), "statusline indicator");
-}
-
-#[test]
-fn board_shows_pending_re_review_glyphs_from_ci() {
-    use jaum_core::{CiStatus, MergeState, PrCi};
-    let obs = |checks| {
-        vec![(
-            "org/x".to_string(),
-            PrCi {
-                state: MergeState::Open,
-                checks,
-                head_sha: "newsha".to_string(),
-            },
-        )]
-    };
-
-    // CI still running on a new commit: hourglass + "re-review pending" line
-    let dir = TmpDir::new("pending-ci");
-    let mut a = app_with(&dir, &[("TASK-001", "wip")]);
-    a.ci_obs.insert("TASK-001".into(), obs(CiStatus::Pending));
-    a.selected = 0;
-    let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("◷"), "awaiting-CI glyph in the list");
-    assert!(s.contains("re-review pending"), "detail line");
-
-    // CI red on the new commit: cross + "blocked" line
-    let dir2 = TmpDir::new("failed-ci");
-    let mut b = app_with(&dir2, &[("TASK-001", "wip")]);
-    b.ci_obs.insert("TASK-001".into(), obs(CiStatus::Failing));
-    b.selected = 0;
-    let s = buf_string(&draw(&b, 120, 40));
-    assert!(s.contains("✗"), "CI-failed glyph in the list");
-    assert!(s.contains("review blocked"), "detail line");
-}
-
-#[test]
-fn board_tags_the_reviewed_commit() {
-    let dir = TmpDir::new("reviewed-tag");
-    // a task whose PR link records the reviewed commit
-    write_task(
-        &dir,
-        "TASK-001",
-        "---\nid: TASK-001\ntype: impl\nstatus: review\nprs:\n  - repo: org/x\n    pr: 7\n    branch: feat/x\n    reviewed_sha: c93e38d24f6bb1a703026358d83f2184da7c416d\n---\n\n## Objective\nx\n",
-    );
-    let mut a = app_with(&dir, &[]);
-    a.refresh().unwrap();
-    // a review captured two hours ago
-    let two_h_ago = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        - 7200;
-    write_review(
-        &dir,
-        "TASK-001",
-        &format!(
-            "---\ntask: TASK-001\nreviewed_at: {two_h_ago}\nfindings: []\nconstraints: []\ncriteria: []\n---\nok\n"
-        ),
-    );
-    a.selected = 0;
-
-    // middle-column detail carries the short reviewed hash + relative time
-    let s = buf_string(&draw(&a, 120, 40));
+    let mut down = Vec::new();
+    for i in 0..a.tasks.len() {
+        a.selected = i;
+        let snap = crate::snapshot::build_snapshot(&a);
+        term.draw(|f| tui::render(f, &snap, Some(&a), &mut lists))
+            .unwrap();
+        down.push(lists.board.offset());
+    }
+    // sanity: the list must have actually needed to scroll in this terminal size.
     assert!(
-        s.contains("review CLEAN · @c93e38d"),
-        "reviewed tag in detail"
+        *down.last().unwrap() > 0,
+        "offsets {down:?} never scrolled — test setup doesn't exercise the bug"
     );
-    assert!(s.contains("2h ago"), "relative review time in detail");
+    for w in down.windows(2) {
+        let delta = w[1].abs_diff(w[0]);
+        assert!(delta <= 1, "offsets {down:?} jumped by {delta} going down");
+    }
 
-    // the verdict panel repeats it as "reviewed @<sha> · <when>"
-    a.card_selected = a
-        .task_cards()
-        .iter()
-        .position(|c| *c == BoardCard::Verdict)
+    // one step up from the last row: the cursor was at the bottom of an
+    // already-scrolled window, so it still has room to move up inside that
+    // same window — the offset must not change yet.
+    a.selected = a.tasks.len() - 2;
+    let snap = crate::snapshot::build_snapshot(&a);
+    term.draw(|f| tui::render(f, &snap, Some(&a), &mut lists))
         .unwrap();
-    let s = buf_string(&draw(&a, 120, 40));
-    assert!(
-        s.contains("reviewed @c93e38d") && s.contains("2h ago"),
-        "reviewed tag + time in verdict panel"
+    let offset_after_one_step_up = lists.board.offset();
+    assert_eq!(
+        offset_after_one_step_up,
+        *down.last().unwrap(),
+        "the viewport scrolled on the very first step up instead of moving the cursor within it"
     );
-}
-
-#[test]
-fn review_when_is_relative_then_absolute() {
-    // relative buckets
-    assert_eq!(tui::fmt_review_when(30, 0), "just now");
-    assert_eq!(tui::fmt_review_when(300, 0), "5min ago");
-    assert_eq!(tui::fmt_review_when(7200, 0), "2h ago");
-    assert_eq!(tui::fmt_review_when(2 * 86400, 0), "2d ago");
-    // beyond a week falls back to an absolute local date/time
-    let abs = tui::fmt_review_when(10 * 86400, 1_700_000_000);
-    // shape YYYY-MM-DD HH:MM, timezone-independent assertion
-    let bytes = abs.as_bytes();
-    assert_eq!(abs.len(), 16, "{abs}");
-    assert_eq!(bytes[4], b'-');
-    assert_eq!(bytes[7], b'-');
-    assert_eq!(bytes[10], b' ');
-    assert_eq!(bytes[13], b':');
-    assert!(abs.starts_with("202"), "{abs}");
 }
 
 #[test]
@@ -443,7 +322,7 @@ fn chat_fullscreen_uses_whole_body() {
     assert!(!s.contains("Board · 1"), "task list hidden in fullscreen");
 }
 
-// --- render: sessions and verdict -------------------------------------------
+// --- render: sessions ---------------------------------------------------------
 
 #[test]
 fn session_pane_renders_live_focused_and_hints() {
@@ -491,58 +370,13 @@ fn session_card_age_formats_minutes_and_hours() {
     let dir = TmpDir::new("age");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
     open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u1", &dir);
-    open_cat(&mut a, SessionKind::Review, Some("TASK-001"), "u2", &dir);
+    open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u2", &dir);
     a.sessions[0].last_activity = SystemTime::now() - Duration::from_secs(2 * 60);
     a.sessions[1].last_activity = SystemTime::now() - Duration::from_secs(2 * 3600 + 120);
     let s = buf_string(&draw(&a, 120, 40));
     assert!(s.contains("2m"), "minutes form");
     assert!(s.contains("2h2m"), "hours form");
-    assert!(s.contains("review"), "second card label");
     a.stop_all_sessions();
-}
-
-#[test]
-fn verdict_panel_renders_dirty_report() {
-    let dir = TmpDir::new("verdict-dirty");
-    let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    write_review(&dir, "TASK-001", &dirty_review_md("TASK-001"));
-    a.refresh().unwrap();
-    assert_eq!(a.task_cards(), vec![BoardCard::Verdict]);
-    let s = buf_string(&draw(&a, 140, 45));
-    assert!(s.contains("Verdict · TASK-001"));
-    assert!(s.contains("is_clean:") && s.contains("DIRTY"));
-    assert!(s.contains("1 blocking"));
-    assert!(s.contains("`H` sends the open items"));
-    assert!(s.contains("[BLOCKER]") && s.contains("broken invariant"));
-    assert!(s.contains("violates") && s.contains("RFC-001"));
-    assert!(s.contains("[NIT]") && s.contains("nit only"));
-    assert!(s.contains("[FAILED]") && s.contains("reviewed rule"));
-    assert!(s.contains("[OK]") && s.contains("ok rule"));
-    assert!(s.contains("[PENDING]") && s.contains("criterion one"));
-    assert!(s.contains("Acceptance criteria"));
-}
-
-#[test]
-fn verdict_panel_renders_clean_report() {
-    let dir = TmpDir::new("verdict-clean");
-    let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    write_review(&dir, "TASK-001", &clean_review_md("TASK-001"));
-    a.refresh().unwrap();
-    let s = buf_string(&draw(&a, 140, 45));
-    assert!(s.contains("CLEAN"));
-    assert!(s.contains("(none)"), "empty findings/sections");
-    assert!(!s.contains("`H` sends"), "no handoff hint when clean");
-}
-
-#[test]
-fn verdict_lines_without_review_explains_how_to_run() {
-    let lines = tui::verdict_lines(None);
-    let text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|sp| sp.content.as_ref())
-        .collect();
-    assert!(text.contains("No review yet"));
 }
 
 #[test]
@@ -636,7 +470,6 @@ fn picker_overlay_lists_projects() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
-        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -665,7 +498,7 @@ fn job_overlay_renders_log_styles_running_and_done() {
     a.job = Some(job);
     a.job_overlay = true;
     let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("ingest · running…"));
+    assert!(s.contains("init · running…"));
     assert!(s.contains("j/k scroll · Esc close"));
     assert!(s.contains("Bash") && s.contains("ls -la"));
     assert!(s.contains("thinking about it"));
@@ -681,22 +514,27 @@ fn job_overlay_renders_log_styles_running_and_done() {
     let (job, _tx2) = fake_job(&refs, true, false, 9);
     a.job = Some(job);
     let s = buf_string(&draw(&a, 100, 30));
-    assert!(s.contains("ingest · done"));
+    assert!(s.contains("init · done"));
     assert!(s.contains("G live"), "paused hint offers going live");
 }
 
 #[test]
-fn verdict_key_is_gone_and_footer_points_to_the_review_chat() {
-    let dir = TmpDir::new("no-verdict-key");
+fn review_keys_are_unbound_and_gone_from_the_footer() {
+    let dir = TmpDir::new("no-review-keys");
     let mut a = app_with(&dir, &[("TASK-001", "review")]);
     let before = a.status_msg.clone();
-    tui::handle_key(&mut a, ch('r'));
-    assert!(a.job.is_none(), "'r' must not start the verdict job");
-    assert_eq!(a.status_msg, before, "'r' must be a no-op");
+    for k in ['r', 'R', 'H'] {
+        tui::handle_key(&mut a, ch(k));
+    }
+    assert!(
+        a.job.is_none(),
+        "no job starts from the removed review keys"
+    );
+    assert_eq!(a.status_msg, before, "r/R/H must be no-ops");
 
     let s = buf_string(&draw(&a, 120, 40));
-    assert!(s.contains("R review"), "footer advertises the review chat");
-    assert!(!s.contains("r review"), "old verdict key gone from footer");
+    assert!(!s.contains("R review"), "review chat key gone from footer");
+    assert!(!s.contains("H handoff"), "handoff key gone from footer");
 }
 
 #[test]
@@ -771,13 +609,13 @@ fn docs_tab_renders_groups_preview_and_colors() {
 }
 
 #[test]
-fn docs_tab_empty_shows_ingest_hint() {
+fn docs_tab_empty_shows_add_docs_hint() {
     let dir = TmpDir::new("docs-empty");
     let mut a = app_with(&dir, &[]);
     a.tab = Tab::Docs;
     let s = buf_string(&draw(&a, 120, 40));
     assert!(s.contains("(no .md in"));
-    assert!(s.contains("press `i` to ingest"));
+    assert!(s.contains("Add RFCs/ADRs/specs here"));
 }
 
 #[test]
@@ -803,7 +641,6 @@ fn statusline_shows_input_prompt_per_kind() {
         (InputKind::Defer, "defer"),
         (InputKind::Convention, "convention"),
         (InputKind::NewTask, "new task"),
-        (InputKind::NewTaskClaude, "task (claude investigates)"),
         (InputKind::InitPath, "init (project path)"),
     ] {
         a.input = Some((kind, "abc".into()));
@@ -818,8 +655,6 @@ fn statusline_shows_input_prompt_per_kind() {
 fn tiny_terminals_render_without_panicking() {
     let dir = TmpDir::new("tiny");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
-    write_review(&dir, "TASK-001", &dirty_review_md("TASK-001"));
-    a.refresh().unwrap();
     a.open_detail();
     for (w, h) in [(2, 2), (4, 3), (10, 5), (120, 8), (30, 40)] {
         let term = draw(&a, w, h);
@@ -855,21 +690,6 @@ fn statusline_reflects_selection_focus_tab_and_overlap() {
     let s = text(&a);
     assert!(s.contains("[Docs]"));
     assert!(!s.contains("focus"), "no board hints on the docs tab");
-}
-
-#[test]
-fn statusline_shows_running_review() {
-    let dir = TmpDir::new("statusline-review");
-    let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    let text = |a: &App| tui::statusline_text(&crate::snapshot::build_snapshot(a));
-    assert!(!text(&a).contains("⟳ review"));
-
-    // a running review capture surfaces as the ⟳ prefix (via review_progress)
-    let (mut rjob, _tx) = fake_job(&[], false, true, 0);
-    rjob.kind = app::JobKind::Review;
-    rjob.task = Some("TASK-001".into());
-    a.job = Some(rjob);
-    assert!(text(&a).contains("⟳ review TASK-001"), "{}", text(&a));
 }
 
 #[test]
@@ -934,7 +754,6 @@ fn picker_keys_navigate_and_close() {
         repos: Vec::new(),
     };
     let cfg = config::Config {
-        ci_poll_secs: None,
         projects: vec![mk("alpha", &dir), mk("beta", &dir2)],
     };
     let mut a = App::new(cfg, 0).unwrap();
@@ -1039,10 +858,6 @@ fn input_capture_edits_and_submits() {
     assert!(a.status_msg.contains("deferred"), "msg: {}", a.status_msg);
 
     // empty submissions cancel without side effects (and without spawning)
-    tui::handle_key(&mut a, ch('N'));
-    assert!(matches!(a.input, Some((InputKind::NewTaskClaude, _))));
-    tui::handle_key(&mut a, key(KeyCode::Enter));
-    assert!(a.status_msg.contains("capture cancelled"));
     a.input = Some((InputKind::InitPath, String::new()));
     tui::handle_key(&mut a, key(KeyCode::Enter));
     assert!(a.status_msg.contains("init cancelled"));
@@ -1054,7 +869,20 @@ fn input_capture_edits_and_submits() {
 fn board_navigation_focus_and_quit() {
     let dir = TmpDir::new("nav");
     let mut a = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    write_review(&dir, "TASK-001", &clean_review_md("TASK-001"));
+    // TASK-001 gets a card that exists but isn't live (a closed history entry).
+    open_cat(
+        &mut a,
+        SessionKind::Play,
+        Some("TASK-001"),
+        "u-closed",
+        &dir,
+    );
+    if let Some(s) = &mut a.sessions[0].session {
+        let _ = s.kill();
+    }
+    a.sessions[0].session = None;
+    a.sessions[0].finished = true;
+    a.board_focus = BoardFocus::Tasks;
     a.refresh().unwrap();
 
     tui::handle_key(&mut a, key(KeyCode::Tab));
@@ -1077,13 +905,13 @@ fn board_navigation_focus_and_quit() {
     tui::handle_key(&mut a, key(KeyCode::Home));
     tui::handle_key(&mut a, key(KeyCode::End));
 
-    // focus: Tasks -> Cards (TASK-001 has a verdict card) -> stays (not live)
+    // focus: Tasks -> Cards (TASK-001 has a closed history card) -> stays (not live)
     tui::handle_key(&mut a, ch('g'));
     tui::handle_key(&mut a, ch('j')); // back to first task
     tui::handle_key(&mut a, ch('l'));
     assert_eq!(a.board_focus, BoardFocus::Cards);
     tui::handle_key(&mut a, ch('l'));
-    assert_eq!(a.board_focus, BoardFocus::Cards, "verdict card is not live");
+    assert_eq!(a.board_focus, BoardFocus::Cards, "history card is not live");
     tui::handle_key(&mut a, ch('j')); // card_next within cards focus
     tui::handle_key(&mut a, ch('k'));
     tui::handle_key(&mut a, key(KeyCode::Right));
@@ -1172,11 +1000,6 @@ fn action_keys_are_safe_without_target_or_with_running_job() {
     assert!(a.edit_request);
     a.edit_request = false;
 
-    // handoff with a task but no review warns
-    tui::handle_key(&mut a, ch('j')); // back to TASK-001
-    tui::handle_key(&mut a, ch('H'));
-    assert!(a.status_msg.contains("run review"));
-
     // setup opens a chat via the stub executor
     tui::handle_key(&mut a, ch('S'));
     assert_eq!(a.status_msg, "setup: chat opened");
@@ -1209,7 +1032,7 @@ fn chat_prefix_commands() {
     let dir = TmpDir::new("prefix");
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
     open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u1", &dir);
-    open_cat(&mut a, SessionKind::Review, Some("TASK-001"), "u2", &dir);
+    open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u2", &dir);
     assert_eq!(a.board_focus, BoardFocus::Chat);
 
     tui::handle_key(&mut a, ctrl('g'));
@@ -1276,8 +1099,8 @@ fn chat_prefix_next_prev_leave_chat_on_dead_card() {
     // newest first: cards [0]=u3, [1]=u2, [2]=u1. Kill u1 and u3 so the live
     // session (u2) sits between two dead cards.
     open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u1", &dir);
-    open_cat(&mut a, SessionKind::Review, Some("TASK-001"), "u2", &dir);
-    open_cat(&mut a, SessionKind::Review, Some("TASK-001"), "u3", &dir);
+    open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u2", &dir);
+    open_cat(&mut a, SessionKind::Play, Some("TASK-001"), "u3", &dir);
     for i in [0, 2] {
         if let Some(s) = &mut a.sessions[i].session {
             let _ = s.kill();

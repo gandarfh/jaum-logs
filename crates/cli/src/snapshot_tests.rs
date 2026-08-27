@@ -9,8 +9,7 @@ use super::build_snapshot;
 use crate::app::{App, SessionKind};
 use crate::config;
 use crate::protocol::{
-    CardView, CheckVerdict, FocusId, InputKind, Intent, ParallelMark, SessionEventKind, StatusId,
-    TabId, TaskTypeId,
+    CardView, FocusId, InputKind, Intent, SessionEventKind, StatusId, TabId, TaskTypeId,
 };
 use jaum_adapters::{ClaudeExecutor, ExecFlags, Executor};
 
@@ -54,7 +53,6 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
     };
     let cfg = config::Config {
         projects: vec![project],
-        ci_poll_secs: None,
     };
     let mut a = App::new(cfg, 0).unwrap();
     // safety net: any executor spawn in a test becomes `cat`, never `claude`.
@@ -74,12 +72,6 @@ fn open_cat(a: &mut App, kind: SessionKind, task: Option<&str>, uuid: &str, cwd:
         uuid.into(),
         cwd.0.clone(),
     );
-}
-
-fn dirty_review_md(id: &str) -> String {
-    format!(
-        "---\ntask: {id}\nfindings:\n  - file: src/a.rs\n    line: 3\n    message: broken invariant\n    reference: RFC-001\n    severity: blocker\nconstraints:\n  - text: reviewed rule\n    verdict: failed\ncriteria:\n  - text: criterion one\n    verdict: pending\n---\nbody\n"
-    )
 }
 
 #[test]
@@ -108,7 +100,6 @@ fn snapshot_mirrors_tasks_project_and_docs() {
     assert_eq!(t.constraints[0].text, "no legacy");
     assert!(t.body.contains("body of TASK-001"));
     assert!(!t.live_session);
-    assert!(t.review.is_none());
 
     // docs list travels always; the preview only while something displays it
     assert_eq!(snap.docs.list, vec!["rfcs/RFC-0001.md".to_string()]);
@@ -161,79 +152,6 @@ fn snapshot_reflects_selection_and_overlay_actions() {
     let iv = input.input.unwrap();
     assert_eq!(iv.kind, InputKind::Convention);
     assert_eq!(iv.buffer, "x");
-}
-
-#[test]
-fn snapshot_carries_review_badge_and_detail() {
-    let dir = TmpDir::new("review");
-    let app = app_with(&dir, &[("TASK-001", "review")]);
-    fs::write(
-        dir.0.join(".backlog/TASK-001.review.md"),
-        dirty_review_md("TASK-001"),
-    )
-    .unwrap();
-
-    let snap = build_snapshot(&app);
-    let t = &snap.board.tasks[0];
-    let badge = t.review.expect("review badge");
-    assert!(!badge.clean);
-    // 1 finding + 1 failed constraint + 1 pending criterion
-    assert_eq!(badge.badge, 3);
-    assert_eq!(badge.unmet, 2);
-
-    let review = snap.board.review.expect("review detail");
-    assert!(!review.clean);
-    assert_eq!(review.blocking, 1);
-    let finding = &review.findings[0];
-    assert_eq!(finding.severity, crate::protocol::SeverityId::Blocker);
-    assert_eq!(finding.file, "src/a.rs");
-    assert_eq!(finding.line, Some(3));
-    assert_eq!(finding.message, "broken invariant");
-    assert_eq!(finding.reference.as_deref(), Some("RFC-001"));
-    assert_eq!(review.constraints[0].verdict, CheckVerdict::Failed);
-    assert_eq!(review.criteria[0].verdict, CheckVerdict::Pending);
-
-    // verdict card present and dirty
-    assert!(
-        snap.board
-            .cards
-            .iter()
-            .any(|c| matches!(c, CardView::Verdict { clean: false }))
-    );
-}
-
-#[test]
-fn snapshot_marks_parallel_conflicts_and_safety() {
-    let dir = TmpDir::new("parallel");
-    let work = dir.0.join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    fs::write(
-        work.join("parallel.json"),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"same file"}]}"#,
-    )
-    .unwrap();
-    let app = app_with(
-        &dir,
-        &[
-            ("TASK-001", "wip"),
-            ("TASK-002", "backlog"),
-            ("TASK-003", "backlog"),
-        ],
-    );
-
-    let snap = build_snapshot(&app);
-    let by_id = |id: &str| {
-        snap.board
-            .tasks
-            .iter()
-            .find(|t| t.id == id)
-            .unwrap()
-            .parallel
-    };
-    // the active task carries no mark; the colliding one warns; the free one is safe.
-    assert_eq!(by_id("TASK-001"), None);
-    assert_eq!(by_id("TASK-002"), Some(ParallelMark::Conflict));
-    assert_eq!(by_id("TASK-003"), Some(ParallelMark::Safe));
 }
 
 #[test]

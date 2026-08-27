@@ -19,8 +19,7 @@ use tui_term::widget::PseudoTerminal;
 use crate::app::{App, BoardFocus, Tab};
 use crate::keymap;
 use crate::protocol::{
-    CardView, CheckVerdict, CheckView, DocsView, DomainSnapshot, EnforceId, FindingView, FocusId,
-    InputKind, ParallelMark, ReviewProgressId, ReviewView, SessionKind, SeverityId, StatusId,
+    CardView, DocsView, DomainSnapshot, EnforceId, FocusId, InputKind, SessionKind, StatusId,
     TabId, TaskTypeId, TaskView,
 };
 use crate::snapshot::build_snapshot;
@@ -103,6 +102,7 @@ pub fn run(mut app: App) -> Result<()> {
 }
 
 fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+    let mut lists = ListStates::default();
     loop {
         app.drain_pty();
         app.drain_sidecar();
@@ -117,7 +117,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         let _ = app.take_session_events();
         sync_pty_size(terminal, app);
         let snap = build_snapshot(app);
-        terminal.draw(|f| render(f, &snap, Some(app)))?;
+        terminal.draw(|f| render(f, &snap, Some(app), &mut lists))?;
 
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
@@ -396,16 +396,34 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 
 // --- render ----------------------------------------------------------------
 
+/// Scroll offsets for the stateful lists, persisted by the caller across
+/// frames. ratatui's `List` widget computes the visible window from the
+/// previous frame's `ListState`; a fresh `ListState::default()` every draw
+/// pins the offset to 0 and makes scrolling up jump back to the top instead
+/// of moving one row at a time.
+#[derive(Default)]
+pub(crate) struct ListStates {
+    board: ListState,
+    cards: ListState,
+    docs: ListState,
+    picker: ListState,
+}
+
 /// Renders a snapshot. `app` gives access to the local PTY screens (chat
 /// pane); socket clients pass `None` and get a placeholder until sessions
-/// stream over the wire.
-pub(crate) fn render(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>) {
+/// stream over the wire. `lists` must be the same instance across frames.
+pub(crate) fn render(
+    f: &mut Frame,
+    snap: &DomainSnapshot,
+    app: Option<&App>,
+    lists: &mut ListStates,
+) {
     let (header, body, footer) = root_layout(f.area());
 
     render_header(f, snap, header);
     match snap.tab {
-        TabId::Board => render_board(f, snap, app, body),
-        TabId::Docs => render_docs(f, &snap.docs, body),
+        TabId::Board => render_board(f, snap, app, body, lists),
+        TabId::Docs => render_docs(f, &snap.docs, body, &mut lists.docs),
     }
     render_statusline(f, snap, footer);
 
@@ -416,7 +434,7 @@ pub(crate) fn render(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>) {
         render_doc_view(f, &snap.docs);
     }
     if snap.picker.is_some() {
-        render_picker(f, snap);
+        render_picker(f, snap, &mut lists.picker);
     }
     if snap.job_overlay {
         render_job(f, snap);
@@ -427,7 +445,7 @@ pub(crate) fn render(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>) {
     }
 }
 
-/// Live log overlay for a job (ingest/capture/init).
+/// Live log overlay for a job (init).
 fn render_job(f: &mut Frame, snap: &DomainSnapshot) {
     use ratatui::widgets::Clear;
     let Some(job) = &snap.job else { return };
@@ -566,7 +584,6 @@ fn task_type_name(t: TaskTypeId) -> &'static str {
 fn session_kind_label(k: SessionKind) -> &'static str {
     match k {
         SessionKind::Play => "play",
-        SessionKind::Review => "review",
         SessionKind::Setup => "setup",
     }
 }
@@ -837,82 +854,6 @@ fn overlay_panel(title: &str) -> Block<'static> {
         ))
 }
 
-/// Short (7-char) commit hash, git-style.
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
-/// Current Unix time in seconds (0 if the clock predates the epoch).
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Human "when" for a review taken at `reviewed_at` (Unix seconds): relative
-/// ("5min ago") until a week out, then the absolute local date/time.
-fn review_when(reviewed_at: u64) -> String {
-    fmt_review_when(now_unix_secs().saturating_sub(reviewed_at), reviewed_at)
-}
-
-/// Pure formatter split out for tests: `elapsed` drives the relative buckets;
-/// `reviewed_at` is only used for the absolute fallback beyond a week.
-fn fmt_review_when(elapsed: u64, reviewed_at: u64) -> String {
-    match elapsed {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{}min ago", elapsed / 60),
-        3600..=86399 => format!("{}h ago", elapsed / 3600),
-        86400..=604_799 => format!("{}d ago", elapsed / 86400),
-        _ => local_datetime(reviewed_at),
-    }
-}
-
-/// Absolute local date/time `YYYY-MM-DD HH:MM` for a Unix timestamp, via libc's
-/// `localtime_r` (no date-library dependency).
-fn local_datetime(secs: u64) -> String {
-    let t = secs as libc::time_t;
-    // SAFETY: localtime_r fills a caller-owned `tm`; we zero it first and only
-    // read scalar fields it populates.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
-    if !ok {
-        return format!("@{secs}");
-    }
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min
-    )
-}
-
-/// Joins distinct short shas (multi-PR tasks) so a tag says which commits a
-/// review covers. `None` when the list is empty.
-fn join_shas(shas: &[String]) -> Option<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for s in shas {
-        let short = short_sha(s);
-        if !seen.contains(&short) {
-            seen.push(short);
-        }
-    }
-    (!seen.is_empty()).then(|| seen.join(", "))
-}
-
-/// Short hash(es) the task's review was taken against, from the per-PR
-/// `reviewed_sha` carried in the snapshot. `None` when nothing was reviewed yet.
-fn reviewed_tag(t: &TaskView) -> Option<String> {
-    let shas: Vec<String> = t
-        .prs
-        .iter()
-        .filter_map(|p| p.reviewed_sha.clone())
-        .collect();
-    join_shas(&shas)
-}
-
 /// Content lines of a task (metadata + markdown body). Reused by the Board
 /// preview and the detail overlay.
 fn task_detail_lines(t: &TaskView, width: u16) -> Vec<Line<'static>> {
@@ -1045,7 +986,7 @@ fn render_header(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
 }
 
 /// Central overlay with the project list (`P` key).
-fn render_picker(f: &mut Frame, snap: &DomainSnapshot) {
+fn render_picker(f: &mut Frame, snap: &DomainSnapshot, state: &mut ListState) {
     use ratatui::widgets::Clear;
 
     let area = centered_rect(60, 50, f.area());
@@ -1056,13 +997,12 @@ fn render_picker(f: &mut Frame, snap: &DomainSnapshot) {
         .iter()
         .map(|p| ListItem::new(format!("{}  {}", p.name, p.backlog)))
         .collect();
-    let mut state = ListState::default();
     state.select(snap.picker.as_ref().map(|p| p.selected));
     let list = List::new(items)
         .block(overlay_panel("Projects · Enter switch · Esc close"))
         .highlight_style(sel_style())
         .highlight_symbol("▌ ");
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, state);
 }
 
 /// Centered rectangle (percentages of the area).
@@ -1106,19 +1046,25 @@ fn panel_focus(title: &str, focused: bool) -> Block<'static> {
     }
 }
 
-fn render_board(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>, area: Rect) {
+fn render_board(
+    f: &mut Frame,
+    snap: &DomainSnapshot,
+    app: Option<&App>,
+    area: Rect,
+    lists: &mut ListStates,
+) {
     // chat fullscreen: the card content takes the whole area.
     if snap.board.chat_fullscreen {
         render_card_content(f, snap, app, area);
         return;
     }
     let cols = board_layout(area);
-    render_board_list(f, snap, cols[0]);
-    render_task_cards(f, snap, cols[1]);
+    render_board_list(f, snap, cols[0], &mut lists.board);
+    render_task_cards(f, snap, cols[1], &mut lists.cards);
     render_card_content(f, snap, app, cols[2]);
 }
 
-fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
+fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect, state: &mut ListState) {
     let board = &snap.board;
     let mut items: Vec<ListItem> = Vec::new();
     let mut row_to_task: Vec<Option<usize>> = Vec::new();
@@ -1170,34 +1116,6 @@ fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
         if t.live_session {
             spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
         }
-        // review progress: running now, or a newer commit still owing a review.
-        if let Some(p) = t.review_progress {
-            let (g, c) = match p {
-                ReviewProgressId::Running => ("⟳", Color::Yellow),
-                ReviewProgressId::AwaitingCi => ("◷", Color::Yellow),
-                ReviewProgressId::CiFailed => ("✗", Color::Red),
-            };
-            spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
-        }
-        // review verdict (if there's a `.review.md`).
-        if let Some(r) = &t.review {
-            let (g, c) = if r.badge == 0 {
-                ("✓", Color::Green)
-            } else {
-                ("⚑", Color::Red)
-            };
-            spans.push(Span::styled(format!(" {g}"), Style::default().fg(c)));
-        }
-        // parallelism glyph (only when there are active tasks and this isn't one).
-        match t.parallel {
-            Some(ParallelMark::Conflict) => {
-                spans.push(Span::styled(" ⚠", Style::default().fg(Color::Yellow)));
-            }
-            Some(ParallelMark::Safe) => {
-                spans.push(Span::styled(" ‖", Style::default().fg(Color::Green)));
-            }
-            None => {}
-        }
         items.push(ListItem::new(Line::from(spans)));
         row_to_task.push(Some(i));
     }
@@ -1207,7 +1125,6 @@ fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     } else {
         row_to_task.iter().position(|r| *r == Some(board.selected))
     };
-    let mut state = ListState::default();
     state.select(selected_row);
 
     let title = format!("Board · {}", board.tasks.len());
@@ -1215,12 +1132,12 @@ fn render_board_list(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
         .block(panel_focus(&title, board.focus == FocusId::Tasks))
         .highlight_style(sel_style())
         .highlight_symbol("▌ ");
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, state);
 }
 
-/// Middle column: compact task detail at the top + the card list (sessions
-/// + verdict). Cards are the navigable rows (`card_selected`).
-fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
+/// Middle column: compact task detail at the top + the card list (sessions).
+/// Cards are the navigable rows (`card_selected`).
+fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect, state: &mut ListState) {
     let board = &snap.board;
     let focused = board.focus == FocusId::Cards;
     let mut items: Vec<ListItem> = Vec::new();
@@ -1274,54 +1191,6 @@ fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
                 Line::from(Span::styled(pr_txt, Style::default().fg(SUBTLE))),
             );
         }
-        if let Some(r) = &t.review {
-            let (mut txt, c) = if r.clean {
-                ("review CLEAN".to_string(), Color::Green)
-            } else {
-                (format!("review DIRTY · {} pending", r.unmet), Color::Red)
-            };
-            // tag the commit the verdict was taken against (short reviewed SHA).
-            if let Some(tag) = reviewed_tag(t) {
-                txt.push_str(&format!(" · @{tag}"));
-            }
-            // and when the capture ran.
-            if let Some(at) = r.reviewed_at {
-                txt.push_str(&format!(" · {}", review_when(at)));
-            }
-            detail(
-                &mut items,
-                Line::from(Span::styled(txt, Style::default().fg(c))),
-            );
-        }
-        // pending/in-flight review state (new commit not yet reviewed).
-        if let Some(p) = t.review_progress {
-            let (txt, c) = match p {
-                ReviewProgressId::Running => ("⟳ review running", Color::Yellow),
-                ReviewProgressId::AwaitingCi => ("◷ re-review pending · CI running", Color::Yellow),
-                ReviewProgressId::CiFailed => ("✗ review blocked · CI red", Color::Red),
-            };
-            detail(
-                &mut items,
-                Line::from(Span::styled(txt, Style::default().fg(c))),
-            );
-        }
-        match t.parallel {
-            Some(ParallelMark::Conflict) => detail(
-                &mut items,
-                Line::from(Span::styled(
-                    "⚠ parallel conflict",
-                    Style::default().fg(Color::Yellow),
-                )),
-            ),
-            Some(ParallelMark::Safe) => detail(
-                &mut items,
-                Line::from(Span::styled(
-                    "‖ parallel ok",
-                    Style::default().fg(Color::Green),
-                )),
-            ),
-            None => {}
-        }
         if !t.body.trim().is_empty() {
             // List inner width: panel chrome (6) + highlight_symbol (2) + 1 col
             // of margin, so termimad doesn't overflow and re-wrap.
@@ -1349,7 +1218,7 @@ fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
         detail(
             &mut items,
             Line::from(Span::styled(
-                "  (none) — p play · R review chat",
+                "  (none) — p play",
                 Style::default().fg(SUBTLE),
             )),
         );
@@ -1373,7 +1242,6 @@ fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     let selected_row = row_to_card
         .iter()
         .position(|r| *r == Some(board.card_selected));
-    let mut state = ListState::default();
     state.select(selected_row);
     let hl = if focused {
         sel_style()
@@ -1384,7 +1252,7 @@ fn render_task_cards(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
         .block(panel_focus(&title, focused))
         .highlight_style(hl)
         .highlight_symbol("▌ ");
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, state);
 }
 
 /// A single card row in the middle column.
@@ -1414,42 +1282,17 @@ fn card_item(card: &CardView) -> ListItem<'static> {
                 Span::styled(format!("  {age}"), Style::default().fg(SUBTLE)),
             ]))
         }
-        CardView::Verdict { clean } => {
-            let (dot, color, txt) = if *clean {
-                ("✓", Color::Green, "verdict (CLEAN)")
-            } else {
-                ("⚑", Color::Red, "verdict (DIRTY)")
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{dot} "), Style::default().fg(color)),
-                Span::styled(
-                    txt.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]))
-        }
     }
 }
 
-/// Right panel: content of the selected card (session chat, verdict, or the
-/// task detail if there's no card).
+/// Right panel: content of the selected card (session chat, or the task
+/// detail if there's no card).
 fn render_card_content(f: &mut Frame, snap: &DomainSnapshot, app: Option<&App>, area: Rect) {
     let board = &snap.board;
     let focused = board.focus == FocusId::Chat || board.chat_fullscreen;
     let idx = board.card_selected.min(board.cards.len().saturating_sub(1));
     match board.cards.get(idx) {
         Some(CardView::Session { .. }) => render_session_pane(f, app, area, focused),
-        Some(CardView::Verdict { .. }) => {
-            let lines = verdict_lines(board.review.as_ref());
-            let title = match selected_task(snap) {
-                Some(t) => format!("Verdict · {}", t.id),
-                None => "Verdict".to_string(),
-            };
-            let p = Paragraph::new(lines)
-                .block(panel_focus(&title, focused))
-                .wrap(Wrap { trim: true });
-            f.render_widget(p, area);
-        }
         None => {
             // no card: task detail (or hint).
             let (title, lines) = match selected_task(snap) {
@@ -1522,93 +1365,6 @@ fn render_session_pane(f: &mut Frame, app: Option<&App>, area: Rect, focused: bo
     }
 }
 
-/// Verdict body (findings + constraints + criteria) for the right panel.
-fn verdict_lines(review: Option<&ReviewView>) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = Vec::new();
-    let Some(r) = review else {
-        lines.push(Line::from(
-            "No review yet. The verdict runs by itself when every PR check turns green; `R` opens the review chat.",
-        ));
-        return lines;
-    };
-    lines.push(Line::from(vec![
-        Span::raw("is_clean: "),
-        if r.clean {
-            Span::styled(
-                "CLEAN",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(
-                "DIRTY",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )
-        },
-    ]));
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{} blocking · {} finding(s) · minor/nit don't fail",
-            r.blocking,
-            r.findings.len()
-        ),
-        Style::default().fg(SUBTLE),
-    )));
-    // which commit this verdict was taken against, and when it ran.
-    if let Some(tag) = join_shas(&r.reviewed_shas) {
-        let mut line = format!("reviewed @{tag}");
-        if let Some(at) = r.reviewed_at {
-            line.push_str(&format!(" · {}", review_when(at)));
-        }
-        lines.push(Line::from(Span::styled(line, Style::default().fg(SUBTLE))));
-    }
-    if !r.clean {
-        lines.push(Line::from(Span::styled(
-            "`H` sends the open items to the play session to fix",
-            Style::default().fg(SUBTLE),
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Findings",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    if r.findings.is_empty() {
-        lines.push(Line::from("  (none)"));
-    } else {
-        for finding in &r.findings {
-            lines.push(Line::from(format!("  {}", finding_line(finding))));
-        }
-    }
-    push_verdict_section(&mut lines, "Constraints (enforce: review)", &r.constraints);
-    push_verdict_section(&mut lines, "Acceptance criteria", &r.criteria);
-    lines
-}
-
-fn severity_tag(s: SeverityId) -> &'static str {
-    match s {
-        SeverityId::Blocker => "BLOCKER",
-        SeverityId::Major => "MAJOR",
-        SeverityId::Minor => "MINOR",
-        SeverityId::Nit => "NIT",
-    }
-}
-
-/// Terminal rendering of a structured finding: `[SEV] file:line - message
-/// (violates ref)`.
-fn finding_line(f: &FindingView) -> String {
-    let loc = match f.line {
-        Some(l) => format!("{}:{}", f.file, l),
-        None => f.file.clone(),
-    };
-    let tag = severity_tag(f.severity);
-    match &f.reference {
-        Some(r) => format!("[{tag}] {loc} - {} (violates {r})", f.message),
-        None => format!("[{tag}] {loc} - {}", f.message),
-    }
-}
-
 /// Age of an epoch-milliseconds instant. Tolerant of a clock that went
 /// backwards (clamped to zero).
 fn age_of_ms(ms: u64) -> std::time::Duration {
@@ -1631,38 +1387,10 @@ fn fmt_dur(d: std::time::Duration) -> String {
     }
 }
 
-/// Pushes a header + the items of a checklist (constraint/criterion) with the
-/// colored verdict.
-fn push_verdict_section(lines: &mut Vec<Line>, title: &str, items: &[CheckView]) {
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        title.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    if items.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (none)",
-            Style::default().fg(SUBTLE),
-        )));
-        return;
-    }
-    for c in items {
-        let (tag, color) = match c.verdict {
-            CheckVerdict::Ok => ("OK", Color::Green),
-            CheckVerdict::Failed => ("FAILED", Color::Red),
-            CheckVerdict::Pending => ("PENDING", Color::Yellow),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  [{tag}] "), Style::default().fg(color)),
-            Span::raw(c.text.clone()),
-        ]));
-    }
-}
-
-fn render_docs(f: &mut Frame, docs: &DocsView, area: Rect) {
+fn render_docs(f: &mut Frame, docs: &DocsView, area: Rect, list_state: &mut ListState) {
     if docs.list.is_empty() {
         let p = Paragraph::new(format!(
-            "(no .md in {})\n\nWrite the design docs here; then press `i` to ingest.",
+            "(no .md in {})\n\nAdd RFCs/ADRs/specs here — jaum reads whatever you drop in.",
             docs.dir
         ))
         .block(panel("Docs"))
@@ -1673,11 +1401,11 @@ fn render_docs(f: &mut Frame, docs: &DocsView, area: Rect) {
     let cols = Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
         .spacing(1)
         .split(area);
-    render_docs_list(f, docs, cols[0]);
+    render_docs_list(f, docs, cols[0], list_state);
     render_docs_preview(f, docs, cols[1]);
 }
 
-fn render_docs_list(f: &mut Frame, docs: &DocsView, area: Rect) {
+fn render_docs_list(f: &mut Frame, docs: &DocsView, area: Rect, state: &mut ListState) {
     let group_of = |rel: &str| -> String {
         rel.split_once('/')
             .map(|(g, _)| g.to_string())
@@ -1714,7 +1442,6 @@ fn render_docs_list(f: &mut Frame, docs: &DocsView, area: Rect) {
     }
 
     let selected_row = row_to_doc.iter().position(|r| *r == Some(docs.selected));
-    let mut state = ListState::default();
     state.select(selected_row);
 
     let title = format!("Docs · {}", docs.list.len());
@@ -1722,7 +1449,7 @@ fn render_docs_list(f: &mut Frame, docs: &DocsView, area: Rect) {
         .block(panel(&title))
         .highlight_style(sel_style())
         .highlight_symbol("▌ ");
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, state);
 }
 
 /// Live preview (rendered markdown) of the selected doc.
@@ -1766,15 +1493,6 @@ fn statusline_text(snap: &DomainSnapshot) -> String {
             TabId::Docs => "Docs",
         }
     );
-    // in-flight review first, so the narrow footer never truncates it away.
-    if let Some(t) = snap
-        .board
-        .tasks
-        .iter()
-        .find(|t| t.review_progress == Some(ReviewProgressId::Running))
-    {
-        s.push_str(&format!(" ⟳ review {}", t.id));
-    }
     if snap.board.project_selected {
         s.push_str(" · project");
     } else if let Some(t) = selected_task(snap) {
@@ -1804,7 +1522,6 @@ fn render_statusline(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
             InputKind::Defer => "defer",
             InputKind::Convention => "convention",
             InputKind::NewTask => "new task",
-            InputKind::NewTaskClaude => "task (claude investigates)",
             InputKind::InitPath => "init (project path)",
         };
         let line = Line::from(vec![
@@ -1826,13 +1543,9 @@ fn render_statusline(f: &mut Frame, snap: &DomainSnapshot, area: Rect) {
     // statusline (left) + key caps (right)
     let keys = [
         ("p", "play"),
-        ("R", "review"),
         ("f", "finish"),
-        ("a", "parallel"),
         ("S", "setup"),
-        ("i", "ingest"),
         ("I", "init"),
-        ("N", "claude"),
         ("q", "quit"),
     ];
     let mut hint: Vec<Span> = Vec::new();

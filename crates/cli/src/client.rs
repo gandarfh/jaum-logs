@@ -102,6 +102,7 @@ pub fn run(sock: &Path) -> Result<()> {
 
     let mut ui = TerminalUi {
         terminal: ratatui::init(),
+        lists: tui::ListStates::default(),
     };
     let res = client_loop(&mut ui, &mut write_half, &srx, &snap, PING_EVERY);
     ratatui::restore();
@@ -213,11 +214,13 @@ pub(crate) fn client_loop<W: Write>(
 /// only interactive suspend/resume delegated to the client.
 struct TerminalUi {
     terminal: DefaultTerminal,
+    lists: tui::ListStates,
 }
 
 impl Ui for TerminalUi {
     fn draw(&mut self, snap: &DomainSnapshot) -> Result<()> {
-        self.terminal.draw(|f| tui::render(f, snap, None))?;
+        self.terminal
+            .draw(|f| tui::render(f, snap, None, &mut self.lists))?;
         Ok(())
     }
 

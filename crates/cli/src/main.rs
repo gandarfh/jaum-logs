@@ -22,7 +22,6 @@ use crate::config::{Config, init_project};
 /// `jaum shutdown`   shuts the daemon down (stops sessions).
 /// `jaum --local`    opens the old in-process TUI (no daemon; debug).
 /// `jaum init [dirs] registers the cwd project (auto-detects repos, or the given dirs).
-/// `jaum ingest`     scans the project with claude and builds the backlog from the docs.
 /// `jaum list`       lists the current project's backlog without the TUI.
 /// `jaum task new`   creates a backlog task deterministically from flags (no claude call).
 fn main() -> Result<()> {
@@ -81,36 +80,7 @@ fn main() -> Result<()> {
                     println!("  repo: {} -> {}", r.slug, r.path.display());
                 }
             }
-            println!("\nnext: open `jaum`, run ingest (i) and setup (S).");
-            Ok(())
-        }
-        Some("ingest") => {
-            let cfg = Config::load()?;
-            let idx = select_project(&cfg)?;
-            let project = &cfg.projects[idx];
-            let store = jaum_core::Store::new(&project.backlog);
-            // scan the external docs (~/jaum/<project>/docs) + the repos
-            let add_dirs: Vec<PathBuf> = project.repos.iter().map(|r| r.path.clone()).collect();
-            let executor = jaum_adapters::ClaudeExecutor::new();
-            let ingest =
-                jaum_flows::ingest::Ingest::new(&store, &executor, project.docs.clone(), add_dirs);
-
-            eprintln!(
-                "scanning '{}' with claude (may take a few seconds)...",
-                project.name
-            );
-            let outcome = ingest.run()?;
-            println!(
-                "ingest: {} stub(s) created, {} doc(s) mirrored into docs/",
-                outcome.created.len(),
-                outcome.docs_imported
-            );
-            for t in &outcome.created {
-                println!(
-                    "  {:<10} {:?}  rfcs={:?} adrs={:?}",
-                    t.id, t.task_type, t.rfcs, t.adrs
-                );
-            }
+            println!("\nnext: open `jaum` and run setup (S).");
             Ok(())
         }
         Some("list") => {

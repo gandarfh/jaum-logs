@@ -21,9 +21,13 @@ use crate::snapshot::build_snapshot;
 
 /// Idle tick: how often the daemon polls PTYs/jobs with no client events.
 const TICK: Duration = Duration::from_millis(16);
-/// Coalescing window: a burst of events with gaps under this becomes ONE
-/// snapshot broadcast.
-const COALESCE: Duration = Duration::from_millis(20);
+/// Coalescing window: after handling one event, wait this long for a
+/// follow-up before broadcasting. Long enough to catch messages already in
+/// flight over the socket (a handful of writes back-to-back land within
+/// microseconds in practice, comfortably under this), short enough that a
+/// lone keystroke never feels the wait — unlike the 20ms this replaced,
+/// which was long enough to be perceptible on every single key.
+const COALESCE: Duration = Duration::from_millis(2);
 /// Hard ceiling for one burst: even a continuous event stream must yield to
 /// tick/broadcast at least this often.
 const COALESCE_CAP: Duration = Duration::from_millis(100);
@@ -127,7 +131,6 @@ impl Daemon {
         self.app.poll_job();
         self.app.tick_reload();
         self.app.tick_pr_sync();
-        self.app.tick_ci_watch();
         self.app.tick_toast();
     }
 
@@ -439,7 +442,8 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
 
     while server.running {
         // 1) wait for events; once one lands, keep draining until the burst
-        //    goes quiet (COALESCE) so it yields a single snapshot below.
+        //    goes quiet (COALESCE, a couple ms) so it yields a single
+        //    snapshot below, without the old fixed 20ms tax on a lone event.
         match rx.recv_timeout(TICK) {
             Ok(ev) => {
                 server.handle_event(ev);
@@ -467,9 +471,11 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
     Ok(())
 }
 
-/// Drains a burst of events until it goes quiet (COALESCE) or the cap is hit.
-/// The cap keeps a continuous stream (key auto-repeat, chatty client) from
-/// starving `tick()` and the broadcasts indefinitely.
+/// Drains events, waiting up to `COALESCE` after each one for a follow-up —
+/// a burst spread across a few socket writes still yields a single snapshot
+/// below, at the cost of a couple ms once a lone event settles. The cap keeps
+/// a truly continuous stream (key auto-repeat, chatty client) from starving
+/// `tick()` and the broadcasts indefinitely.
 fn drain_burst(rx: &std::sync::mpsc::Receiver<Event>, server: &mut Server) {
     let deadline = Instant::now() + COALESCE_CAP;
     while server.running {

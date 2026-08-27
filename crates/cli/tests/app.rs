@@ -68,7 +68,6 @@ fn app_with(dir: &TmpDir, tasks: &[(&str, &str)]) -> App {
         repos: Vec::new(),
     };
     let cfg = config::Config {
-        ci_poll_secs: None,
         projects: vec![project],
     };
     App::new(cfg, 0).unwrap()
@@ -211,7 +210,7 @@ fn multi_session_per_task_navigates_and_closes() {
     let mut a = app_with(&dir, &[("TASK-001", "wip")]);
     assert!(a.sessions.is_empty());
 
-    // two sessions of the SAME task (play + review) become two of its cards.
+    // two sessions of the SAME task become two of its cards.
     a.open_session(
         SessionKind::Play,
         Some("TASK-001".into()),
@@ -221,7 +220,7 @@ fn multi_session_per_task_navigates_and_closes() {
         dir.0.clone(),
     );
     a.open_session(
-        SessionKind::Review,
+        SessionKind::Play,
         Some("TASK-001".into()),
         cat_session(),
         Vec::new(),
@@ -354,7 +353,6 @@ fn pr_sync_targets_only_picks_task_with_live_play_and_pr_zero() {
 fn finished_session_does_not_count_as_live() {
     use app::SessionKind;
     let dir = TmpDir::new("dead-session");
-    // NON-wip task: the only reason to be "active" would be the live session.
     let mut a = app_with(&dir, &[("TASK-001", "backlog")]);
     a.open_session(
         SessionKind::Play,
@@ -365,7 +363,6 @@ fn finished_session_does_not_count_as_live() {
         dir.0.clone(),
     );
     assert!(a.sessions[0].is_live());
-    assert!(a.active_task_ids().contains(&"TASK-001".to_string()));
 
     // simulate claude having exited (Ctrl+C/Ctrl+D): drain would mark `finished`.
     a.sessions[0].finished = true;
@@ -373,19 +370,6 @@ fn finished_session_does_not_count_as_live() {
         !a.sessions[0].is_live(),
         "finished session (dead process) is not live, even with session=Some"
     );
-    // and no longer counts as an active task
-    assert!(!a.active_task_ids().contains(&"TASK-001".to_string()));
-}
-
-fn write_review(dir: &TmpDir, id: &str, clean: bool) {
-    let body = if clean {
-        format!("---\ntask: {id}\nfindings: []\nconstraints: []\n---\nok\n")
-    } else {
-        format!(
-            "---\ntask: {id}\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints: []\n---\nbug\n"
-        )
-    };
-    fs::write(dir.0.join(format!(".backlog/{id}.review.md")), body).unwrap();
 }
 
 #[test]
@@ -414,128 +398,6 @@ fn project_holds_setup_sessions() {
     a.select_next();
     assert!(!a.project_selected);
     assert!(a.task_cards().is_empty());
-}
-
-#[test]
-fn verdict_card_appears_only_for_task_with_review() {
-    use app::BoardCard;
-    let dir = TmpDir::new("verdict-card");
-    let mut a = app_with(&dir, &[("TASK-001", "review"), ("TASK-002", "review")]);
-    // only 001 has a saved review
-    write_review(&dir, "TASK-001", true);
-    a.refresh().unwrap();
-
-    // TASK-001 (with review) -> has a verdict card
-    a.selected = a.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
-    assert!(a.task_cards().contains(&BoardCard::Verdict));
-
-    // TASK-002 (without review) -> no verdict card
-    a.selected = a.tasks.iter().position(|t| t.id == "TASK-002").unwrap();
-    assert!(!a.task_cards().contains(&BoardCard::Verdict));
-}
-
-#[test]
-fn handoff_selected_sends_findings_to_play() {
-    use app::{SessionEntry, SessionKind};
-    let dir = TmpDir::new("handoff");
-    let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    // write a DIRTY review (1 finding + 1 failed constraint)
-    fs::write(
-        dir.0.join(".backlog/TASK-001.review.md"),
-        "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n",
-    )
-    .unwrap();
-    a.refresh().unwrap();
-    // a live play session with a turn in flight: the handoff queues behind it
-    let log = session_event::SessionLog::new(&dir.0, "uuid-h");
-    let mut entry = SessionEntry::sidecar(
-        SessionKind::Play,
-        "test".into(),
-        Some("TASK-001".into()),
-        Vec::new(),
-        "uuid-h".into(),
-        dir.0.clone(),
-        log,
-    );
-    let (_tx, rx) = std::sync::mpsc::channel();
-    {
-        let chat = entry.chat.as_mut().unwrap();
-        chat.rx = Some(rx);
-        chat.request_id = Some("uuid-h#1".into());
-        chat.turn_seq = 1;
-    }
-    a.sessions.push(entry);
-
-    a.handoff_selected();
-    assert_eq!(a.tab, Tab::Board);
-    assert_eq!(a.board_focus, app::BoardFocus::Chat);
-    assert!(a.status_msg.contains("sent"), "msg: {}", a.status_msg);
-    assert_eq!(a.sessions[0].chat.as_ref().unwrap().queued.len(), 1);
-}
-
-#[test]
-fn handoff_selected_without_review_warns() {
-    let dir = TmpDir::new("handoff-none");
-    let mut a = app_with(&dir, &[("TASK-001", "review")]);
-    a.handoff_selected();
-    assert!(a.status_msg.contains("run review"));
-}
-
-#[test]
-fn parallelism_badge_relative_to_active_task() {
-    let dir = TmpDir::new("parallel");
-    let work = dir.0.join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    // declared conflict between 001 and 002 (in repo org/x)
-    fs::write(
-        work.join("parallel.json"),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"both edit src/x.rs"}]}"#,
-    )
-    .unwrap();
-    // 001 is wip (active); 002 and 003 idle
-    let mut a = app_with(
-        &dir,
-        &[
-            ("TASK-001", "wip"),
-            ("TASK-002", "backlog"),
-            ("TASK-003", "backlog"),
-        ],
-    );
-    a.refresh().unwrap();
-    assert!(
-        a.parallel.is_some(),
-        "parallel.json should have been loaded"
-    );
-
-    // 002 conflicts with the active 001
-    let c = a.parallel_conflict_with_active("TASK-002");
-    assert!(c.is_some());
-    let (other, repo, _reason) = c.unwrap();
-    assert_eq!(other, "TASK-001");
-    assert_eq!(repo, "org/x");
-    assert!(!a.is_parallel_safe("TASK-002"), "002 conflicts, not safe");
-
-    // 003 doesn't conflict with the active one -> safe for parallel
-    assert!(a.parallel_conflict_with_active("TASK-003").is_none());
-    assert!(a.is_parallel_safe("TASK-003"));
-
-    // with no analysis loaded, nothing is marked
-    a.parallel = None;
-    assert!(a.parallel_conflict_with_active("TASK-002").is_none());
-    assert!(!a.is_parallel_safe("TASK-003"));
-}
-
-#[test]
-fn parallelism_without_active_task_marks_nothing_safe() {
-    let dir = TmpDir::new("parallel-idle");
-    let work = dir.0.join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    fs::write(work.join("parallel.json"), r#"{"conflicts":[]}"#).unwrap();
-    let mut a = app_with(&dir, &[("TASK-001", "backlog"), ("TASK-002", "backlog")]);
-    a.refresh().unwrap();
-    // nothing active -> no one to parallelize with -> not "safe"
-    assert!(!a.is_parallel_safe("TASK-001"));
-    assert!(a.active_task_ids().is_empty());
 }
 
 #[test]
