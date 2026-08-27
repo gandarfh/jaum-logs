@@ -1977,3 +1977,128 @@ fn send_chat_turn_rejects_non_sidecar_sessions() {
     assert!(err.to_string().contains("session without a task"));
     app.stop_all_sessions();
 }
+
+/// Not used by `play_selected` since the PTY revert (see `open_play_session`'s
+/// doc comment), but the sidecar machinery it drives stays live for TASK-011 —
+/// these tests exercise it directly instead of through play.
+fn play_launch(task: &str, session_id: &str, prompt: &str, cwd: &Path) -> PlayLaunch {
+    PlayLaunch {
+        id: task.into(),
+        session_id: session_id.into(),
+        prompt: prompt.into(),
+        cwd: cwd.to_path_buf(),
+        worktrees: Vec::new(),
+        guards: GuardSpec {
+            system_prompt_append: String::new(),
+            disallowed_tools: Vec::new(),
+            guard_patterns: Vec::new(),
+            model: "sonnet".into(),
+        },
+    }
+}
+
+/// Drains until the session's turn (and any queued follow-up) settles.
+fn drain_until_idle(app: &mut App, idx: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        app.drain_sidecar();
+        let e = &app.sessions[idx];
+        let idle = !e.turn_active() && e.chat.as_ref().unwrap().queued.is_empty();
+        if idle {
+            return;
+        }
+        assert!(Instant::now() < deadline, "turn(s) never settled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn open_play_session_starts_a_turn_and_sends_a_queued_message_after_it_finishes() {
+    let dir = TmpDir::new("open-play");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+    let launch = play_launch("TASK-001", "session-a", "hello", dir.path());
+
+    app.open_play_session(&launch, None).unwrap();
+    assert_eq!(app.sessions.len(), 1);
+    assert!(app.sessions[0].turn_active());
+    assert_eq!(app.sessions[0].claude_session_id, "session-a");
+    app.sessions[0]
+        .chat
+        .as_mut()
+        .unwrap()
+        .queued
+        .push_back("second".into());
+
+    drain_until_idle(&mut app, 0);
+
+    let text = app.sessions[0].parser.screen().contents();
+    assert!(
+        text.contains("echo:hello") && text.contains("echo:second"),
+        "queued message not sent: {text}"
+    );
+}
+
+#[test]
+fn open_play_session_with_resume_replays_the_log_and_replaces_the_existing_entry() {
+    let dir = TmpDir::new("open-play-resume");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+    let first = play_launch("TASK-001", "session-r", "hello", dir.path());
+    app.open_play_session(&first, None).unwrap();
+    drain_until_idle(&mut app, 0);
+
+    let again = play_launch("TASK-001", "session-r", "again", dir.path());
+    app.open_play_session(&again, Some("session-r".into()))
+        .unwrap();
+    assert_eq!(app.sessions.len(), 1, "resume must replace, not duplicate");
+    drain_until_idle(&mut app, 0);
+
+    let text = app.sessions[0].parser.screen().contents();
+    assert!(
+        text.contains("echo:hello") && text.contains("echo:again"),
+        "replayed history missing prior turn: {text}"
+    );
+}
+
+#[test]
+fn permission_request_is_auto_allowed_and_logged_when_routing_is_off() {
+    let dir = TmpDir::new("auto-allow");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+    assert!(!app.route_permissions);
+    let launch = play_launch("TASK-001", "session-c", "ask-permission", dir.path());
+    app.open_play_session(&launch, None).unwrap();
+
+    drain_until_idle(&mut app, 0);
+
+    let events = app.sessions[0].chat.as_ref().unwrap().log.replay();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ChatEvent::PermissionDecision { behavior, .. } if behavior == "allow"
+        )),
+        "auto-allow not logged: {events:?}"
+    );
+}
+
+#[test]
+fn permission_request_is_tracked_for_routing_when_enabled() {
+    let dir = TmpDir::new("route-perm");
+    let mut app = app_with(&dir, &[("TASK-001", "wip")]);
+    sidecar_stub(&mut app);
+    app.route_permissions = true;
+    let launch = play_launch("TASK-001", "session-d", "ask-permission", dir.path());
+    app.open_play_session(&launch, None).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.permissions.pending_count() == 0 {
+        app.drain_sidecar();
+        assert!(
+            Instant::now() < deadline,
+            "permission request never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(app.permissions.pending_count(), 1);
+}
