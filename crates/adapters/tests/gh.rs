@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use jaum_adapters::Gh;
-use jaum_core::{CiStatus, MergeState};
+use jaum_core::MergeState;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -32,9 +32,6 @@ impl Drop for TmpDir {
 ///   pr create            -> prints URL with PR 142 (preceded by a warning)
 ///   pr list (normal head)-> "7"; (head "missing/branch") -> ""
 ///   pr view <n>          -> 1=OPEN 2=MERGED 3=CLOSED 99=WEIRD
-///   pr view <n> (ci)     -> 10=green 11=pending 12=failing 13=no checks
-///                           14=unknown 15=bad json 16=failing(statuses)
-///                           17=unknown(status) 18=null rollup 501=gh error
 /// Written once per process: a per-test copy races on Linux, where a fork
 /// from a parallel test can inherit the still-open write fd and make the
 /// exec fail with ETXTBSY.
@@ -64,19 +61,6 @@ case "$1 $2" in
   "pr view")
     if [ "$5" = "title,body" ]; then
       if [ "$3" = "98" ]; then echo "not json"; else echo '{"title":"T","body":"B"}'; fi
-    elif [ "$5" = "state,headRefOid,statusCheckRollup" ]; then
-      case "$3" in
-        10) echo '{"state":"OPEN","headRefOid":"aaa111","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"NEUTRAL"},{"status":"COMPLETED","conclusion":"SKIPPED"},{"state":"SUCCESS"}]}' ;;
-        11) echo '{"state":"OPEN","headRefOid":"bbb222","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""},{"state":"PENDING"},{"state":"EXPECTED"},{"status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
-        12) echo '{"state":"OPEN","headRefOid":"ccc333","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"},{"status":"QUEUED","conclusion":""},{"state":"SUCCESS"}]}' ;;
-        13) echo '{"state":"OPEN","headRefOid":"ddd444","statusCheckRollup":[]}' ;;
-        14) echo '{"state":"WEIRD","headRefOid":"eee555","statusCheckRollup":[{"status":"COMPLETED","conclusion":"WEIRD"}]}' ;;
-        15) echo 'not json' ;;
-        16) echo '{"state":"MERGED","headRefOid":"fff666","statusCheckRollup":[{"state":"ERROR"},{"status":"COMPLETED","conclusion":"TIMED_OUT"},{"status":"COMPLETED","conclusion":"CANCELLED"},{"status":"COMPLETED","conclusion":"ACTION_REQUIRED"},{"status":"COMPLETED","conclusion":"STARTUP_FAILURE"},{"state":"FAILURE"}]}' ;;
-        17) echo '{"state":"CLOSED","headRefOid":"ggg777","statusCheckRollup":[{"state":"WEIRD"},{"status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
-        18) echo '{"state":"OPEN","headRefOid":"hhh888","statusCheckRollup":null}' ;;
-        501) echo "no checks reported" >&2; exit 1 ;;
-      esac
     else
       case "$3" in
         1) echo "OPEN" ;;
@@ -179,90 +163,6 @@ fn pr_view_tolerates_malformed_json() {
     let (title, body) = gh.pr_view(&dir.0, 98).unwrap();
     assert_eq!(title, "");
     assert_eq!(body, "");
-}
-
-#[test]
-fn pr_ci_zero_short_circuits_without_calling_gh() {
-    let gh = Gh::with_bin("/does/not/exist/gh");
-    let ci = gh.pr_ci(std::path::Path::new("."), 0).unwrap();
-    assert_eq!(ci.state, MergeState::NotCreated);
-    assert_eq!(ci.checks, CiStatus::Unknown);
-    assert_eq!(ci.head_sha, "");
-}
-
-#[test]
-fn pr_ci_reads_state_head_and_passing_checks() {
-    let dir = TmpDir::new("ci-green");
-    let gh = Gh::with_bin(fake_gh());
-    let ci = gh.pr_ci(&dir.0, 10).unwrap();
-    assert_eq!(ci.state, MergeState::Open);
-    assert_eq!(ci.checks, CiStatus::Passing);
-    assert_eq!(ci.head_sha, "aaa111");
-}
-
-#[test]
-fn pr_ci_pending_wins_over_passing() {
-    let dir = TmpDir::new("ci-pending");
-    let gh = Gh::with_bin(fake_gh());
-    let ci = gh.pr_ci(&dir.0, 11).unwrap();
-    assert_eq!(ci.checks, CiStatus::Pending);
-}
-
-#[test]
-fn pr_ci_failure_wins_over_pending_and_passing() {
-    let dir = TmpDir::new("ci-fail");
-    let gh = Gh::with_bin(fake_gh());
-    let ci = gh.pr_ci(&dir.0, 12).unwrap();
-    assert_eq!(ci.checks, CiStatus::Failing);
-    // failing status contexts and check-run conclusions also map to Failing
-    let ci = gh.pr_ci(&dir.0, 16).unwrap();
-    assert_eq!(ci.state, MergeState::Merged);
-    assert_eq!(ci.checks, CiStatus::Failing);
-}
-
-#[test]
-fn pr_ci_distinguishes_pr_without_checks() {
-    let dir = TmpDir::new("ci-none");
-    let gh = Gh::with_bin(fake_gh());
-    let ci = gh.pr_ci(&dir.0, 13).unwrap();
-    assert_eq!(ci.checks, CiStatus::NoChecks);
-    assert_eq!(ci.head_sha, "ddd444");
-}
-
-#[test]
-fn pr_ci_unrecognized_payloads_are_unknown() {
-    let dir = TmpDir::new("ci-unknown");
-    let gh = Gh::with_bin(fake_gh());
-    // unknown check-run conclusion + unknown PR state
-    let ci = gh.pr_ci(&dir.0, 14).unwrap();
-    assert_eq!(ci.state, MergeState::Unknown);
-    assert_eq!(ci.checks, CiStatus::Unknown);
-    // unknown status-context state does not become Passing
-    let ci = gh.pr_ci(&dir.0, 17).unwrap();
-    assert_eq!(ci.state, MergeState::Closed);
-    assert_eq!(ci.checks, CiStatus::Unknown);
-    // rollup that is not an array
-    let ci = gh.pr_ci(&dir.0, 18).unwrap();
-    assert_eq!(ci.checks, CiStatus::Unknown);
-    assert_eq!(ci.head_sha, "hhh888");
-}
-
-#[test]
-fn pr_ci_tolerates_malformed_json() {
-    let dir = TmpDir::new("ci-badjson");
-    let gh = Gh::with_bin(fake_gh());
-    let ci = gh.pr_ci(&dir.0, 15).unwrap();
-    assert_eq!(ci.state, MergeState::Unknown);
-    assert_eq!(ci.checks, CiStatus::Unknown);
-    assert_eq!(ci.head_sha, "");
-}
-
-#[test]
-fn pr_ci_propagates_gh_failure() {
-    let dir = TmpDir::new("ci-err");
-    let gh = Gh::with_bin(fake_gh());
-    let err = gh.pr_ci(&dir.0, 501).unwrap_err();
-    assert!(err.to_string().contains("no checks reported"));
 }
 
 #[test]

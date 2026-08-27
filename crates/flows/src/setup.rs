@@ -125,7 +125,7 @@ kebab-case (e.g. `feat/markdown-deck-parser`).\n\n",
         // backlog tasks
         p.push_str("## Backlog tasks\n");
         if tasks.is_empty() {
-            p.push_str("(backlog empty — run ingest before setup)\n\n");
+            p.push_str("(backlog empty — create a task first)\n\n");
         } else {
             for t in &tasks {
                 let refs: Vec<String> = t.rfcs.iter().chain(t.adrs.iter()).cloned().collect();

@@ -71,8 +71,8 @@ them, and the sidecar's bun tests decode the same files.
 
 ## Guarantees
 
-The tool classifies what is guaranteed as **hard**, **detective**, and
-**signal-only** — and is explicit about each level.
+The tool classifies what is guaranteed as **hard** and **signal-only** — and
+is explicit about each level.
 
 ### Mechanical (hard) — actually blocked
 
@@ -85,14 +85,12 @@ The tool classifies what is guaranteed as **hard**, **detective**, and
   applies inside `canUseTool`, blocking preventively on every call (path,
   command, migration, merge) before any approval is asked.
 
-### Detective (mandatory, not optional)
-
-- **Constraints `enforce: review`** (semantic: new abstraction, stable API,
-  refactor): the hook does not catch these, so the review is **required** to
-  check them item by item. `is_clean` fails if any of them fails.
-
 ### Signal-only
 
+- **Constraints `enforce: review`** (semantic: new abstraction, stable API,
+  refactor): nothing checks these automatically — they're surfaced in the
+  session prompt as the agent's own responsibility, and it's on the human to
+  verify them before merging.
 - **Overlap in the same repo**: `wip` tasks touching the same resource are
   signaled, not blocked.
 - **Doc lifecycle discipline** (RFC/ADR).
@@ -119,7 +117,7 @@ constraints:
   - text: "nao tocar em src/legacy/"
     enforce: hook       # mechanical -> PREVENTIVE block via PreToolUse hook
   - text: "manter API estavel"
-    enforce: review     # semantic  -> mandatory DETECTIVE check in review
+    enforce: review     # semantic  -> your call, nothing checks it for you
 ---
 
 ## Objetivo
@@ -129,8 +127,7 @@ constraints:
 - [ ] ...
 ```
 
-`type: spike` produces a document (RFC/ADR), has **no** PR and no play. Review
-reports live in `.backlog/TASK-NNN.review.md`.
+`type: spike` produces a document (RFC/ADR), has **no** PR and no play.
 
 ## Creating tasks
 

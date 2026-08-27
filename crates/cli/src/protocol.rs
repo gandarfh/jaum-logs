@@ -80,7 +80,6 @@ pub enum InputKind {
     Defer,
     Convention,
     NewTask,
-    NewTaskClaude,
     InitPath,
 }
 
@@ -120,11 +119,7 @@ pub enum Intent {
     JobFollow,
     ToggleZoom,
     Play,
-    ReviewChat,
-    Handoff,
     Finish,
-    Ingest,
-    AnalyzeParallel,
     StartSetup,
     EditConventions,
     StartInput { kind: InputKind, prefill: String },
@@ -262,7 +257,6 @@ mod b64 {
 #[serde(rename_all = "lowercase")]
 pub enum SessionKind {
     Play,
-    Review,
     Setup,
 }
 
@@ -283,7 +277,7 @@ pub struct DomainSnapshot {
     pub picker: Option<PickerView>,
     /// Text input being captured (None = closed).
     pub input: Option<InputView>,
-    /// Async job (ingest/capture/init/review/parallel) and its overlay.
+    /// Async job (init) and its overlay.
     pub job: Option<JobView>,
     /// Whether the job overlay is visible (the job may keep running hidden).
     pub job_overlay: bool,
@@ -329,8 +323,6 @@ pub struct BoardView {
     pub setup_live: bool,
     pub detail_open: bool,
     pub detail_scroll: u16,
-    /// Review report of the selected task (verdict card content).
-    pub review: Option<ReviewView>,
     /// Repo overlaps between tasks: (task a, task b, repo).
     pub overlaps: Vec<OverlapView>,
 }
@@ -377,36 +369,6 @@ pub struct PrView {
     pub repo: String,
     pub pr: u64,
     pub branch: String,
-    /// Head SHA the automatic review already ran against (idempotence marker).
-    pub reviewed_sha: Option<String>,
-}
-
-/// Review badge of a task: `badge` = findings + unmet items.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewBadge {
-    pub clean: bool,
-    pub badge: usize,
-    pub unmet: usize,
-    /// When the capture ran, Unix seconds (clients render the "when").
-    pub reviewed_at: Option<u64>,
-}
-
-/// Parallelism mark relative to the ACTIVE tasks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ParallelMark {
-    Conflict,
-    Safe,
-}
-
-/// In-flight review state of a task: a capture running now, or a newer commit
-/// still owing a review because its CI has not gone green yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewProgressId {
-    Running,
-    AwaitingCi,
-    CiFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,10 +384,6 @@ pub struct TaskView {
     /// Markdown body (objective, acceptance criteria...).
     pub body: String,
     pub live_session: bool,
-    pub review: Option<ReviewBadge>,
-    pub parallel: Option<ParallelMark>,
-    /// Automatic-review state (running / awaiting or blocked by CI).
-    pub review_progress: Option<ReviewProgressId>,
 }
 
 /// Middle-column card of the selected row.
@@ -437,58 +395,6 @@ pub enum CardView {
         /// Last activity, epoch milliseconds (clients render the age).
         last_activity_ms: u64,
     },
-    Verdict {
-        clean: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CheckVerdict {
-    Pending,
-    Ok,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckView {
-    pub text: String,
-    pub verdict: CheckVerdict,
-}
-
-/// Review report content for the selected task (right panel).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewView {
-    pub clean: bool,
-    pub blocking: usize,
-    pub findings: Vec<FindingView>,
-    pub constraints: Vec<CheckView>,
-    pub criteria: Vec<CheckView>,
-    /// Head SHAs the verdict was taken against (idempotence tag).
-    pub reviewed_shas: Vec<String>,
-    /// When the capture ran, Unix seconds.
-    pub reviewed_at: Option<u64>,
-}
-
-/// A single review finding as structured data; each client renders it in its
-/// own idiom (the wire never carries display strings).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FindingView {
-    pub severity: SeverityId,
-    pub file: String,
-    pub line: Option<u32>,
-    pub message: String,
-    /// Violated RFC/ADR, if applicable.
-    pub reference: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SeverityId {
-    Blocker,
-    Major,
-    Minor,
-    Nit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,7 +616,6 @@ pub(crate) mod tests {
                         repo: "org/x".into(),
                         pr: 42,
                         branch: "feat/thing".into(),
-                        reviewed_sha: Some("abc1234def".into()),
                     }],
                     deferred: vec!["later".into()],
                     constraints: vec![ConstraintView {
@@ -719,53 +624,21 @@ pub(crate) mod tests {
                     }],
                     body: "## Objective\nx\n".into(),
                     live_session: true,
-                    review: Some(ReviewBadge {
-                        clean: false,
-                        badge: 2,
-                        unmet: 1,
-                        reviewed_at: Some(1_700_000_000),
-                    }),
-                    parallel: Some(ParallelMark::Conflict),
-                    review_progress: Some(ReviewProgressId::AwaitingCi),
                 }],
                 selected: 0,
                 project_selected: false,
                 focus: FocusId::Cards,
-                cards: vec![
-                    CardView::Session {
-                        kind: SessionKind::Play,
-                        live: true,
-                        last_activity_ms: 1_700_000_000_000,
-                    },
-                    CardView::Verdict { clean: false },
-                ],
+                cards: vec![CardView::Session {
+                    kind: SessionKind::Play,
+                    live: true,
+                    last_activity_ms: 1_700_000_000_000,
+                }],
                 card_selected: 0,
                 chat_fullscreen: false,
                 setup_needed: true,
                 setup_live: false,
                 detail_open: false,
                 detail_scroll: 0,
-                review: Some(ReviewView {
-                    clean: false,
-                    blocking: 1,
-                    findings: vec![FindingView {
-                        severity: SeverityId::Major,
-                        file: "src/a.rs".into(),
-                        line: Some(10),
-                        message: "broken".into(),
-                        reference: None,
-                    }],
-                    constraints: vec![CheckView {
-                        text: "no legacy".into(),
-                        verdict: CheckVerdict::Ok,
-                    }],
-                    criteria: vec![CheckView {
-                        text: "roundtrip works".into(),
-                        verdict: CheckVerdict::Pending,
-                    }],
-                    reviewed_shas: vec!["abc1234def".into()],
-                    reviewed_at: Some(1_700_000_000),
-                }),
                 overlaps: vec![OverlapView {
                     a: "TASK-001".into(),
                     b: "TASK-002".into(),
@@ -786,7 +659,7 @@ pub(crate) mod tests {
                 buffer: "tests first".into(),
             }),
             job: Some(JobView {
-                title: "ingest".into(),
+                title: "init".into(),
                 logs: vec!["scanning docs".into()],
                 finished: false,
                 follow: true,

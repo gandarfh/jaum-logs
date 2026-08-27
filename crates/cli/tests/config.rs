@@ -49,7 +49,6 @@ fn repo_map_builds_slug_to_path() {
 #[test]
 fn config_toml_roundtrip() {
     let cfg = Config {
-        ci_poll_secs: None,
         projects: vec![Project {
             name: "tono".into(),
             root: PathBuf::from("/p"),

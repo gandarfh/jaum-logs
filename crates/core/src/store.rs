@@ -34,11 +34,6 @@ impl Store {
         self.root.join(format!("{id}.md"))
     }
 
-    /// Path of the task's review report (`.backlog/TASK-NNN.review.md`).
-    pub fn review_path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.review.md"))
-    }
-
     // --- reads -------------------------------------------------------------
 
     /// Reads and parses a task from an arbitrary path.
@@ -207,7 +202,6 @@ impl Store {
                 repo: repo.to_string(),
                 pr: 0,
                 branch: branch.to_string(),
-                reviewed_sha: None,
             });
         }
         self.write(&task)?;
@@ -226,21 +220,6 @@ impl Store {
                 repo: repo.to_string(),
             })?;
         link.pr = pr_num;
-        self.write(&task)?;
-        Ok(task)
-    }
-
-    /// Records, per repo link, the head SHA whose CI-green state already
-    /// dispatched the automatic review. Links absent from `markers` are left
-    /// untouched; unknown repos are ignored (the trigger only produces markers
-    /// for existing links).
-    pub fn mark_reviewed(&self, id: &str, markers: &[(Repo, String)]) -> Result<Task> {
-        let mut task = self.get(id)?;
-        for (repo, sha) in markers {
-            if let Some(link) = task.prs.iter_mut().find(|p| p.repo == *repo) {
-                link.reviewed_sha = Some(sha.clone());
-            }
-        }
         self.write(&task)?;
         Ok(task)
     }

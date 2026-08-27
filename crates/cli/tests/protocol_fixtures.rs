@@ -19,11 +19,10 @@ use serde::de::DeserializeOwned;
 mod protocol;
 
 use protocol::{
-    BoardView, CardView, CheckVerdict, CheckView, ClientMsg, ConstraintView, DaemonStatus, Device,
-    DeviceKind, DeviceStatus, DocsView, DomainSnapshot, EnforceId, FindingView, FocusId, InputKind,
-    InputView, Intent, JobView, OverlapView, PROTOCOL_VERSION, ParallelMark, PickerView, PrView,
-    ProjectRef, ReviewBadge, ReviewProgressId, ReviewView, ServerMsg, SessionEvent,
-    SessionEventKind, SessionKind, SeverityId, StatusId, TabId, TaskTypeId, TaskView,
+    BoardView, CardView, ClientMsg, ConstraintView, DaemonStatus, Device, DeviceKind, DeviceStatus,
+    DocsView, DomainSnapshot, EnforceId, FocusId, InputKind, InputView, Intent, JobView,
+    OverlapView, PROTOCOL_VERSION, PickerView, PrView, ProjectRef, ServerMsg, SessionEvent,
+    SessionEventKind, SessionKind, StatusId, TabId, TaskTypeId, TaskView,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -105,7 +104,6 @@ fn sample_snapshot() -> DomainSnapshot {
                     repo: "org/x".into(),
                     pr: 42,
                     branch: "feat/thing".into(),
-                    reviewed_sha: Some("abc1234def5678".into()),
                 }],
                 deferred: vec!["extra scope".into()],
                 constraints: vec![ConstraintView {
@@ -114,53 +112,21 @@ fn sample_snapshot() -> DomainSnapshot {
                 }],
                 body: "## Objective\nDo the thing.\n".into(),
                 live_session: true,
-                review: Some(ReviewBadge {
-                    clean: false,
-                    badge: 2,
-                    unmet: 1,
-                    reviewed_at: Some(1_700_000_000),
-                }),
-                parallel: Some(ParallelMark::Conflict),
-                review_progress: Some(ReviewProgressId::AwaitingCi),
             }],
             selected: 0,
             project_selected: false,
             focus: FocusId::Cards,
-            cards: vec![
-                CardView::Session {
-                    kind: SessionKind::Play,
-                    live: true,
-                    last_activity_ms: 1_700_000_000_000,
-                },
-                CardView::Verdict { clean: false },
-            ],
+            cards: vec![CardView::Session {
+                kind: SessionKind::Play,
+                live: true,
+                last_activity_ms: 1_700_000_000_000,
+            }],
             card_selected: 0,
             chat_fullscreen: false,
             setup_needed: true,
             setup_live: false,
             detail_open: false,
             detail_scroll: 0,
-            review: Some(ReviewView {
-                clean: false,
-                blocking: 1,
-                findings: vec![FindingView {
-                    severity: SeverityId::Major,
-                    file: "src/a.rs".into(),
-                    line: Some(10),
-                    message: "broken invariant".into(),
-                    reference: Some("RFC-0001".into()),
-                }],
-                constraints: vec![CheckView {
-                    text: "no legacy".into(),
-                    verdict: CheckVerdict::Ok,
-                }],
-                criteria: vec![CheckView {
-                    text: "roundtrip works".into(),
-                    verdict: CheckVerdict::Pending,
-                }],
-                reviewed_shas: vec!["abc1234def5678".into()],
-                reviewed_at: Some(1_700_000_000),
-            }),
             overlaps: vec![OverlapView {
                 a: "TASK-001".into(),
                 b: "TASK-002".into(),
@@ -181,7 +147,7 @@ fn sample_snapshot() -> DomainSnapshot {
             buffer: "tests first".into(),
         }),
         job: Some(JobView {
-            title: "ingest".into(),
+            title: "init".into(),
             logs: vec!["scanning docs".into()],
             finished: false,
             follow: true,

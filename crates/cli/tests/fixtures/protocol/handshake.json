@@ -20,11 +20,6 @@
               "last_activity_ms": 1700000000000,
               "live": true
             }
-          },
-          {
-            "Verdict": {
-              "clean": false
-            }
           }
         ],
         "chat_fullscreen": false,
@@ -39,35 +34,6 @@
           }
         ],
         "project_selected": false,
-        "review": {
-          "blocking": 1,
-          "clean": false,
-          "constraints": [
-            {
-              "text": "no legacy",
-              "verdict": "ok"
-            }
-          ],
-          "criteria": [
-            {
-              "text": "roundtrip works",
-              "verdict": "pending"
-            }
-          ],
-          "findings": [
-            {
-              "file": "src/a.rs",
-              "line": 10,
-              "message": "broken invariant",
-              "reference": "RFC-0001",
-              "severity": "major"
-            }
-          ],
-          "reviewed_at": 1700000000,
-          "reviewed_shas": [
-            "abc1234def5678"
-          ]
-        },
         "selected": 0,
         "setup_live": false,
         "setup_needed": true,
@@ -88,22 +54,13 @@
             ],
             "id": "TASK-001",
             "live_session": true,
-            "parallel": "conflict",
             "prs": [
               {
                 "branch": "feat/thing",
                 "pr": 42,
-                "repo": "org/x",
-                "reviewed_sha": "abc1234def5678"
+                "repo": "org/x"
               }
             ],
-            "review": {
-              "badge": 2,
-              "clean": false,
-              "reviewed_at": 1700000000,
-              "unmet": 1
-            },
-            "review_progress": "awaiting_ci",
             "rfcs": [
               "RFC-0001"
             ],
@@ -133,7 +90,7 @@
           "scanning docs"
         ],
         "scroll": 0,
-        "title": "ingest"
+        "title": "init"
       },
       "job_overlay": true,
       "picker": {

@@ -84,7 +84,7 @@ pub fn with_local_prefill(mut intent: Intent) -> Intent {
 /// keys that mean nothing in the current mode (the local chat pane handles its
 /// own keys BEFORE this, writing straight to the PTY).
 pub fn map_key(ctx: &KeyCtx, key: KeyEvent) -> Option<Intent> {
-    // 0) job log overlay (ingest/capture/init)
+    // 0) job log overlay (init)
     if ctx.job_overlay {
         return match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(Intent::DismissJob),
@@ -201,15 +201,11 @@ pub fn map_key(ctx: &KeyCtx, key: KeyEvent) -> Option<Intent> {
         }),
         KeyCode::Char('z') => Some(Intent::ToggleZoom),
         KeyCode::Char('p') => Some(Intent::Play),
-        KeyCode::Char('R') => Some(Intent::ReviewChat),
-        KeyCode::Char('H') => Some(Intent::Handoff),
         KeyCode::Char('f') => Some(Intent::Finish),
-        KeyCode::Char('i') => Some(Intent::Ingest),
         KeyCode::Char('I') => Some(Intent::StartInput {
             kind: InputKind::InitPath,
             prefill: String::new(),
         }),
-        KeyCode::Char('a') => Some(Intent::AnalyzeParallel),
         KeyCode::Char('S') => Some(Intent::StartSetup),
         KeyCode::Char('P') => Some(Intent::OpenPicker),
         KeyCode::Char('e') => Some(Intent::EditConventions),
@@ -220,10 +216,6 @@ pub fn map_key(ctx: &KeyCtx, key: KeyEvent) -> Option<Intent> {
         }),
         KeyCode::Char('n') => Some(Intent::StartInput {
             kind: InputKind::NewTask,
-            prefill: String::new(),
-        }),
-        KeyCode::Char('N') => Some(Intent::StartInput {
-            kind: InputKind::NewTaskClaude,
             prefill: String::new(),
         }),
         KeyCode::Char('d') if ctx.has_task => Some(Intent::StartInput {

@@ -76,7 +76,6 @@ fn app_from(dir: &TmpDir, tasks: &[(&str, &str)], repos: Vec<RepoMap>) -> App {
         write_task(&backlog, id, status, &format!("feat/{}", id.to_lowercase()));
     }
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(dir.path(), repos)],
     };
     App::new(cfg, 0).unwrap()
@@ -109,18 +108,6 @@ fn write_script(dir: &Path, name: &str, body: &str) -> String {
     fs::write(&p, body).unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     p.to_string_lossy().into_owned()
-}
-
-/// Stub `claude` that prints a single stream-json `result` event carrying the
-/// given `structured_output`, whatever the arguments.
-fn stub_claude(dir: &Path, structured: &str) -> String {
-    write_script(
-        dir,
-        "claude-stub",
-        &format!(
-            "#!/bin/sh\nprintf '%s\\n' '{{\"type\":\"result\",\"structured_output\":{structured}}}'\n"
-        ),
-    )
 }
 
 /// Points the app's sidecar at the scripted node stub (no real claude).
@@ -243,7 +230,6 @@ fn fake_job(kind: JobKind) -> (std::sync::mpsc::Sender<JobMsg>, Job) {
         Job {
             kind,
             title: "fake".into(),
-            task: None,
             logs: Vec::new(),
             rx,
             finished: false,
@@ -314,7 +300,6 @@ fn list_docs_walks_recursively_and_filters_md() {
 #[test]
 fn session_kind_labels() {
     assert_eq!(SessionKind::Play.label(), "play");
-    assert_eq!(SessionKind::Review.label(), "review");
     assert_eq!(SessionKind::Setup.label(), "setup");
 }
 
@@ -372,11 +357,11 @@ fn setup_needs_any_covers_each_flag() {
 #[test]
 fn session_entry_history_and_record_roundtrip() {
     let dir = TmpDir::new("entry");
-    let rec = record(SessionKind::Review, Some("TASK-001"), "u-rec", dir.path());
+    let rec = record(SessionKind::Play, Some("TASK-001"), "u-rec", dir.path());
     let entry = SessionEntry::history(&rec);
     assert!(!entry.is_live());
     assert!(entry.finished);
-    assert_eq!(entry.name(), "review · TASK-001");
+    assert_eq!(entry.name(), "play · TASK-001");
     let back = entry.to_record();
     assert_eq!(back.claude_session_id, "u-rec");
     assert_eq!(back.created_ms, rec.created_ms);
@@ -507,7 +492,6 @@ fn sort_sessions_short_list_is_noop() {
 #[test]
 fn new_fails_on_invalid_project_index() {
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: Vec::new(),
     };
     assert!(App::new(cfg, 0).is_err());
@@ -588,18 +572,10 @@ fn rehydrate_one_resumes_each_kind_with_the_executor() {
     assert_eq!(play.created, from_epoch_ms(1_700_000_000_000));
     assert_eq!(play.last_activity, from_epoch_ms(1_700_000_001_000));
 
-    let review = app.rehydrate_one(record(
-        SessionKind::Review,
-        Some("TASK-001"),
-        "u-r",
-        dir.path(),
-    ));
-    assert!(review.is_live());
-
     let setup = app.rehydrate_one(record(SessionKind::Setup, None, "u-s", dir.path()));
     assert!(setup.is_live());
 
-    for mut e in [play, review, setup] {
+    for mut e in [play, setup] {
         if let Some(s) = &mut e.session {
             let _ = s.kill();
         }
@@ -611,11 +587,9 @@ fn rehydrate_one_falls_back_to_history_when_resume_fails() {
     let dir = TmpDir::new("rehydrate-fail");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
     app.executor = ClaudeExecutor::with_bin("cat");
-    // play/review records without a task cannot resume
+    // a play record without a task cannot resume
     let p = app.rehydrate_one(record(SessionKind::Play, None, "u-p", dir.path()));
     assert!(!p.is_live());
-    let r = app.rehydrate_one(record(SessionKind::Review, None, "u-r", dir.path()));
-    assert!(!r.is_live());
 }
 
 // --- conventions, detail, picker, projects --------------------------------
@@ -670,7 +644,6 @@ fn load_project_switches_but_keeps_other_projects_sessions_running() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "second".into();
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     fs::create_dir_all(dir1.path().join(".backlog")).unwrap();
@@ -724,7 +697,6 @@ fn same_task_id_in_two_projects_does_not_collide_on_the_board() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "second".into();
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     let mut app = App::new(cfg, 0).unwrap();
@@ -736,18 +708,15 @@ fn same_task_id_in_two_projects_does_not_collide_on_the_board() {
         "u-a",
         dir1.path(),
     );
-    assert!(app.active_task_ids().contains(&"TASK-001".to_string()));
+    assert!(app.sessions.iter().any(|e| e.is_live()));
 
     app.load_project(1);
     assert_eq!(app.project_name(), "second");
     app.selected = app.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
     app.card_selected = 0;
 
-    // "test"'s live session for its own TASK-001 must not surface here: no
-    // card, and it must not count as this project's TASK-001 being active
-    // (it isn't `wip` here, and the other project's session doesn't apply).
+    // "test"'s live session for its own TASK-001 must not surface here: no card.
     assert!(app.task_cards().is_empty());
-    assert!(!app.active_task_ids().contains(&"TASK-001".to_string()));
     assert!(!app.selected_card_is_live());
 
     app.stop_all_sessions();
@@ -762,7 +731,6 @@ fn picker_navigation_and_confirm() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "two".into();
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     let mut app = App::new(cfg, 0).unwrap();
@@ -794,7 +762,7 @@ fn picker_navigation_and_confirm() {
 // --- board: cards, focus, selection ---------------------------------------
 
 #[test]
-fn task_cards_lists_sessions_and_verdict() {
+fn task_cards_lists_sessions() {
     let dir = TmpDir::new("cards");
     let mut app = app_with(&dir, &[("TASK-001", "review"), ("TASK-002", "review")]);
     app.sessions.push(SessionEntry::history(&record(
@@ -803,24 +771,18 @@ fn task_cards_lists_sessions_and_verdict() {
         "u1",
         dir.path(),
     )));
-    fs::write(
-        dir.path().join(".backlog/TASK-001.review.md"),
-        "---\ntask: TASK-001\nfindings: []\nconstraints: []\n---\nok\n",
-    )
-    .unwrap();
     app.selected = app.tasks.iter().position(|t| t.id == "TASK-001").unwrap();
     let cards = app.task_cards();
-    assert_eq!(cards, vec![BoardCard::Session(0), BoardCard::Verdict]);
+    assert_eq!(cards, vec![BoardCard::Session(0)]);
 
-    app.card_selected = 1;
-    assert_eq!(app.selected_card(), Some(BoardCard::Verdict));
-    assert!(app.current_session_idx().is_none());
+    app.card_selected = 0;
+    assert_eq!(app.selected_card(), Some(BoardCard::Session(0)));
+    assert!(app.current_session_idx().is_some());
     assert!(!app.selected_card_is_live());
 
-    // card cursor bounds
+    // card cursor bounds (single card: stays put)
     app.card_next();
-    assert_eq!(app.card_selected, 1);
-    app.card_prev();
+    assert_eq!(app.card_selected, 0);
     app.card_prev();
     assert_eq!(app.card_selected, 0);
 
@@ -929,82 +891,6 @@ fn selection_moves_through_project_row_and_bounds() {
     assert_eq!(empty.selected, 0);
 }
 
-#[test]
-fn load_review_counts_findings_and_unmet_items() {
-    let dir = TmpDir::new("badge");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    assert!(app.load_review("TASK-001").is_none());
-    fs::write(
-        dir.path().join(".backlog/TASK-001.review.md"),
-        "---\ntask: TASK-001\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n",
-    )
-    .unwrap();
-    app.refresh().unwrap();
-    let r = app.load_review("TASK-001").unwrap();
-    assert_eq!(r.findings.len() + r.unmet_count(), 2);
-}
-
-// --- parallelism ----------------------------------------------------------
-
-#[test]
-fn parallel_conflicts_relative_to_active_tasks() {
-    let dir = TmpDir::new("parallel");
-    let work = dir.path().join(".jaum");
-    fs::create_dir_all(&work).unwrap();
-    fs::write(
-        work.join("parallel.json"),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"same file"}]}"#,
-    )
-    .unwrap();
-    let mut app = app_with(
-        &dir,
-        &[
-            ("TASK-001", "wip"),
-            ("TASK-002", "backlog"),
-            ("TASK-003", "backlog"),
-        ],
-    );
-    assert!(app.parallel.is_some());
-    assert_eq!(app.active_task_ids(), vec!["TASK-001".to_string()]);
-
-    let (other, repo, reason) = app.parallel_conflict_with_active("TASK-002").unwrap();
-    assert_eq!((other.as_str(), repo.as_str()), ("TASK-001", "org/x"));
-    assert_eq!(reason, "same file");
-    assert!(!app.is_parallel_safe("TASK-002"));
-    // the active task never conflicts with itself
-    assert!(app.parallel_conflict_with_active("TASK-001").is_none());
-    assert!(app.parallel_conflict_with_active("TASK-003").is_none());
-    assert!(app.is_parallel_safe("TASK-003"));
-
-    app.parallel = None;
-    assert!(app.parallel_conflict_with_active("TASK-002").is_none());
-    assert!(!app.is_parallel_safe("TASK-003"));
-}
-
-#[test]
-fn active_tasks_include_live_play_sessions_once() {
-    let dir = TmpDir::new("active");
-    let mut app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    open_cat(
-        &mut app,
-        SessionKind::Play,
-        Some("TASK-001"),
-        "u1",
-        dir.path(),
-    );
-    open_cat(
-        &mut app,
-        SessionKind::Play,
-        Some("TASK-002"),
-        "u2",
-        dir.path(),
-    );
-    let ids = app.active_task_ids();
-    assert_eq!(ids.iter().filter(|i| i.as_str() == "TASK-001").count(), 1);
-    assert!(ids.contains(&"TASK-002".to_string()));
-    app.stop_all_sessions();
-}
-
 // --- docs tab ---------------------------------------------------------------
 
 #[test]
@@ -1090,7 +976,7 @@ fn setup_start_opens_chat_or_reports_failure() {
     assert!(app.status_msg.contains("setup failed"));
 }
 
-// --- play / review / handoff / finish --------------------------------------
+// --- play / finish ----------------------------------------------------------
 
 #[test]
 fn play_selected_requires_a_task_and_a_mapped_repo() {
@@ -1117,7 +1003,6 @@ fn play_selected_creates_worktree_session_and_close_cleans_up() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/nice-work");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -1183,7 +1068,6 @@ fn play_selected_resumes_a_finished_sessions_claude_id() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/nice-work");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -1243,143 +1127,6 @@ fn play_selected_focuses_existing_live_session() {
 }
 
 #[test]
-fn review_selected_opens_read_only_session() {
-    let dir = TmpDir::new("review-ok");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    app.executor = ClaudeExecutor::with_bin("cat");
-    app.review_selected();
-    assert!(
-        app.status_msg.contains("read-only review of TASK-001"),
-        "{}",
-        app.status_msg
-    );
-    assert_eq!(app.sessions[0].kind, SessionKind::Review);
-    app.stop_all_sessions();
-}
-
-#[test]
-fn review_selected_handles_failure_and_missing_selection() {
-    let dir = TmpDir::new("review-fail");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    app.executor = ClaudeExecutor::with_bin("/nonexistent-bin-jaum-test");
-    app.review_selected();
-    assert!(app.status_msg.contains("review failed"));
-
-    let dir2 = TmpDir::new("review-none");
-    let mut empty = app_with(&dir2, &[]);
-    empty.review_selected();
-    assert_eq!(empty.status_msg, HINT);
-}
-
-fn write_dirty_review(dir: &TmpDir, id: &str) {
-    fs::write(
-        dir.path().join(format!(".backlog/{id}.review.md")),
-        format!(
-            "---\ntask: {id}\nfindings:\n  - file: src/x.rs\n    message: bug\nconstraints:\n  - text: rule\n    verdict: failed\n---\nbody\n"
-        ),
-    )
-    .unwrap();
-}
-
-#[test]
-fn handoff_guards_missing_task_review_and_clean_report() {
-    let dir = TmpDir::new("handoff-guards");
-    let mut empty = app_with(&dir, &[]);
-    empty.handoff_selected();
-    assert_eq!(empty.status_msg, "no task selected");
-
-    let dir2 = TmpDir::new("handoff-noreview");
-    let mut app = app_with(&dir2, &[("TASK-001", "review")]);
-    app.handoff_selected();
-    assert!(app.status_msg.contains("run review"));
-
-    fs::write(
-        dir2.path().join(".backlog/TASK-001.review.md"),
-        "---\ntask: TASK-001\nfindings: []\nconstraints: []\n---\nok\n",
-    )
-    .unwrap();
-    app.handoff_selected();
-    assert!(app.status_msg.contains("clean review"));
-}
-
-#[test]
-fn handoff_sends_findings_to_existing_play_session() {
-    let dir = TmpDir::new("handoff-live");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    sidecar_stub(&mut app);
-    write_dirty_review(&dir, "TASK-001");
-    app.refresh().unwrap();
-    open_sidecar_play(&mut app, "TASK-001", "u-h", dir.path());
-    app.handoff_selected();
-    assert!(
-        app.status_msg.contains("findings sent"),
-        "{}",
-        app.status_msg
-    );
-    assert_eq!(app.board_focus, BoardFocus::Chat);
-    // the handoff turn resumes the claude session and completes over the stub
-    assert!(drain_until(&mut app, |a| !a.sessions[0].turn_active()));
-    let text = app.sessions[0].parser.screen().contents();
-    assert!(
-        text.contains("Review found issues"),
-        "handoff text not echoed: {text}"
-    );
-    app.stop_all_sessions();
-}
-
-#[test]
-fn handoff_opens_play_when_none_is_live() {
-    let dir = TmpDir::new("handoff-open");
-    let repo = git_repo(dir.path());
-    let backlog = dir.path().join(".backlog");
-    write_task(&backlog, "TASK-001", "review", "feat/handoff-work");
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    sidecar_stub(&mut app);
-    app.gh = Gh::with_bin("false");
-    write_dirty_review(&dir, "TASK-001");
-    app.refresh().unwrap();
-
-    app.handoff_selected();
-    assert!(
-        app.status_msg.contains("findings sent"),
-        "{}",
-        app.status_msg
-    );
-    assert_eq!(app.sessions.len(), 1);
-    // the initial prompt is still in flight, so the handoff waits in the queue
-    assert_eq!(app.sessions[0].chat.as_ref().unwrap().queued.len(), 1);
-    // once the first turn finishes, the queued handoff goes out and completes
-    assert!(drain_until(&mut app, |a| {
-        let chat = a.sessions[0].chat.as_ref().unwrap();
-        chat.queued.is_empty() && !a.sessions[0].turn_active() && chat.turn_seq == 2
-    }));
-    app.close_selected_session();
-}
-
-#[test]
-fn handoff_gives_up_when_play_cannot_start() {
-    let dir = TmpDir::new("handoff-fail");
-    // no repo mapped: the implicit play_selected fails and handoff returns
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    app.executor = ClaudeExecutor::with_bin("cat");
-    write_dirty_review(&dir, "TASK-001");
-    app.refresh().unwrap();
-    app.handoff_selected();
-    assert!(app.status_msg.contains("play failed"), "{}", app.status_msg);
-    assert!(app.sessions.is_empty());
-}
-
-#[test]
 fn finish_selected_reports_merge_state_and_errors() {
     let dir = TmpDir::new("finish");
     let mut empty = app_with(&dir, &[]);
@@ -1412,191 +1159,12 @@ fn job_running_and_guards_against_concurrent_jobs() {
     let dir = TmpDir::new("job-guard");
     let mut app = app_with(&dir, &[("TASK-001", "wip")]);
     assert!(!app.job_running());
-    let (_tx, job) = fake_job(JobKind::Ingest);
+    let (_tx, job) = fake_job(JobKind::Init);
     app.job = Some(job);
     assert!(app.job_running());
 
-    app.start_ingest_job();
-    app.start_review_job_for("TASK-001", Vec::new());
-    app.start_parallel_job();
-    app.start_capture_job("hint");
     app.start_init_job("/tmp");
     assert_eq!(app.job.as_ref().unwrap().title, "fake");
-}
-
-#[test]
-fn ingest_job_creates_stub_and_chains_parallel_analysis() {
-    let dir = TmpDir::new("job-ingest");
-    let mut app = app_with(&dir, &[]);
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"tasks":[{"title":"t","objetivo":"do x"}],"docs":[]}"#,
-    );
-    app.start_ingest_job();
-    assert!(app.job_overlay);
-    wait_job(&mut app);
-    // one open task after ingest: the chained analysis ends without conflicts
-    assert!(app.status_msg.contains("parallelism"), "{}", app.status_msg);
-    assert_eq!(app.tasks.len(), 1);
-    assert!(dir.path().join(".jaum/parallel.json").exists());
-    app.dismiss_job();
-    assert!(app.job.is_none());
-    assert!(!app.job_overlay);
-}
-
-#[test]
-fn ingest_job_reports_failure() {
-    let dir = TmpDir::new("job-ingest-err");
-    let mut app = app_with(&dir, &[]);
-    app.claude_bin = "false".into();
-    app.start_ingest_job();
-    wait_job(&mut app);
-    assert!(
-        app.status_msg.contains("ingest failed"),
-        "{}",
-        app.status_msg
-    );
-    let logs = &app.job.as_ref().unwrap().logs;
-    assert!(logs.iter().any(|l| l.contains("ingest failed")));
-}
-
-#[test]
-fn review_job_writes_report_without_opening_the_overlay() {
-    let dir = TmpDir::new("job-review-ok");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"findings":[{"file":"src/x.rs","message":"bug","severity":"major"}],"constraints":[],"criteria":[]}"#,
-    );
-    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
-    assert!(
-        !app.job_overlay,
-        "auto-dispatched review must not steal the screen"
-    );
-    assert!(
-        app.status_msg.contains("review started"),
-        "{}",
-        app.status_msg
-    );
-    wait_job(&mut app);
-    assert!(
-        app.status_msg.contains("review TASK-001: 1 finding(s)"),
-        "{}",
-        app.status_msg
-    );
-    assert!(dir.path().join(".backlog/TASK-001.review.md").exists());
-    // the reviewed SHA is stamped only after a successful capture
-    assert_eq!(
-        app.store.get("TASK-001").unwrap().prs[0]
-            .reviewed_sha
-            .as_deref(),
-        Some("abc")
-    );
-}
-
-#[test]
-fn review_job_failure_leaves_the_sha_unmarked_for_retry() {
-    let dir = TmpDir::new("job-review-err");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    app.claude_bin = "false".into();
-    app.start_review_job_for("TASK-001", vec![("org/x".to_string(), "abc".to_string())]);
-    wait_job(&mut app);
-    assert!(
-        app.status_msg.contains("review failed"),
-        "{}",
-        app.status_msg
-    );
-    // a failed capture must NOT stamp the SHA: the next poll has to retry it
-    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
-}
-
-#[test]
-fn reviewing_task_id_tracks_the_running_capture() {
-    let dir = TmpDir::new("reviewing-id");
-    let mut app = app_with(&dir, &[("TASK-001", "review")]);
-    assert_eq!(app.reviewing_task_id(), None);
-
-    // a non-review job in flight does not count as a running review
-    let (_tx, mut job) = fake_job(JobKind::Ingest);
-    job.task = Some("TASK-001".into());
-    app.job = Some(job);
-    assert_eq!(app.reviewing_task_id(), None);
-
-    // a running review job exposes its task (the snapshot maps it to a
-    // Running review progress, rendered in the statusline; see tui_tests)
-    let (_tx2, mut rjob) = fake_job(JobKind::Review);
-    rjob.task = Some("TASK-001".into());
-    app.job = Some(rjob);
-    app.selected = 0;
-    assert_eq!(app.reviewing_task_id(), Some("TASK-001"));
-
-    // a finished review no longer counts
-    app.job.as_mut().unwrap().finished = true;
-    assert_eq!(app.reviewing_task_id(), None);
-}
-
-#[test]
-fn parallel_job_persists_conflicts() {
-    let dir = TmpDir::new("job-parallel");
-    let mut app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"conflicts":[{"a":"TASK-001","b":"TASK-002","repo":"org/x","reason":"same file"}]}"#,
-    );
-    app.start_parallel_job();
-    wait_job(&mut app);
-    assert!(
-        app.status_msg.contains("parallelism: 1 conflict(s)"),
-        "{}",
-        app.status_msg
-    );
-    assert!(app.parallel.is_some());
-}
-
-#[test]
-fn parallel_job_reports_failure() {
-    let dir = TmpDir::new("job-parallel-err");
-    let mut app = app_with(&dir, &[("TASK-001", "wip"), ("TASK-002", "backlog")]);
-    app.claude_bin = "false".into();
-    app.start_parallel_job();
-    wait_job(&mut app);
-    assert!(
-        app.status_msg.contains("parallelism analysis failed"),
-        "{}",
-        app.status_msg
-    );
-}
-
-#[test]
-fn capture_job_creates_tasks_from_hint() {
-    let dir = TmpDir::new("job-capture");
-    let mut app = app_with(&dir, &[]);
-    app.start_capture_job("   ");
-    assert!(app.status_msg.contains("capture cancelled"));
-
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"tasks":[{"title":"t","objetivo":"fix the parser"}],"docs":[]}"#,
-    );
-    app.start_capture_job("parser breaks on empty input");
-    wait_job(&mut app);
-    // capture chains nothing; claude's stub created exactly one task
-    assert!(
-        app.status_msg.contains("claude created: TASK-"),
-        "{}",
-        app.status_msg
-    );
-
-    let dir2 = TmpDir::new("job-capture-err");
-    let mut bad = app_with(&dir2, &[]);
-    bad.claude_bin = "false".into();
-    bad.start_capture_job("anything");
-    wait_job(&mut bad);
-    assert!(
-        bad.status_msg.contains("capture failed"),
-        "{}",
-        bad.status_msg
-    );
 }
 
 fn init_ok_with_repo(root: &Path, _explicit: &[PathBuf]) -> Result<Project> {
@@ -1626,7 +1194,6 @@ fn init_ok_no_repos(root: &Path, _explicit: &[PathBuf]) -> Result<Project> {
 
 fn load_config_empty() -> Result<GlobalConfig> {
     Ok(GlobalConfig {
-        ci_poll_secs: None,
         projects: Vec::new(),
     })
 }
@@ -1644,7 +1211,6 @@ fn load_config_with_init_project() -> Result<GlobalConfig> {
     fs::create_dir_all(base.join(".backlog"))?;
     fs::create_dir_all(base.join("docs"))?;
     Ok(GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![Project {
             name: "proj-init".into(),
             root: base.clone(),
@@ -1728,24 +1294,30 @@ fn poll_job_accumulates_logs_and_is_noop_without_job() {
     let mut app = app_with(&dir, &[]);
     app.poll_job(); // no job: nothing to do
 
-    let (tx, job) = fake_job(JobKind::Capture);
+    let (tx, job) = fake_job(JobKind::Init);
     app.job = Some(job);
     tx.send(JobMsg::Log("working".into())).unwrap();
     app.poll_job();
     assert_eq!(app.job.as_ref().unwrap().logs, vec!["working".to_string()]);
     assert!(!app.job.as_ref().unwrap().finished);
 
+    // the only job kind left (Init) treats `Ok` as the registered project's
+    // name, not a bare status message.
     tx.send(JobMsg::Done(Ok("all done".into()))).unwrap();
     app.poll_job();
     assert!(app.job.as_ref().unwrap().finished);
-    assert_eq!(app.status_msg, "all done");
+    assert!(
+        app.status_msg.contains("project 'all done' registered"),
+        "{}",
+        app.status_msg
+    );
 }
 
 #[test]
 fn dismiss_job_keeps_running_jobs_in_background() {
     let dir = TmpDir::new("dismiss");
     let mut app = app_with(&dir, &[]);
-    let (_tx, job) = fake_job(JobKind::Ingest);
+    let (_tx, job) = fake_job(JobKind::Init);
     app.job = Some(job);
     app.job_overlay = true;
     app.dismiss_job();
@@ -1767,7 +1339,7 @@ fn job_log_scrolling_toggles_follow() {
     app.job_scroll_top();
     app.job_follow();
 
-    let (_tx, job) = fake_job(JobKind::Ingest);
+    let (_tx, job) = fake_job(JobKind::Init);
     app.job = Some(job);
     app.job.as_mut().unwrap().scroll = 5;
     app.job_scroll_up();
@@ -1877,8 +1449,6 @@ fn input_capture_dispatches_by_kind() {
     assert!(app.status_msg.contains("convention added"));
     app.submit_input(InputKind::NewTask, "quick one".into());
     assert!(app.status_msg.contains("task created"));
-    app.submit_input(InputKind::NewTaskClaude, "  ".into());
-    assert!(app.status_msg.contains("capture cancelled"));
     app.submit_input(InputKind::InitPath, "  ".into());
     assert!(app.status_msg.contains("init cancelled"));
 }
@@ -1964,7 +1534,6 @@ fn tick_pr_sync_throttles_and_persists_discovered_numbers() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "wip", "feat/sync-me");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2010,318 +1579,6 @@ fn tick_pr_sync_throttles_and_persists_discovered_numbers() {
     });
     wait_until(|| !app.pr_sync_running.load(Ordering::Relaxed));
     app.stop_all_sessions();
-}
-
-// --- CI watch (auto review on green checks) ----------------------------------
-
-/// Task markdown with an explicit PR number (and optional reviewed marker).
-fn write_task_with_pr(backlog: &Path, id: &str, status: &str, pr: u64, reviewed: Option<&str>) {
-    let marker = reviewed
-        .map(|s| format!("\n    reviewed_sha: {s}"))
-        .unwrap_or_default();
-    fs::create_dir_all(backlog).unwrap();
-    fs::write(
-        backlog.join(format!("{id}.md")),
-        format!(
-            "---\nid: {id}\ntype: impl\nstatus: {status}\nprs:\n  - repo: org/x\n    pr: {pr}\n    branch: feat/x{marker}\n---\n\n## Objective\nx\n"
-        ),
-    )
-    .unwrap();
-}
-
-fn green(sha: &str) -> Vec<(String, PrCi)> {
-    obs(MergeState::Open, CiStatus::Passing, sha)
-}
-
-fn obs(state: MergeState, checks: CiStatus, sha: &str) -> Vec<(String, PrCi)> {
-    vec![(
-        "org/x".to_string(),
-        PrCi {
-            state,
-            checks,
-            head_sha: sha.to_string(),
-        },
-    )]
-}
-
-#[test]
-fn review_progress_reflects_pending_reviews_from_ci_observations() {
-    let dir = TmpDir::new("review-progress");
-    let backlog = dir.path().join(".backlog");
-    // already reviewed the commit "old"
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, Some("old"));
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(dir.path(), Vec::new())],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    let task = app.store.get("TASK-001").unwrap();
-
-    // no observation yet: nothing to show
-    assert_eq!(app.review_progress(&task), None);
-
-    // a new commit "new" whose CI is still running: re-review pending
-    app.ci_obs.insert(
-        "TASK-001".into(),
-        obs(MergeState::Open, CiStatus::Pending, "new"),
-    );
-    assert_eq!(app.review_progress(&task), Some(ReviewProgress::AwaitingCi));
-
-    // the new commit's CI went red: review blocked
-    app.ci_obs.insert(
-        "TASK-001".into(),
-        obs(MergeState::Open, CiStatus::Failing, "new"),
-    );
-    assert_eq!(app.review_progress(&task), Some(ReviewProgress::CiFailed));
-
-    // new commit green: transient (the trigger fires next tick), so no glyph
-    app.ci_obs.insert(
-        "TASK-001".into(),
-        obs(MergeState::Open, CiStatus::Passing, "new"),
-    );
-    assert_eq!(app.review_progress(&task), None);
-
-    // CI still on the reviewed commit "old": nothing pending
-    app.ci_obs.insert(
-        "TASK-001".into(),
-        obs(MergeState::Open, CiStatus::Pending, "old"),
-    );
-    assert_eq!(app.review_progress(&task), None);
-
-    // a merged/closed PR never shows a pending review
-    app.ci_obs.insert(
-        "TASK-001".into(),
-        obs(MergeState::Merged, CiStatus::Pending, "new"),
-    );
-    assert_eq!(app.review_progress(&task), None);
-
-    // a running capture wins over everything
-    let (_tx, mut rjob) = fake_job(JobKind::Review);
-    rjob.task = Some("TASK-001".into());
-    app.job = Some(rjob);
-    assert_eq!(app.review_progress(&task), Some(ReviewProgress::Running));
-}
-
-#[test]
-fn ci_watch_targets_need_created_prs_on_open_impl_tasks() {
-    let dir = TmpDir::new("ci-targets");
-    let backlog = dir.path().join(".backlog");
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    write_task_with_pr(&backlog, "TASK-002", "wip", 0, None); // PR not created
-    write_task_with_pr(&backlog, "TASK-003", "merged", 9, None); // already merged
-    write_unlinked_task(&backlog, "TASK-004", "backlog"); // no PR links
-    fs::write(
-        backlog.join("TASK-005.md"),
-        "---\nid: TASK-005\ntype: spike\nstatus: wip\nprs:\n  - repo: org/x\n    pr: 8\n    branch: feat/s\n---\n\n## Objective\nx\n",
-    )
-    .unwrap();
-
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(dir.path(), Vec::new())],
-    };
-    let app = App::new(cfg, 0).unwrap();
-    assert_eq!(
-        app.ci_watch_targets(),
-        vec![("TASK-001".to_string(), vec![("org/x".to_string(), 7)])]
-    );
-}
-
-#[test]
-fn ci_green_observation_marks_sha_and_starts_review_once() {
-    let dir = TmpDir::new("ci-trigger");
-    let backlog = dir.path().join(".backlog");
-    fs::create_dir_all(dir.path().join("docs")).unwrap();
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(dir.path(), Vec::new())],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"findings":[],"constraints":[],"criteria":[]}"#,
-    );
-
-    // green CI on a fresh SHA: review job dispatched; the SHA is stamped only
-    // once the capture succeeds (background thread).
-    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
-    app.tick_ci_watch();
-    assert!(app.job_running(), "review job should have started");
-    assert_eq!(app.job.as_ref().unwrap().title, "review TASK-001");
-    wait_job(&mut app);
-    assert!(backlog.join("TASK-001.review.md").exists());
-    assert_eq!(
-        app.store.get("TASK-001").unwrap().prs[0]
-            .reviewed_sha
-            .as_deref(),
-        Some("abc")
-    );
-
-    // same SHA green again: idempotent, no new job
-    app.job = None;
-    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
-    app.tick_ci_watch();
-    assert!(app.job.is_none(), "same commit must not re-trigger");
-
-    // a new push that turns green re-arms the trigger
-    app.ci_tx.send(("TASK-001".into(), green("def"))).unwrap();
-    app.tick_ci_watch();
-    assert!(app.job_running(), "new commit should re-trigger");
-    wait_job(&mut app);
-    assert_eq!(
-        app.store.get("TASK-001").unwrap().prs[0]
-            .reviewed_sha
-            .as_deref(),
-        Some("def")
-    );
-}
-
-#[test]
-fn ci_observations_that_are_not_fully_green_never_trigger() {
-    let dir = TmpDir::new("ci-notgreen");
-    let backlog = dir.path().join(".backlog");
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(dir.path(), Vec::new())],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-
-    for checks in [
-        CiStatus::Pending,
-        CiStatus::Failing,
-        CiStatus::NoChecks,
-        CiStatus::Unknown,
-    ] {
-        let observed = vec![(
-            "org/x".to_string(),
-            PrCi {
-                state: MergeState::Open,
-                checks,
-                head_sha: "abc".into(),
-            },
-        )];
-        app.ci_tx.send(("TASK-001".into(), observed)).unwrap();
-    }
-    // a task that vanished from the backlog is skipped gracefully
-    app.ci_tx.send(("TASK-404".into(), green("abc"))).unwrap();
-    app.tick_ci_watch();
-    assert!(app.job.is_none(), "nothing should trigger");
-    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
-}
-
-#[test]
-fn ci_trigger_defers_while_another_job_runs() {
-    let dir = TmpDir::new("ci-defer");
-    let backlog = dir.path().join(".backlog");
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(dir.path(), Vec::new())],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-
-    let (_tx, job) = fake_job(JobKind::Ingest);
-    app.job = Some(job);
-    app.ci_tx.send(("TASK-001".into(), green("abc"))).unwrap();
-    app.tick_ci_watch();
-    // dropped without marking: the next green poll re-arms the trigger
-    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
-    assert_eq!(app.job.as_ref().unwrap().title, "fake");
-}
-
-#[test]
-fn tick_ci_watch_polls_gh_and_dispatches_the_review() {
-    let dir = TmpDir::new("ci-poll");
-    let repo_dir = dir.path().join("repo");
-    fs::create_dir_all(&repo_dir).unwrap();
-    fs::create_dir_all(dir.path().join("docs")).unwrap();
-    let backlog = dir.path().join(".backlog");
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    let cfg = GlobalConfig {
-        ci_poll_secs: Some(120),
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo_dir,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    assert_eq!(app.ci_poll_interval, Duration::from_secs(120));
-    app.gh_bin = write_script(
-        dir.path(),
-        "gh-ci-stub",
-        "#!/bin/sh\necho '{\"state\":\"OPEN\",\"headRefOid\":\"abc\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'\n",
-    );
-    app.claude_bin = stub_claude(
-        dir.path(),
-        r#"{"findings":[],"constraints":[],"criteria":[]}"#,
-    );
-
-    // while a pass is flagged as running, nothing starts
-    app.ci_poll_running.store(true, Ordering::Relaxed);
-    let before = app.last_ci_poll;
-    app.tick_ci_watch();
-    assert!(app.last_ci_poll == before);
-    app.ci_poll_running.store(false, Ordering::Relaxed);
-
-    // throttled while the last pass is recent
-    app.last_ci_poll = Instant::now();
-    app.tick_ci_watch();
-    assert!(!app.ci_poll_running.load(Ordering::Relaxed));
-
-    // due: polls gh in background, then the next tick applies the observation
-    // and dispatches the review; the SHA is stamped once the capture succeeds.
-    app.last_ci_poll = past(121);
-    app.tick_ci_watch();
-    wait_until(|| !app.ci_poll_running.load(Ordering::Relaxed));
-    app.tick_ci_watch();
-    wait_job(&mut app);
-    assert!(backlog.join("TASK-001.review.md").exists());
-    assert_eq!(
-        app.store.get("TASK-001").unwrap().prs[0]
-            .reviewed_sha
-            .as_deref(),
-        Some("abc")
-    );
-}
-
-#[test]
-fn tick_ci_watch_gh_failure_is_unknown_and_never_triggers() {
-    let dir = TmpDir::new("ci-poll-err");
-    let repo_dir = dir.path().join("repo");
-    fs::create_dir_all(&repo_dir).unwrap();
-    let backlog = dir.path().join(".backlog");
-    write_task_with_pr(&backlog, "TASK-001", "wip", 7, None);
-    // a second PR whose repo is not mapped locally also degrades to Unknown
-    fs::write(
-        backlog.join("TASK-002.md"),
-        "---\nid: TASK-002\ntype: impl\nstatus: wip\nprs:\n  - repo: org/unmapped\n    pr: 9\n    branch: feat/y\n---\n\n## Objective\nx\n",
-    )
-    .unwrap();
-    let cfg = GlobalConfig {
-        ci_poll_secs: None,
-        projects: vec![project(
-            dir.path(),
-            vec![RepoMap {
-                slug: "org/x".into(),
-                path: repo_dir,
-            }],
-        )],
-    };
-    let mut app = App::new(cfg, 0).unwrap();
-    app.gh_bin = "false".into();
-
-    app.last_ci_poll = past(31);
-    app.tick_ci_watch();
-    wait_until(|| !app.ci_poll_running.load(Ordering::Relaxed));
-    app.tick_ci_watch();
-    assert!(app.job.is_none(), "gh failure must not trigger a review");
-    assert_eq!(app.store.get("TASK-001").unwrap().prs[0].reviewed_sha, None);
-    assert_eq!(app.store.get("TASK-002").unwrap().prs[0].reviewed_sha, None);
 }
 
 #[test]
@@ -2379,7 +1636,6 @@ fn persist_sessions_writes_each_project_to_its_own_file() {
     let mut p2 = project(dir2.path(), Vec::new());
     p2.name = "second".into();
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(dir1.path(), Vec::new()), p2],
     };
     let mut app = App::new(cfg, 0).unwrap();
@@ -2513,7 +1769,6 @@ fn play_permission_request_is_auto_allowed_while_no_client_answers() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/perm-allow", "ask-permission");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2556,7 +1811,6 @@ fn unanswered_permission_expires_denies_and_blocks_the_session() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/perm-deny", "ask-permission");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2609,7 +1863,6 @@ fn close_aborts_a_hanging_turn() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/abort-hang", "hang");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2647,7 +1900,6 @@ fn aborting_a_turn_clears_its_pending_permissions_and_closes_the_log() {
     let backlog = dir.path().join(".backlog");
     write_task_with_objective(&backlog, "TASK-001", "feat/abort-perm", "ask-permission");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2750,7 +2002,6 @@ fn play_fails_cleanly_when_the_sidecar_cannot_spawn() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/no-sidecar");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {
@@ -2784,7 +2035,6 @@ fn rollback_undoes_worktrees_and_status_of_a_failed_launch() {
     let backlog = dir.path().join(".backlog");
     write_task(&backlog, "TASK-001", "backlog", "feat/rollback-me");
     let cfg = GlobalConfig {
-        ci_poll_secs: None,
         projects: vec![project(
             dir.path(),
             vec![RepoMap {

@@ -62,7 +62,6 @@ impl Home {
         )
         .unwrap();
         let cfg = Config {
-            ci_poll_secs: None,
             projects: vec![Project {
                 name: "proj".into(),
                 root: root.clone(),
@@ -657,49 +656,6 @@ fn local_tui_fails_without_tty() {
     assert!(!out.status.success());
 }
 
-// --- ingest ------------------------------------------------------------------
-
-/// A stand-in `claude` that answers the structured-scan envelope.
-fn stub_claude(dir: &Path) -> PathBuf {
-    let bin_dir = dir.join("stub-bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    let path = bin_dir.join("claude");
-    let envelope = concat!(
-        "{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\",",
-        "\"structured_output\":{\"tasks\":[{\"title\":\"Stub task\",",
-        "\"type\":\"impl\",\"rfcs\":[\"RFC-0001\"],\"adrs\":[],",
-        "\"objetivo\":\"Do the thing\",\"criterio\":[\"done\"]}],\"docs\":[]}}"
-    );
-    fs::write(&path, format!("#!/bin/sh\necho '{envelope}'\n")).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-    bin_dir
-}
-
-#[test]
-fn ingest_creates_stubs_via_stubbed_claude() {
-    let home = Home::new("ingest");
-    let root = home.with_project();
-    let bin_dir = stub_claude(home.path());
-    let path_env = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let out = home
-        .jaum(&["ingest"])
-        .current_dir(&root)
-        .env("PATH", path_env)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    let text = stdout_of(&out);
-    assert!(text.contains("ingest: 1 stub(s) created"), "stdout: {text}");
-    assert!(text.contains("RFC-0001"), "stdout: {text}");
-}
-
 // --- full client session over a pty ------------------------------------------
 
 /// Minimal but complete snapshot for the fake daemon.
@@ -724,9 +680,6 @@ fn sample_snapshot() -> protocol::DomainSnapshot {
                 constraints: vec![],
                 body: "## Objective\nx\n".into(),
                 live_session: false,
-                review: None,
-                parallel: None,
-                review_progress: None,
             }],
             selected: 0,
             project_selected: false,
@@ -738,7 +691,6 @@ fn sample_snapshot() -> protocol::DomainSnapshot {
             setup_live: false,
             detail_open: false,
             detail_scroll: 0,
-            review: None,
             overlaps: vec![],
         },
         docs: DocsView {

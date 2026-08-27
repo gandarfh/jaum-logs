@@ -153,7 +153,7 @@ pub fn reinjection_text(task: &Task, conventions: &str) -> String {
         }
     }
     if !reviews.is_empty() {
-        t.push_str("Your responsibility (no automatic block — respect them; they are checked in review):\n");
+        t.push_str("Your responsibility (no automatic block — nothing checks this for you now):\n");
         for c in &reviews {
             t.push_str(&format!("- {}\n", c.text));
         }

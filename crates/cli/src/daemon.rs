@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,9 +21,6 @@ use crate::snapshot::build_snapshot;
 
 /// Idle tick: how often the daemon polls PTYs/jobs with no client events.
 const TICK: Duration = Duration::from_millis(16);
-/// Coalescing window: a burst of events with gaps under this becomes ONE
-/// snapshot broadcast.
-const COALESCE: Duration = Duration::from_millis(20);
 /// Hard ceiling for one burst: even a continuous event stream must yield to
 /// tick/broadcast at least this often.
 const COALESCE_CAP: Duration = Duration::from_millis(100);
@@ -127,7 +124,6 @@ impl Daemon {
         self.app.poll_job();
         self.app.tick_reload();
         self.app.tick_pr_sync();
-        self.app.tick_ci_watch();
         self.app.tick_toast();
     }
 
@@ -438,8 +434,9 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
     let mut server = Server::new(Daemon::new(app));
 
     while server.running {
-        // 1) wait for events; once one lands, keep draining until the burst
-        //    goes quiet (COALESCE) so it yields a single snapshot below.
+        // 1) wait for events; once one lands, drain whatever else is already
+        //    queued (no waiting for more) so an already-formed burst yields
+        //    a single snapshot below, without delaying a lone event.
         match rx.recv_timeout(TICK) {
             Ok(ev) => {
                 server.handle_event(ev);
@@ -467,20 +464,18 @@ pub fn serve(sock: &Path, app: App) -> Result<()> {
     Ok(())
 }
 
-/// Drains a burst of events until it goes quiet (COALESCE) or the cap is hit.
-/// The cap keeps a continuous stream (key auto-repeat, chatty client) from
-/// starving `tick()` and the broadcasts indefinitely.
+/// Drains events already queued, without waiting for more — a burst that
+/// arrived together (already sitting in the channel) still yields a single
+/// snapshot below, but a lone event pays no artificial delay. The cap keeps
+/// a truly continuous stream (key auto-repeat, chatty client) from starving
+/// `tick()` and the broadcasts indefinitely.
 fn drain_burst(rx: &std::sync::mpsc::Receiver<Event>, server: &mut Server) {
     let deadline = Instant::now() + COALESCE_CAP;
-    while server.running {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        match rx.recv_timeout(COALESCE.min(deadline - now)) {
+    while server.running && Instant::now() < deadline {
+        match rx.try_recv() {
             Ok(ev) => server.handle_event(ev),
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
                 server.running = false;
             }
         }

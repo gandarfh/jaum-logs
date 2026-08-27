@@ -187,13 +187,16 @@ fn actions_map_to_intents() {
     assert_eq!(map_key(&ctx, ch('2')), Some(Intent::SetTab { index: 1 }));
     assert_eq!(map_key(&ctx, ch('z')), Some(Intent::ToggleZoom));
     assert_eq!(map_key(&ctx, ch('p')), Some(Intent::Play));
-    // `r` no longer triggers a manual verdict: CI runs it automatically now
+    // `r`/`R`/`H` are unbound: the Review flow was removed and its keys were not reused.
     assert_eq!(map_key(&ctx, ch('r')), None);
-    assert_eq!(map_key(&ctx, ch('R')), Some(Intent::ReviewChat));
-    assert_eq!(map_key(&ctx, ch('H')), Some(Intent::Handoff));
+    assert_eq!(map_key(&ctx, ch('R')), None);
+    assert_eq!(map_key(&ctx, ch('H')), None);
     assert_eq!(map_key(&ctx, ch('f')), Some(Intent::Finish));
-    assert_eq!(map_key(&ctx, ch('i')), Some(Intent::Ingest));
-    assert_eq!(map_key(&ctx, ch('a')), Some(Intent::AnalyzeParallel));
+    // `a` is unbound: the Parallel flow was removed and its key was not reused.
+    assert_eq!(map_key(&ctx, ch('a')), None);
+    // `i`/`N` are unbound: the Ingest flow was removed and its keys were not reused.
+    assert_eq!(map_key(&ctx, ch('i')), None);
+    assert_eq!(map_key(&ctx, ch('N')), None);
     assert_eq!(map_key(&ctx, ch('S')), Some(Intent::StartSetup));
     assert_eq!(map_key(&ctx, ch('P')), Some(Intent::OpenPicker));
     assert_eq!(map_key(&ctx, ch('e')), Some(Intent::EditConventions));
@@ -208,13 +211,6 @@ fn actions_map_to_intents() {
         map_key(&ctx, ch('n')),
         Some(Intent::StartInput {
             kind: InputKind::NewTask,
-            prefill: String::new()
-        })
-    );
-    assert_eq!(
-        map_key(&ctx, ch('N')),
-        Some(Intent::StartInput {
-            kind: InputKind::NewTaskClaude,
             prefill: String::new()
         })
     );
@@ -276,15 +272,10 @@ fn ctx_from_snapshot_reads_ui_mode() {
     assert!(ctx.chat_live, "selected card is a live session");
     assert!(ctx.has_task);
 
-    // selecting the verdict card kills chat_live
-    snap.board.card_selected = 1;
-    let ctx = KeyCtx::from_snapshot(&snap);
-    assert!(!ctx.chat_live);
-
     // a cursor past the last card clamps to it (mirrors selected_card)
     snap.board.card_selected = 9;
     let ctx = KeyCtx::from_snapshot(&snap);
-    assert!(!ctx.chat_live);
+    assert!(ctx.chat_live, "clamped to the only (live) card");
 
     // the project row has no task
     snap.board.project_selected = true;
